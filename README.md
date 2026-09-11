@@ -1,18 +1,18 @@
-# Crazyswarm CTBR 多机控制
+# Crazyswarm 单机 CTBR 控制
 
-本仓库基于 Crazyswarm，增加了面向 Crazyflie 的主机端 CTBR（Collective Thrust and Body Rates）控制流程。当前任务使用 NOKOV 动捕提供外部位置和姿态，使用 Crazyflie 固件 EKF 回传的平移速度和加速度参与控制，可通过一条 Crazyradio 管理多架飞机。
+本仓库基于 Crazyswarm，当前配置用于通过一条 Crazyradio 控制一架 Crazyflie 执行主机端 CTBR（Collective Thrust and Body Rates）圆周轨迹。NOKOV 动捕提供实时位置和姿态，Crazyflie 固件 EKF 回传速度和加速度，主机端控制器计算并发送总推力和机体角速度。
 
-## 项目结构
+## 主要文件
 
-主要文件位于 `ros_ws/src/crazyswarm`：
+文件位于 `ros_ws/src/crazyswarm`：
 
-- `config/ctbr_controller.yaml`：全局调度参数、公共轨迹参数，以及每架飞机的质量、推力标定和 PID 参数。
-- `launch/crazyflies.yaml`：飞机 ID、radio URI、`ctbr_enabled` 和轨迹相位等身份配置。
-- `launch/hover_swarm.launch`：启动 Crazyswarm server、NOKOV、EKF 日志和无线通信配置。
-- `launch/ctbr_controller.launch`：启动 CTBR 控制器、Path 发布和实时绘图。
-- `scripts/ctbr_controller.py`：多机 CTBR 控制器、状态机、CSV 日志和安全保护。
-- `scripts/ctbr_trajectory.py`：圆周和三机等边编队连续八字轨迹。
-- `scripts/ctbr_visualization.py`：读取 CSV 并绘制位置、误差、姿态、速度、加速度和 CTBR 输出。
+- `config/ctbr_controller.yaml`：单机 CTBR、圆周轨迹、起飞/降落和绘图参数。
+- `launch/crazyflies.yaml`：当前飞机的 ID、radio URI、`ctbr_enabled` 和 Crazyswarm 机型配置。
+- `launch/hover_swarm.launch`：启动 Crazyswarm server、NOKOV、固件 EKF 和电池日志。
+- `launch/ctbr_controller.launch`：启动 CTBR 控制器、RViz Path 和实时绘图。
+- `scripts/ctbr_controller.py`：状态机、CTBR 控制律、CSV 日志和安全保护。
+- `scripts/ctbr_trajectory.py`：单机圆周参考轨迹。
+- `scripts/ctbr_visualization.py`：读取 CSV 并绘制控制结果。
 - `scripts/ctbr_logs/`：控制器生成的 CSV 日志目录。
 
 ## 编译
@@ -23,43 +23,51 @@ catkin_make
 source devel/setup.bash
 ```
 
-首次使用或修改消息、C++ 节点后需要重新执行 `catkin_make`。Python 控制器修改后只需重启对应 launch。
+修改消息或 C++ 节点后需要重新执行 `catkin_make`。只修改 Python、YAML 或 launch 文件时，重启对应节点即可。
 
-## 飞机配置
+## 当前飞机配置
 
-在 `ros_ws/src/crazyswarm/launch/crazyflies.yaml` 中为每架飞机配置唯一的 `id` 和 radio `uri`：
+当前 `ros_ws/src/crazyswarm/launch/crazyflies.yaml` 只启用 CF4：
 
 ```yaml
+crazyflies:
 - channel: 80
   id: 4
   uri: "radio://0/80/2M/E7E7E7E704"
   ctbr_enabled: true
-  orbit_phase_rad: 2.0943951023931953
-  orbit_yaw_mode: face_partner
+  initialPosition: [1.5, 1.5, 0.0]
+  type: default
 ```
 
-只有 `ctbr_enabled: true` 的条目参加 CTBR 任务。飞机数量必须与 `ctbr_controller.yaml` 中的 `takeoff_vehicle_count` 一致，并且每个启用的 ID 都必须存在对应的 `ctbr_controller_cf<ID>` 参数块。
+`ctbr_enabled: true` 的唯一条目就是 CTBR 控制对象。真实飞行中的位置和姿态来自 NOKOV；`initialPosition` 只供 Crazyswarm 物体跟踪的初始猜测或仿真使用，不会替代动捕状态。`type` 仍由 Crazyswarm server 用于机型和默认配置选择。
 
-`initialPosition` 和 `type` 仍是 Crazyswarm 通用配置字段：真实飞行位置和姿态来自 NOKOV，`initialPosition` 不会替代动捕状态；`type` 主要用于 Crazyswarm 的机型/默认参数选择，不是 CTBR PID 参数来源。
+如需更换飞机，只需修改该文件中的 `id` 和 `uri`，并确保 NOKOV 中的刚体名称与控制器配置一致。单机模式下不要同时保留多个 `ctbr_enabled: true` 条目。
 
 ## 参数配置
 
-`ctbr_controller.yaml` 分为三层：
+当前参数集中在 `ros_ws/src/crazyswarm/config/ctbr_controller.yaml` 的 `ctbr_controller` 下，主要包括：
 
-1. `ctbr_controller`：控制频率、EKF/NOKOV 有效性检查、电压预检、日志和安全阈值。
-2. `ctbr_trajectory`：轨迹模式、圆心、半径、编队边长、八字半径、速度、高度和起降时间。
-3. `ctbr_controller_cf<ID>`：该飞机的质量、推力标定、位置/速度/积分增益、姿态增益和角速度限制。
+- `target_confirmed`：真实飞行确认开关，由 launch 命令传入。
+- `control_rate_hz`：CTBR 控制循环频率，当前为 90 Hz。
+- `ekf_kinematics_weight`：EKF 速度/加速度参与比例，当前为 1.0。
+- `mass_kg`、`max_command_thrust_newton`：质量和推力标定参数。
+- `position_gain`、`velocity_gain`、`integral_gain`：位置 PID 参数。
+- `attitude_gain`、`attitude_integral_gain`：姿态环参数。
+- `mocap_velocity_filter_cutoff_hz`、`ekf_velocity_filter_cutoff_hz`：速度滤波参数。
 
-当前支持的轨迹模式：
+轨迹参数也在同一配置块中：
 
-- `circle`：圆周轨迹。
-- `figure_eight_triangle`：多架飞机保持等边三角形编队，整体连续绕八字；通过 `orbit_phase_rad` 分配编队顶点。八字交叉处不中停。
+- 圆心相对起飞点偏移：`circle_center_offset_x/y`。
+- 圆周半径：`circle_radius_m`。
+- 圈数和角速度：`circle_revolutions`、`circle_angular_speed_radps`。
+- 起飞高度：`takeoff_height_m`，当前为相对 NOKOV 起点上升 1 m。
+- 起飞、入口、悬停和降落时间：对应的 `*_duration_s`、`final_hover_s` 参数。
 
-新增飞机时，需要同时完成三处配置：在 `crazyflies.yaml` 增加启用条目，在 `ctbr_controller.yaml` 增加同 ID 的参数块，并更新 `takeoff_vehicle_count`。不需要修改 Python 源码。
+当前轨迹流程为：起飞前保持、垂直上升、高度校正、平滑进入圆周、完成一圈、终点悬停、垂直降落。
 
 ## 运行
 
-先启动 Crazyswarm server、NOKOV 和 EKF 日志：
+先启动 Crazyswarm server、NOKOV 和固件日志：
 
 ```bash
 roslaunch crazyswarm hover_swarm.launch
@@ -68,54 +76,52 @@ roslaunch crazyswarm hover_swarm.launch
 再启动 CTBR 控制器。真实飞行必须显式确认：
 
 ```bash
-roslaunch crazyswarm ctbr_controller.launch \
-  target_confirmed:=true
+roslaunch crazyswarm ctbr_controller.launch target_confirmed:=true
 ```
 
-只检查参数、话题或绘图时，不发送控制输出：
+只检查参数、NOKOV 状态或绘图而不允许真实控制输出：
 
 ```bash
 roslaunch crazyswarm ctbr_controller.launch \
   target_confirmed:=false enable_realtime_visualization:=false
 ```
 
-`target_confirmed` 未设为 `true` 时，控制器拒绝真实推力输出。起飞前控制器会等待启用飞机的 EKF 与 NOKOV 位置连续对齐，并进行一次电池电压预检。EKF 状态持续失效、NOKOV 状态失效或通信超时会触发受控降落或全局中止。
+控制器启动后会等待有效 NOKOV 状态、EKF 与 NOKOV 位置对齐以及一次电池电压预检。状态失效、通信超时或 EKF 持续异常时，会停止正常轨迹并进入受控降落或中止保护。
 
-## 数据来源和控制逻辑
+## 状态来源和控制方式
 
-- NOKOV：位置 `p` 和姿态 `R_WB`。
-- Crazyflie EKF：平移速度和加速度；控制器对速度进行因果二阶低通，并由滤波结果得到加速度。
-- CTBR 外环：根据轨迹位置、速度、加速度和 jerk 计算期望合力，再生成期望姿态和机体角速度。
-- 每架飞机使用自己的 `ctbr_controller_cf<ID>` 标定和 PID 参数。
+- NOKOV：位置 `p` 和姿态旋转矩阵 `R_WB`。
+- EKF：速度和加速度；主机端对 EKF 速度进行因果二阶低通，并由滤波结果得到加速度。
+- CTBR：根据位置、速度、积分误差、参考加速度和 jerk 计算期望合力，再生成期望姿态、角速度和总推力。
 
-控制器不会把 `crazyflies.yaml` 的 `initialPosition` 当作实时状态。`R_WB` 使用 NOKOV 姿态；EKF 与 NOKOV 位置持续失配时，不再使用不可信的 EKF 平移运动学，并进入保持、降落或中止保护流程。
+控制器不使用 `initialPosition` 作为实时状态，也不使用 NOKOV 原始速度/加速度直接闭环。姿态 `R_WB` 保持使用 NOKOV 数据。
 
 ## CSV 日志和绘图
 
-控制器日志保存到：
+日志目录：
 
 ```text
 ros_ws/src/crazyswarm/scripts/ctbr_logs/
 ```
 
-多机日志包含 `vehicle_id`，同一个 CSV 可按 CF2、CF4、CF5 等飞机分别绘图。启动 launch 时默认开启实时绘图；也可以离线绘制最新日志：
+单机日志文件通常命名为 `cf4_ctbr_YYYYMMDD_HHMMSS.csv`，包含状态、目标、位置/速度误差、姿态误差、期望合力、推力、角速度、EKF 状态和滤波状态等字段。
+
+离线绘制指定 CSV：
 
 ```bash
 python3 ros_ws/src/crazyswarm/scripts/ctbr_visualization.py \
-  --log ros_ws/src/crazyswarm/scripts/ctbr_logs/<log>.csv
+  ros_ws/src/crazyswarm/scripts/ctbr_logs/cf4_ctbr_<timestamp>.csv
 ```
 
-可视化内容包括位置轨迹、位置误差、姿态跟踪、姿态误差、速度、动捕/滤波加速度和 CTBR 输出。RViz 中的 `nav_msgs/Path` 由控制器按飞机 ID 发布，可用于查看各机实际路径。
+实时绘图由 `ctbr_controller.launch` 默认启动，也可通过 `enable_realtime_visualization:=false` 关闭。绘图包括位置轨迹、位置误差、姿态跟踪、姿态误差、速度、加速度和 CTBR 输出。控制器同时发布 `nav_msgs/Path`，可在 RViz 中查看实际路径。
 
-## 安全检查
+## 飞行前检查
 
-真实飞行前确认：
+- NOKOV 已识别 CF4 刚体，且位置、姿态坐标系正确。
+- `crazyflies.yaml` 中的 radio URI 与实际飞机一致。
+- 电池电压高于 `preflight_min_voltage_v`。
+- 螺旋桨、电机和机架安装正常，飞行区域无障碍物。
+- 首次测试先使用 `target_confirmed:=false` 检查状态和参数。
+- 真正起飞时保持单个 `ctbr_enabled: true`，并确认急停方式可用。
 
-- NOKOV 已识别所有刚体，名称/ID 与 `crazyflies.yaml` 一致。
-- 每个 radio URI 唯一，且使用同一 channel。
-- `ctbr_enabled` 数量与 `takeoff_vehicle_count` 一致。
-- 每个启用 ID 都有完整的 `ctbr_controller_cf<ID>` 参数块。
-- 已确认起飞区域、螺旋桨安装、电池电压和急停方式。
-- 首次调参使用较低轨迹速度，并保留 `target_confirmed:=false` 做空载检查。
-
-本项目仍保留上游 Crazyswarm 的通用 API 和仿真能力。上游文档见 [Crazyswarm documentation](https://crazyswarm.readthedocs.io/en/latest/)，新项目也可参考 [Crazyswarm2](https://imrclab.github.io/crazyswarm2/)。
+本项目保留上游 Crazyswarm 的通用 API 和仿真能力。通用文档见 [Crazyswarm documentation](https://crazyswarm.readthedocs.io/en/latest/)。
