@@ -24,14 +24,7 @@ import warnings
 
 import yaml
 
-from vehicle_config import (
-    load_vehicle_entries,
-    load_vehicle_entry,
-    select_vehicle_entries,
-    select_vehicle_entry,
-    validate_vehicle_entries,
-    vehicle_uri,
-)
+from vehicle_config import load_vehicle_entry, select_vehicle_entry, vehicle_uri
 
 # 抑制 cflib 内部异常堆栈噪音（例如找不到 Crazyradio 时的冗长 traceback）。
 logging.getLogger("cflib").setLevel(logging.CRITICAL)
@@ -313,7 +306,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--cf-id", type=int, default=None,
-        help="按 id 选择单架飞机；省略时处理所有 ctbr_enabled=true 的飞机",
+        help="按 id 选择飞机；省略时选择唯一 ctbr_enabled=true 的飞机",
     )
     parser.add_argument(
         "--uri", default=None,
@@ -373,79 +366,35 @@ def _do_arm(args, crtp, SyncCrazyflie, LogConfig) -> int:
         return send_and_confirm(scf.cf, args.arm, args.timeout, LogConfig)
 
 
-def _selected_vehicles(args):
-    """Return the configured vehicles affected by this ARM/DISARM action."""
-    if args.cf_id is not None or args.uri is not None:
-        if args.uri is not None and args.cf_id is None:
-            raise ValueError("在多机配置下使用 --uri 时必须同时指定 --cf-id")
-        vehicle = load_vehicle_entry(args.config, cf_id=args.cf_id)
-        return [vehicle]
-    vehicles = load_vehicle_entries(args.config, ctbr_only=True)
-    return validate_vehicle_entries(
-        vehicles, require_ctbr=False, min_ctbr=1,
-        require_shared_radio=True, require_phase=False,
-    )
-
-
 def main() -> int:
     args = build_parser().parse_args()
     try:
-        vehicles = _selected_vehicles(args)
+        vehicle = load_vehicle_entry(args.config, cf_id=args.cf_id)
     except (OSError, TypeError, ValueError) as exc:
         print(f"错误：读取飞机参数失败：{exc}", file=sys.stderr)
         return 1
+    if args.uri is None:
+        args.uri = str(vehicle["uri"])
+    if args.rigid_body is None:
+        args.rigid_body = str(vehicle.get("rigid_body", "cf%d" % int(vehicle["id"])))
     crtp, Crazyflie, SyncCrazyflie, LogConfig = import_cflib()
 
-    armed = []
+    mocap = None
+    if args.require_mocap:
+        mocap = NokovPoseCheck(args.server_ip, args.rigid_body, args.mocap_timeout)
+        try:
+            mocap.connect()
+            x, y, z = mocap.require_pose()
+            print(f"NOKOV 位姿有效：pos=({x:.3f},{y:.3f},{z:.3f})m", flush=True)
+        finally:
+            mocap.close()
+
     try:
-        for vehicle in vehicles:
-            uri = str(args.uri or vehicle_uri(vehicle))
-            rigid_body = str(
-                args.rigid_body or vehicle.get("rigid_body", "cf%d" % int(vehicle["id"]))
-            )
-            if args.require_mocap:
-                mocap = NokovPoseCheck(args.server_ip, rigid_body, args.mocap_timeout)
-                try:
-                    mocap.connect()
-                    x, y, z = mocap.require_pose()
-                    print(
-                        "cf%d NOKOV 位姿有效：pos=(%.3f,%.3f,%.3f)m" %
-                        (int(vehicle["id"]), x, y, z),
-                        flush=True,
-                    )
-                finally:
-                    mocap.close()
-            action_args = argparse.Namespace(**vars(args))
-            action_args.uri = uri
-            _run_with_deadline(
-                lambda action_args=action_args: _do_arm(
-                    action_args, crtp, SyncCrazyflie, LogConfig
-                ),
-                args.total_timeout,
-            )
-            if args.arm:
-                armed.append(vehicle)
-            print(
-                "cf%d %s 完成：%s" %
-                (int(vehicle["id"]), "ARM" if args.arm else "DISARM", uri),
-                flush=True,
-            )
+        _run_with_deadline(
+            lambda: _do_arm(args, crtp, SyncCrazyflie, LogConfig),
+            args.total_timeout,
+        )
     except BaseException as exc:
-        # If one aircraft fails to ARM, do not leave earlier aircraft armed.
-        if args.arm and armed:
-            for vehicle in reversed(armed):
-                cleanup_args = argparse.Namespace(**vars(args))
-                cleanup_args.arm = False
-                cleanup_args.uri = vehicle_uri(vehicle)
-                try:
-                    _run_with_deadline(
-                        lambda cleanup_args=cleanup_args: _do_arm(
-                            cleanup_args, crtp, SyncCrazyflie, LogConfig
-                        ),
-                        args.total_timeout,
-                    )
-                except BaseException:
-                    pass
         # cflib 的异常消息里可能带完整 traceback 文本，只打印第一行。
         message = str(exc).splitlines()[0] if str(exc) else str(exc)
         print(f"错误：{message}", file=sys.stderr)

@@ -28,7 +28,6 @@
 #include "sensor_msgs/Temperature.h"
 #include "sensor_msgs/MagneticField.h"
 #include "std_msgs/Float32.h"
-#include "std_msgs/UInt16.h"
 
 #include <sensor_msgs/Joy.h>
 #include <sensor_msgs/PointCloud.h>
@@ -393,7 +392,6 @@ public:
     m_subscribeCmdVelocityWorld = n.subscribe(tf_prefix + "/cmd_velocity_world", 1, &CrazyflieROS::cmdVelocityWorldSetpoint, this);
     m_subscribeCmdStop = n.subscribe(m_tf_prefix + "/cmd_stop", 1, &CrazyflieROS::cmdStop, this);
     m_subscribeCmdCtbr = n.subscribe(m_tf_prefix + "/cmd_ctbr", 1, &CrazyflieROS::cmdCtbrChanged, this);
-    m_pubCtbrRawThrust = n.advertise<std_msgs::UInt16>(m_tf_prefix + "/ctbr_raw_thrust", 10);
     m_pubMocapState = n.advertise<crazyswarm::MocapState>(m_tf_prefix + "/mocap_state", 10);
     m_ctbrWatchdogTimer = n.createTimer(
       ros::Duration(0.02), &CrazyflieROS::ctbrWatchdogCallback, this);
@@ -732,9 +730,6 @@ public:
     // The legacy commander requires a zero-thrust packet before thrust is accepted.
     if (!m_ctbrThrustUnlocked) {
       m_cf.sendSetpoint(0.0f, 0.0f, 0.0f, 0);
-      std_msgs::UInt16 rawThrustMessage;
-      rawThrustMessage.data = 0;
-      m_pubCtbrRawThrust.publish(rawThrustMessage);
       m_ctbrThrustUnlocked = true;
       return;
     }
@@ -768,9 +763,6 @@ public:
       static_cast<float>(m_ctbrPitchSign * radToDeg(clampedPitchRate)),
       static_cast<float>(m_ctbrYawSign * radToDeg(clampedYawRate)),
       rawThrust);
-    std_msgs::UInt16 rawThrustMessage;
-    rawThrustMessage.data = rawThrust;
-    m_pubCtbrRawThrust.publish(rawThrustMessage);
     m_ctbrLastCommand = now;
     m_ctbrCommandActive = true;
   }
@@ -1025,9 +1017,6 @@ private:
   void sendCtbrZero()
   {
     m_cf.sendSetpoint(0.0f, 0.0f, 0.0f, 0);
-    std_msgs::UInt16 rawThrustMessage;
-    rawThrustMessage.data = 0;
-    m_pubCtbrRawThrust.publish(rawThrustMessage);
     m_ctbrCommandActive = false;
   }
 
@@ -1141,7 +1130,6 @@ private:
   ros::Subscriber m_subscribeCmdVelocityWorld;
   ros::Subscriber m_subscribeCmdStop;
   ros::Subscriber m_subscribeCmdCtbr;
-  ros::Publisher m_pubCtbrRawThrust;
 
   ros::Subscriber m_subscribeCmdHover; // Hover vel subscriber
 
@@ -1199,8 +1187,7 @@ public:
     const std::vector<crazyswarm::LogBlock>& logBlocks,
     std::string interactiveObject,
     bool writeCSVs,
-    bool sendPositionOnly,
-    double externalPoseRateHz
+    bool sendPositionOnly
     )
     : m_cfs()
     , m_tracker(nullptr)
@@ -1214,8 +1201,6 @@ public:
     , m_br()
     , m_interactiveObject(interactiveObject)
     , m_sendPositionOnly(sendPositionOnly)
-    , m_externalPoseRateHz(std::max(0.0, externalPoseRateHz))
-    , m_lastExternalPoseSendTime()
     , m_outputCSVs()
     , m_phase(0)
     , m_phaseStart()
@@ -1340,26 +1325,17 @@ public:
 
     {
       auto start = std::chrono::high_resolution_clock::now();
-      const bool poseRateLimited = m_externalPoseRateHz > 0.0;
-      const bool posePeriodElapsed = !poseRateLimited ||
-        m_lastExternalPoseSendTime == std::chrono::steady_clock::time_point() ||
-        std::chrono::duration<double>(
-          mocapSampleTime - m_lastExternalPoseSendTime).count() >=
-          1.0 / m_externalPoseRateHz;
-      if (posePeriodElapsed && !states.empty()) {
-        if (!m_sendPositionOnly) {
-          m_cfbc.sendExternalPoses(states);
-        } else {
-          std::vector<CrazyflieBroadcaster::externalPosition> positions(states.size());
-          for (size_t i = 0; i < positions.size(); ++i) {
-            positions[i].id = states[i].id;
-            positions[i].x  = states[i].x;
-            positions[i].y  = states[i].y;
-            positions[i].z  = states[i].z;
-          }
-          m_cfbc.sendExternalPositions(positions);
+      if (!m_sendPositionOnly) {
+        m_cfbc.sendExternalPoses(states);
+      } else {
+        std::vector<CrazyflieBroadcaster::externalPosition> positions(states.size());
+        for (size_t i = 0; i < positions.size(); ++i) {
+          positions[i].id = states[i].id;
+          positions[i].x  = states[i].x;
+          positions[i].y  = states[i].y;
+          positions[i].z  = states[i].z;
         }
-        m_lastExternalPoseSendTime = mocapSampleTime;
+        m_cfbc.sendExternalPositions(positions);
       }
       auto end = std::chrono::high_resolution_clock::now();
       std::chrono::duration<double> elapsedSeconds = end-start;
@@ -1741,8 +1717,6 @@ private:
   tf::TransformBroadcaster m_br;
   latency m_latency;
   bool m_sendPositionOnly;
-  double m_externalPoseRateHz;
-  std::chrono::steady_clock::time_point m_lastExternalPoseSendTime;
   std::vector<std::unique_ptr<std::ofstream>> m_outputCSVs;
   int m_phase;
   std::chrono::high_resolution_clock::time_point m_phaseStart;
@@ -1849,7 +1823,6 @@ public:
     bool printLatency;
     bool writeCSVs;
     bool sendPositionOnly;
-    double externalPoseRateHz;
     std::string motionCaptureType;
 
     ros::NodeHandle nl("~");
@@ -1865,8 +1838,6 @@ public:
     nl.param<int>("broadcasting_num_repeats", m_broadcastingNumRepeats, 15);
     nl.param<int>("broadcasting_delay_between_repeats_ms", m_broadcastingDelayBetweenRepeatsMs, 1);
     nl.param<bool>("send_position_only", sendPositionOnly, false);
-    nl.param<double>("external_pose_rate_hz", externalPoseRateHz, 0.0);
-    externalPoseRateHz = std::max(0.0, externalPoseRateHz);
 
     // tilde-expansion
     wordexp_t wordexp_result;
@@ -1954,8 +1925,7 @@ public:
                 logBlocks,
                 interactiveObject,
                 writeCSVs,
-                sendPositionOnly,
-                externalPoseRateHz);
+                sendPositionOnly);
             },
             channel,
             r

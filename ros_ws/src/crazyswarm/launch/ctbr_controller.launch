@@ -4,7 +4,7 @@
   <arg name="enable_realtime_visualization" default="true" /> <!-- 是否随控制器启动实时绘图。设为 false 可关闭。 -->
 
   <!-- 控制器、绘图和 Path 参数统一从 YAML 加载；target_confirmed 由命令行显式确认。 -->
-  <!-- 与 hover_swarm 使用同一份飞机参数；控制器管理全部 ctbr_enabled=true 的条目。 -->
+  <!-- 与 hover_swarm 使用同一份飞机参数；控制器自动选择唯一 ctbr_enabled=true 的条目。 -->
   <rosparam file="$(find crazyswarm)/launch/crazyflies.yaml" command="load" />
   <rosparam file="$(find crazyswarm)/config/ctbr_controller.yaml" command="load" subst_value="true" />
 

@@ -53,7 +53,6 @@ def _config(**overrides):
         "circle_max_tilt_rad": math.radians(10.0),
         "landing_max_tilt_rad": math.radians(5.0),
         "takeoff_min_collective_thrust": 0.0,
-        "airborne_min_collective_thrust": 0.0,
     }
     values.update(overrides)
     return CircularTrajectoryConfig(**values)
@@ -257,45 +256,6 @@ def test_height_correction_tracks_target_altitude_without_waiting_for_gate():
     assert math.isclose(circle_target["acceleration"][2], 0.0, abs_tol=1e-12)
 
 
-def test_emergency_landing_starts_from_current_position_and_never_releases_thrust_high():
-    trajectory = CircularFlightTrajectory(_config(airborne_min_collective_thrust=0.3))
-    start = np.array([0.0, 0.0, 0.2])
-    trajectory.reset(start, start_yaw=0.3, now=0.0)
-    current = np.array([0.4, -0.2, 1.1])
-    trajectory.begin_emergency_landing(
-        now=2.0, position=current, yaw=0.6, reason="test"
-    )
-    state = {"position": current.copy(), "velocity": np.zeros(3)}
-    target = trajectory.evaluate(state, now=2.0)
-
-    assert target["flight_phase"] == "emergency_landing"
-    assert np.allclose(target["position"], current)
-    assert math.isclose(target["min_collective_thrust"], 0.3)
-    assert not target.get("zero_output", False)
-
-    end_time = 2.0 + trajectory.active_landing_duration_s + 0.01
-    target = trajectory.evaluate(state, now=end_time)
-    assert not target.get("zero_output", False)
-    state["position"][2] = trajectory.landing_target_position[2]
-    target = trajectory.evaluate(state, now=end_time)
-    assert target["zero_output"] is True
-
-
-def test_airborne_minimum_thrust_remains_active_after_takeoff_overshoot():
-    trajectory = CircularFlightTrajectory(_config(airborne_min_collective_thrust=0.3))
-    start = np.array([0.0, 0.0, 0.2])
-    trajectory.reset(start, start_yaw=0.0, now=0.0)
-    high_state = {"position": np.array([0.0, 0.0, 2.0]), "velocity": np.zeros(3)}
-
-    takeoff = trajectory._takeoff_target(0.02, high_state)
-    entry = trajectory._entry_target(0.02)
-    circle = trajectory._circle_target(0.02)
-    landing = trajectory._landing_target(0.02)
-
-    for target in (takeoff, entry, circle, landing):
-        assert math.isclose(target["min_collective_thrust"], 0.3)
-
-
 def test_circle_entry_and_final_hover_boundaries_are_position_continuous():
     trajectory = CircularFlightTrajectory(_config())
     _initialize_circle(trajectory)
@@ -315,101 +275,6 @@ def test_circle_entry_and_final_hover_boundaries_are_position_continuous():
     assert np.allclose(circle_end["position"], final_hover["position"], atol=1e-9)
     assert np.allclose(circle_end["velocity"], final_hover["velocity"], atol=1e-9)
     assert np.allclose(circle_end["acceleration"], final_hover["acceleration"], atol=1e-9)
-
-
-def test_figure_eight_triangle_keeps_side_length_and_faces_formation_centroid():
-    """三台机的相位顶点保持 0.5 m 等边三角形，并始终朝向实时质心。"""
-    phases = (0.0, 2.0 * math.pi / 3.0, 4.0 * math.pi / 3.0)
-    trajectories = []
-    for phase in phases:
-        trajectory = CircularFlightTrajectory(_config(
-            trajectory_mode="figure_eight_triangle",
-            circle_center_xy=np.array([0.0, 0.0]),
-            formation_side_length_m=0.5,
-            figure_eight_radius_m=0.8,
-            figure_eight_angular_speed_radps=1.0,
-            orbit_phase_rad=phase,
-        ))
-        trajectory.reset(np.array([0.4, -0.3, 0.2]), start_yaw=0.0, now=0.0)
-        trajectories.append(trajectory)
-
-    lobe_duration = trajectories[0].figure_eight_lobe_duration_s
-    for elapsed in np.linspace(0.0, 2.0 * lobe_duration, 13):
-        targets = [trajectory._figure_eight_target(float(elapsed))
-                   for trajectory in trajectories]
-        positions = np.asarray([target["position"] for target in targets])
-        centroid = np.mean(positions, axis=0)
-
-        for first, second in ((0, 1), (1, 2), (2, 0)):
-            assert math.isclose(
-                np.linalg.norm(positions[first] - positions[second]), 0.5,
-                rel_tol=1e-10, abs_tol=1e-10,
-            )
-        for target in targets:
-            expected_yaw = math.atan2(
-                centroid[1] - target["position"][1],
-                centroid[0] - target["position"][0],
-            )
-            assert math.isclose(
-                math.atan2(
-                    math.sin(target["yaw"] - expected_yaw),
-                    math.cos(target["yaw"] - expected_yaw),
-                ),
-                0.0,
-                abs_tol=1e-10,
-            )
-            assert math.isclose(target["yaw_rate"], 0.0, abs_tol=1e-12)
-
-        # 刚性平移：三机的平动速度、加速度和 jerk 必须一致。
-        for key in ("velocity", "acceleration", "jerk"):
-            assert np.allclose(targets[0][key], targets[1][key], atol=1e-12)
-            assert np.allclose(targets[0][key], targets[2][key], atol=1e-12)
-
-
-def test_figure_eight_crossing_is_continuous_without_stopping():
-    trajectory = CircularFlightTrajectory(_config(
-        trajectory_mode="figure_eight_triangle",
-        circle_center_xy=np.array([0.0, 0.0]),
-        formation_side_length_m=0.5,
-        figure_eight_radius_m=0.8,
-        figure_eight_angular_speed_radps=1.0,
-    ))
-    trajectory.reset(np.array([0.0, 0.0, 0.2]), start_yaw=0.0, now=0.0)
-    lobe_duration = trajectory.figure_eight_lobe_duration_s
-    offset = trajectory.formation_offset
-
-    start = trajectory._figure_eight_target(0.0)
-    crossing = trajectory._figure_eight_target(lobe_duration)
-    end = trajectory._figure_eight_target(2.0 * lobe_duration)
-    before_crossing = trajectory._figure_eight_target(lobe_duration - 1.0e-4)
-    after_crossing = trajectory._figure_eight_target(lobe_duration + 1.0e-4)
-
-    assert np.allclose(start["position"], offset + np.array([0.0, 0.0, 1.2]))
-    assert np.allclose(crossing["position"], start["position"], atol=1e-10)
-    assert np.allclose(end["position"], start["position"], atol=1e-10)
-    # 原点交点不再像两个圆叶硬拼时那样停住。
-    assert np.linalg.norm(crossing["velocity"][:2]) > 0.01
-    assert np.allclose(
-        before_crossing["velocity"], after_crossing["velocity"], atol=1e-4
-    )
-    assert np.allclose(
-        before_crossing["acceleration"], after_crossing["acceleration"], atol=1e-4
-    )
-    # 仍覆盖左右两个叶瓣，且起点、终点平滑静止。
-    samples = [trajectory._figure_eight_target(float(elapsed)) for elapsed in np.linspace(
-        0.0, 2.0 * lobe_duration, 1001
-    )]
-    x_relative = [target["position"][0] - offset[0] for target in samples]
-    assert max(x_relative) > 0.79
-    assert min(x_relative) < -0.79
-    for target in (start, end):
-        assert np.allclose(target["velocity"], 0.0, atol=1e-10)
-        assert np.allclose(target["acceleration"], 0.0, atol=1e-10)
-
-    entry = trajectory._entry_target(float(trajectory.config.entry_duration_s))
-    assert np.allclose(entry["position"], start["position"], atol=1e-10)
-    assert np.allclose(entry["velocity"], start["velocity"], atol=1e-10)
-    assert np.allclose(entry["acceleration"], start["acceleration"], atol=1e-10)
 
 
 def test_smoothstep_helper_still_returns_zero_endpoint_derivatives():

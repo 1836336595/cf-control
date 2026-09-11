@@ -15,12 +15,10 @@
   <node pkg="crazyswarm" type="crazyswarm_server" name="crazyswarm_server" output="screen"
         launch-prefix="$(find crazyswarm)/scripts/cf_arm_wrapper.sh" >
     <rosparam>
-      # 服务端参数名虽然叫 frequency，实际值是日志周期 ms：25=40 Hz，100=10 Hz，
-      # 0=只采样一次。单 Crazyradio 三机 CTBR 时将 EKF 日志限定为 40 Hz，
-      # 为外部定位广播和 CTBR 指令留出链路预算；位置/速度六浮点数仍在同一 block。
-      # 计算方法 25 / 10 = 2 ， 2 × 10 ms = 20 ms 实际频率 = 50 Hz
+      # 服务端参数名虽然叫 frequency，实际值是日志周期 ms：10=100 Hz，100=10 Hz，
+      # 0=只采样一次。EKF 的位置/速度六浮点数必须放在同一个 block 内，保证同一时刻。
       genericLogTopics: ["ekf_kinematics", "battery"]
-      genericLogTopicFrequencies: [25, 0]
+      genericLogTopicFrequencies: [10, 0]
       genericLogTopic_ekf_kinematics_Variables:
         ["stateEstimate.x", "stateEstimate.y", "stateEstimate.z",
          "stateEstimate.vx", "stateEstimate.vy", "stateEstimate.vz"]
@@ -72,10 +70,7 @@
       # tracking
       motion_capture_type: "nokov" # one of none,vicon,optitrack,optitrack_closed_source,qualisys,vrpn,nokov
       object_tracking_type: "motionCapture" # one of motionCapture,libobjecttracker
-      # 保留 NOKOV 位置+四元数注入固件 EKF。三机完整 pose 每帧为 2 个广播包，
-      # 因此由服务端将它节流至 40 Hz；0 表示不节流。
-      send_position_only: False
-      external_pose_rate_hz: 40.0
+      send_position_only: False # set to False to send position+orientation; set to True to send position only
       motion_capture_host_name: "10.1.1.198"
       # motion_capture_interface_ip: "" # optional for optitrack with multiple interfaces
       save_point_clouds: "/dev/null" # set to a valid path to log mocap point cloud binary file.
