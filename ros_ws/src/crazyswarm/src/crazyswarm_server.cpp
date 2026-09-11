@@ -17,6 +17,8 @@
 #include "crazyswarm/StartTrajectory.h"
 #include "crazyswarm/SetGroupMask.h"
 #include "crazyswarm/FullState.h"
+#include "crazyswarm/CTBR.h"
+#include "crazyswarm/MocapState.h"
 #include "crazyswarm/Position.h"
 #include "crazyswarm/VelocityWorld.h"
 #include "std_srvs/Empty.h"
@@ -26,6 +28,7 @@
 #include "sensor_msgs/Temperature.h"
 #include "sensor_msgs/MagneticField.h"
 #include "std_msgs/Float32.h"
+#include "std_msgs/UInt16.h"
 
 #include <sensor_msgs/Joy.h>
 #include <sensor_msgs/PointCloud.h>
@@ -51,6 +54,9 @@
 #include <fstream>
 #include <future>
 #include <mutex>
+#include <algorithm>
+#include <chrono>
+#include <cmath>
 #include <wordexp.h> // tilde expansion
 
 /*
@@ -77,6 +83,183 @@ double degToRad(double deg) {
 double radToDeg(double rad) {
     return rad * 180.0 / pi();
 }
+
+class MocapStateEstimator
+{
+public:
+  MocapStateEstimator(float derivativeAlpha, float maxDt, float maxAbsPosition)
+    : m_derivativeAlpha(derivativeAlpha)
+    , m_maxDt(maxDt)
+    , m_maxAbsPosition(maxAbsPosition)
+    , m_hasPrevious(false)
+    , m_hasVelocity(false)
+    , m_hasAcceleration(false)
+  {
+    m_velocity.setZero();
+    m_angularVelocity.setZero();
+    m_acceleration.setZero();
+  }
+
+  void configure(float derivativeAlpha, float maxDt, float maxAbsPosition)
+  {
+    m_derivativeAlpha = std::max(0.0f, std::min(1.0f, derivativeAlpha));
+    m_maxDt = std::max(0.001f, maxDt);
+    m_maxAbsPosition = std::max(0.1f, maxAbsPosition);
+  }
+
+  void invalidate(crazyswarm::MocapState& msg)
+  {
+    reset();
+    msg.valid = false;
+    msg.derivatives_valid = false;
+  }
+
+  void update(
+    const libmotioncapture::RigidBody& rigidBody,
+    const std::chrono::steady_clock::time_point& sampleTime,
+    crazyswarm::MocapState& msg)
+  {
+    const Eigen::Vector3f position = rigidBody.position();
+    Eigen::Quaternionf rotation = rigidBody.rotation();
+
+    // Nokov reports a lost rigid body as approximately (9999.999, 9999.999,
+    // 9999.999). Those values are finite, so reject locations outside the
+    // configured motion-capture workspace before estimating derivatives.
+    if (!isFinite(position) || position.cwiseAbs().maxCoeff() > m_maxAbsPosition ||
+        !isFinite(rotation) || rotation.norm() < 1e-6f) {
+      invalidate(msg);
+      return;
+    }
+    rotation.normalize();
+
+    msg.valid = true;
+    msg.pose.position.x = position.x();
+    msg.pose.position.y = position.y();
+    msg.pose.position.z = position.z();
+    msg.pose.orientation.x = rotation.x();
+    msg.pose.orientation.y = rotation.y();
+    msg.pose.orientation.z = rotation.z();
+    msg.pose.orientation.w = rotation.w();
+
+    if (!m_hasPrevious) {
+      setPrevious(position, rotation, sampleTime);
+      msg.derivatives_valid = false;
+      return;
+    }
+
+    const double dt = std::chrono::duration<double>(sampleTime - m_previousTime).count();
+    if (!std::isfinite(dt) || dt <= 0.0 || dt > m_maxDt) {
+      reset();
+      setPrevious(position, rotation, sampleTime);
+      msg.derivatives_valid = false;
+      return;
+    }
+
+    const Eigen::Vector3f rawVelocity = (position - m_previousPosition) / dt;
+    Eigen::Quaternionf delta = m_previousRotation.conjugate() * rotation;
+    if (delta.w() < 0.0f) {
+      delta.coeffs() *= -1.0f;
+    }
+    const Eigen::Vector3f rawAngularVelocity = quaternionDeltaToBodyRate(delta, dt);
+
+    if (!m_hasVelocity) {
+      m_velocity = rawVelocity;
+      m_angularVelocity = rawAngularVelocity;
+      m_hasVelocity = true;
+    } else {
+      const Eigen::Vector3f previousVelocity = m_velocity;
+      m_velocity = filter(rawVelocity, m_velocity);
+      m_angularVelocity = filter(rawAngularVelocity, m_angularVelocity);
+
+      const Eigen::Vector3f rawAcceleration = (m_velocity - previousVelocity) / dt;
+      if (!m_hasAcceleration) {
+        m_acceleration = rawAcceleration;
+        m_hasAcceleration = true;
+      } else {
+        m_acceleration = filter(rawAcceleration, m_acceleration);
+      }
+    }
+
+    msg.twist.linear.x = m_velocity.x();
+    msg.twist.linear.y = m_velocity.y();
+    msg.twist.linear.z = m_velocity.z();
+    msg.twist.angular.x = m_angularVelocity.x();
+    msg.twist.angular.y = m_angularVelocity.y();
+    msg.twist.angular.z = m_angularVelocity.z();
+    msg.acceleration.x = m_acceleration.x();
+    msg.acceleration.y = m_acceleration.y();
+    msg.acceleration.z = m_acceleration.z();
+    msg.derivatives_valid = m_hasAcceleration;
+
+    setPrevious(position, rotation, sampleTime);
+  }
+
+private:
+  static bool isFinite(const Eigen::Vector3f& value)
+  {
+    return std::isfinite(value.x()) && std::isfinite(value.y()) && std::isfinite(value.z());
+  }
+
+  static bool isFinite(const Eigen::Quaternionf& value)
+  {
+    return std::isfinite(value.x()) && std::isfinite(value.y()) &&
+      std::isfinite(value.z()) && std::isfinite(value.w());
+  }
+
+  static Eigen::Vector3f quaternionDeltaToBodyRate(
+    const Eigen::Quaternionf& delta,
+    double dt)
+  {
+    const float sinHalfAngle = delta.vec().norm();
+    if (sinHalfAngle < 1e-6f) {
+      return 2.0f * delta.vec() / dt;
+    }
+
+    const float angle = 2.0f * std::atan2(sinHalfAngle, delta.w());
+    return delta.vec() * (angle / (sinHalfAngle * dt));
+  }
+
+  Eigen::Vector3f filter(
+    const Eigen::Vector3f& measurement,
+    const Eigen::Vector3f& previous) const
+  {
+    return m_derivativeAlpha * measurement + (1.0f - m_derivativeAlpha) * previous;
+  }
+
+  void reset()
+  {
+    m_hasPrevious = false;
+    m_hasVelocity = false;
+    m_hasAcceleration = false;
+    m_velocity.setZero();
+    m_angularVelocity.setZero();
+    m_acceleration.setZero();
+  }
+
+  void setPrevious(
+    const Eigen::Vector3f& position,
+    const Eigen::Quaternionf& rotation,
+    const std::chrono::steady_clock::time_point& sampleTime)
+  {
+    m_previousPosition = position;
+    m_previousRotation = rotation;
+    m_previousTime = sampleTime;
+    m_hasPrevious = true;
+  }
+
+  float m_derivativeAlpha;
+  float m_maxDt;
+  float m_maxAbsPosition;
+  bool m_hasPrevious;
+  bool m_hasVelocity;
+  bool m_hasAcceleration;
+  Eigen::Vector3f m_previousPosition;
+  Eigen::Quaternionf m_previousRotation;
+  std::chrono::steady_clock::time_point m_previousTime;
+  Eigen::Vector3f m_velocity;
+  Eigen::Vector3f m_angularVelocity;
+  Eigen::Vector3f m_acceleration;
+};
 
 void logWarn(const std::string& msg)
 {
@@ -141,13 +324,58 @@ public:
     , m_serviceSetGroupMask()
     , m_serviceNotifySetpointsStop()
     , m_logBlocks(log_blocks)
+    , m_mocapStateEstimator(0.2f, 0.1f, 10.0f)
+    , m_ctbrThrustUnlocked(false)
+    , m_ctbrCommandActive(false)
+    , m_ctbrMaxThrustNewton(1.176798)
+    , m_ctbrThrustCurveExponent(2.0)
+    , m_ctbrThrustRawScaleMin(0.90)
+    , m_ctbrThrustRawScaleMax(1.12)
+    , m_ctbrMaxBodyRateRadPerSec(6.0)
+    , m_ctbrCommandTimeout(0.1)
+    , m_ctbrRollSign(1.0)
+    , m_ctbrPitchSign(1.0)
+    , m_ctbrYawSign(-1.0)
     , m_initializedPosition(false)
   {
     ros::NodeHandle nl("~");
     nl.param("enable_logging", m_enableLogging, false);
+    // GenericLogData topics can be useful to another ROS node without also
+    // creating the legacy logcf<ID>.csv file in the server working directory.
+    nl.param("enable_generic_logging", m_enableGenericLogging, false);
     nl.param("enable_logging_pose", m_enableLoggingPose, false);
     nl.param("enable_parameters", m_enableParameters, true);
     nl.param("force_no_cache", m_forceNoCache, false);
+
+    double derivativeAlpha = 0.2;
+    double mocapStateMaxDt = 0.1;
+    double mocapStateMaxAbsPosition = 10.0;
+    nl.param("mocap_state_derivative_alpha", derivativeAlpha, derivativeAlpha);
+    nl.param("mocap_state_max_dt", mocapStateMaxDt, mocapStateMaxDt);
+    nl.param("mocap_state_max_abs_position_m", mocapStateMaxAbsPosition,
+      mocapStateMaxAbsPosition);
+    m_mocapStateEstimator.configure(
+      derivativeAlpha, mocapStateMaxDt, mocapStateMaxAbsPosition);
+
+    nl.param("ctbr_max_thrust_newton", m_ctbrMaxThrustNewton, m_ctbrMaxThrustNewton);
+    nl.param("ctbr_thrust_curve_exponent", m_ctbrThrustCurveExponent,
+      m_ctbrThrustCurveExponent);
+    nl.param("ctbr_thrust_raw_scale_min", m_ctbrThrustRawScaleMin,
+      m_ctbrThrustRawScaleMin);
+    nl.param("ctbr_thrust_raw_scale_max", m_ctbrThrustRawScaleMax,
+      m_ctbrThrustRawScaleMax);
+    nl.param("ctbr_max_body_rate_rad_per_sec", m_ctbrMaxBodyRateRadPerSec, m_ctbrMaxBodyRateRadPerSec);
+    nl.param("ctbr_command_timeout", m_ctbrCommandTimeout, m_ctbrCommandTimeout);
+    nl.param("ctbr_roll_sign", m_ctbrRollSign, m_ctbrRollSign);
+    nl.param("ctbr_pitch_sign", m_ctbrPitchSign, m_ctbrPitchSign);
+    nl.param("ctbr_yaw_sign", m_ctbrYawSign, m_ctbrYawSign);
+    m_ctbrMaxThrustNewton = std::max(0.0, m_ctbrMaxThrustNewton);
+    m_ctbrThrustCurveExponent = std::max(0.1, m_ctbrThrustCurveExponent);
+    m_ctbrThrustRawScaleMin = std::max(0.01, m_ctbrThrustRawScaleMin);
+    m_ctbrThrustRawScaleMax = std::max(
+      m_ctbrThrustRawScaleMin, m_ctbrThrustRawScaleMax);
+    m_ctbrMaxBodyRateRadPerSec = std::max(0.0, m_ctbrMaxBodyRateRadPerSec);
+    m_ctbrCommandTimeout = std::max(0.01, m_ctbrCommandTimeout);
 
     ros::NodeHandle n;
     n.setCallbackQueue(&queue);
@@ -164,15 +392,22 @@ public:
     m_subscribeCmdFullState = n.subscribe(tf_prefix + "/cmd_full_state", 1, &CrazyflieROS::cmdFullStateSetpoint, this);
     m_subscribeCmdVelocityWorld = n.subscribe(tf_prefix + "/cmd_velocity_world", 1, &CrazyflieROS::cmdVelocityWorldSetpoint, this);
     m_subscribeCmdStop = n.subscribe(m_tf_prefix + "/cmd_stop", 1, &CrazyflieROS::cmdStop, this);
+    m_subscribeCmdCtbr = n.subscribe(m_tf_prefix + "/cmd_ctbr", 1, &CrazyflieROS::cmdCtbrChanged, this);
+    m_pubCtbrRawThrust = n.advertise<std_msgs::UInt16>(m_tf_prefix + "/ctbr_raw_thrust", 10);
+    m_pubMocapState = n.advertise<crazyswarm::MocapState>(m_tf_prefix + "/mocap_state", 10);
+    m_ctbrWatchdogTimer = n.createTimer(
+      ros::Duration(0.02), &CrazyflieROS::ctbrWatchdogCallback, this);
 
     // New Velocity command type (Hover)
     m_subscribeCmdHover=n.subscribe(m_tf_prefix+"/cmd_hover",1,&CrazyflieROS::cmdHoverSetpoint, this);
 
+    // Keep the legacy on-disk CSV controlled only by enable_logging.  Generic
+    // blocks below are also enabled by enable_generic_logging so a controller
+    // can receive battery telemetry without creating a second log file.
     if (m_enableLogging) {
       m_logFile.open("logcf" + std::to_string(id) + ".csv");
       m_logFile << "time,";
       for (auto& logBlock : m_logBlocks) {
-        m_pubLogDataGeneric.push_back(n.advertise<crazyswarm::GenericLogData>(tf_prefix + "/" + logBlock.topic_name, 10));
         for (const auto& variableName : logBlock.variables) {
           m_logFile << variableName << ",";
         }
@@ -181,6 +416,14 @@ public:
 
       if (m_enableLoggingPose) {
         m_pubPose = n.advertise<geometry_msgs::PoseStamped>(m_tf_prefix + "/pose", 10);
+      }
+    }
+
+    if (m_enableLogging || m_enableGenericLogging) {
+      for (auto& logBlock : m_logBlocks) {
+        m_pubLogDataGeneric.push_back(
+          n.advertise<crazyswarm::GenericLogData>(
+            tf_prefix + "/" + logBlock.topic_name, 10, true));
       }
     }
 
@@ -209,6 +452,27 @@ public:
 
   void sendPing() {
     m_cf.sendPing();
+  }
+
+  void publishMocapState(
+    const libmotioncapture::RigidBody& rigidBody,
+    const ros::Time& stamp,
+    const std::chrono::steady_clock::time_point& sampleTime)
+  {
+    crazyswarm::MocapState msg;
+    msg.header.stamp = stamp;
+    msg.header.frame_id = "world";
+    m_mocapStateEstimator.update(rigidBody, sampleTime, msg);
+    m_pubMocapState.publish(msg);
+  }
+
+  void publishInvalidMocapState(const ros::Time& stamp)
+  {
+    crazyswarm::MocapState msg;
+    msg.header.stamp = stamp;
+    msg.header.frame_id = "world";
+    m_mocapStateEstimator.invalidate(msg);
+    m_pubMocapState.publish(msg);
   }
 
   // void joyChanged(
@@ -359,6 +623,7 @@ public:
   {
     ROS_INFO_NAMED(m_tf_prefix, "NotifySetpointsStop requested");
     m_cf.notifySetpointsStop(req.remainValidMillisecs);
+    m_ctbrCommandActive = false;
     return true;
   }
 
@@ -419,6 +684,95 @@ public:
       // ROS_INFO("cmdVel %f %f %f %d (%f)", roll, pitch, yawrate, thrust, msg->linear.z);
       // m_sentSetpoint = true;
     // }
+  }
+
+  void cmdCtbrChanged(const crazyswarm::CTBR::ConstPtr& msg)
+  {
+    const double thrust = msg->collective_thrust;
+    const double rollRate = msg->body_rates.x;
+    const double pitchRate = msg->body_rates.y;
+    const double yawRate = msg->body_rates.z;
+    const double requestedRawScale = msg->thrust_raw_scale;
+    if (!std::isfinite(thrust) || !std::isfinite(rollRate) ||
+        !std::isfinite(pitchRate) || !std::isfinite(yawRate) ||
+        !std::isfinite(requestedRawScale)) {
+      ROS_WARN_THROTTLE(1.0, "[%s] Ignoring non-finite CTBR command", m_frame.c_str());
+      sendCtbrZero();
+      return;
+    }
+
+    // A zero value is the ROS-message default and preserves compatibility with
+    // publishers built before thrust_raw_scale existed. A positive value must
+    // stay inside the launch-configured safety range instead of silently
+    // applying an unexpectedly large voltage compensation.
+    if (requestedRawScale < 0.0 ||
+        (requestedRawScale > 0.0 &&
+         (requestedRawScale < m_ctbrThrustRawScaleMin ||
+          requestedRawScale > m_ctbrThrustRawScaleMax))) {
+      ROS_WARN_THROTTLE(1.0,
+        "[%s] Ignoring CTBR thrust_raw_scale %.3f outside [%.3f, %.3f]",
+        m_frame.c_str(), requestedRawScale, m_ctbrThrustRawScaleMin,
+        m_ctbrThrustRawScaleMax);
+      sendCtbrZero();
+      return;
+    }
+    const double rawScale = requestedRawScale > 0.0 ? requestedRawScale : 1.0;
+
+    const ros::Time now = ros::Time::now();
+    if (!msg->header.stamp.isZero()) {
+      const double age = (now - msg->header.stamp).toSec();
+      if (age > m_ctbrCommandTimeout) {
+        ROS_WARN_THROTTLE(1.0, "[%s] Ignoring stale CTBR command (%.3f s old)",
+          m_frame.c_str(), age);
+        sendCtbrZero();
+        return;
+      }
+    }
+
+    // The legacy commander requires a zero-thrust packet before thrust is accepted.
+    if (!m_ctbrThrustUnlocked) {
+      m_cf.sendSetpoint(0.0f, 0.0f, 0.0f, 0);
+      std_msgs::UInt16 rawThrustMessage;
+      rawThrustMessage.data = 0;
+      m_pubCtbrRawThrust.publish(rawThrustMessage);
+      m_ctbrThrustUnlocked = true;
+      return;
+    }
+
+    const double clampedThrust = std::max(0.0, std::min(m_ctbrMaxThrustNewton, thrust));
+    const double clampedRollRate = std::max(-m_ctbrMaxBodyRateRadPerSec,
+      std::min(m_ctbrMaxBodyRateRadPerSec, rollRate));
+    const double clampedPitchRate = std::max(-m_ctbrMaxBodyRateRadPerSec,
+      std::min(m_ctbrMaxBodyRateRadPerSec, pitchRate));
+    const double clampedYawRate = std::max(-m_ctbrMaxBodyRateRadPerSec,
+      std::min(m_ctbrMaxBodyRateRadPerSec, yawRate));
+
+    // Motor thrust is approximately proportional to PWM^2. CTBR uses Newtons,
+    // so invert F/Fmax = (raw/60000)^exponent instead of assuming a linear
+    // Newton-to-PWM relationship. With exponent 2, a 40 g vehicle's hover
+    // thrust (about 0.392 N) maps to raw ~34600 rather than ~20000. rawScale
+    // is frozen before takeoff by the controller; it changes only this mapping
+    // and never follows the noisy in-flight battery samples packet by packet.
+    const double thrustRatio = m_ctbrMaxThrustNewton > 0.0
+      ? clampedThrust / m_ctbrMaxThrustNewton
+      : 0.0;
+    const double nominalRawThrust = 60000.0 * std::pow(
+      thrustRatio, 1.0 / m_ctbrThrustCurveExponent);
+    const uint16_t rawThrust = static_cast<uint16_t>(std::lround(
+      std::max(0.0, std::min(60000.0, nominalRawThrust * rawScale))));
+
+    // The CTBR message is expressed as body rates. yaw is pre-inverted here
+    // because the Crazyflie legacy RPYT decoder inverts yaw-rate internally.
+    m_cf.sendSetpoint(
+      static_cast<float>(m_ctbrRollSign * radToDeg(clampedRollRate)),
+      static_cast<float>(m_ctbrPitchSign * radToDeg(clampedPitchRate)),
+      static_cast<float>(m_ctbrYawSign * radToDeg(clampedYawRate)),
+      rawThrust);
+    std_msgs::UInt16 rawThrustMessage;
+    rawThrustMessage.data = rawThrust;
+    m_pubCtbrRawThrust.publish(rawThrustMessage);
+    m_ctbrLastCommand = now;
+    m_ctbrCommandActive = true;
   }
 
   void cmdPositionSetpoint(
@@ -503,6 +857,7 @@ public:
      //ROS_INFO("got a stop setpoint");
     // if (!m_isEmergency) {
       m_cf.sendStop();
+      m_ctbrCommandActive = false;
       // m_sentSetpoint = true;
       //ROS_INFO("set a stop setpoint");
     // }
@@ -563,8 +918,10 @@ public:
     std::chrono::duration<double> elapsedSeconds1 = end1-start;
     ROS_INFO("[%s] reqParamTOC: %f s (%d params)", m_frame.c_str(), elapsedSeconds1.count(), numParams);
 
-    // Logging
-    if (m_enableLogging) {
+    // Logging blocks are required for both the legacy CSV and ROS-only
+    // GenericLogData telemetry.  The two outputs deliberately have separate
+    // switches so CTBR logs remain under scripts/ctbr_logs.
+    if (m_enableLogging || m_enableGenericLogging) {
       ROS_INFO("[%s] Requesting logging variables...", m_frame.c_str());
       m_cf.requestLogToc(m_forceNoCache);
       auto end2 = std::chrono::system_clock::now();
@@ -596,7 +953,9 @@ public:
       std::chrono::duration<double> elapsedSeconds3 = end3-end2;
       ROS_INFO("[%s] logBlocks: %f s", m_frame.c_str(), elapsedSeconds1.count());
 
-      if (m_enableLoggingPose) {
+      // Pose logging still belongs to the legacy logging option; it needs the
+      // dedicated publisher created in the constructor above.
+      if (m_enableLogging && m_enableLoggingPose) {
         std::function<void(uint32_t, logPose*)> cb = std::bind(&CrazyflieROS::onPoseData, this, std::placeholders::_1, std::placeholders::_2);
 
         m_logBlockPose.reset(new LogBlock<logPose>(
@@ -663,6 +1022,27 @@ public:
   }
 
 private:
+  void sendCtbrZero()
+  {
+    m_cf.sendSetpoint(0.0f, 0.0f, 0.0f, 0);
+    std_msgs::UInt16 rawThrustMessage;
+    rawThrustMessage.data = 0;
+    m_pubCtbrRawThrust.publish(rawThrustMessage);
+    m_ctbrCommandActive = false;
+  }
+
+  void ctbrWatchdogCallback(const ros::TimerEvent&)
+  {
+    if (!m_ctbrCommandActive) {
+      return;
+    }
+
+    if ((ros::Time::now() - m_ctbrLastCommand).toSec() > m_ctbrCommandTimeout) {
+      ROS_WARN("[%s] CTBR command timeout; sending zero thrust", m_frame.c_str());
+      sendCtbrZero();
+    }
+  }
+
   struct logPose {
     float x;
     float y;
@@ -723,11 +1103,13 @@ private:
     msg.header.stamp = ros::Time(time_in_ms/1000.0);
     msg.values = *values;
 
-    m_logFile << time_in_ms / 1000.0 << ",";
-    for (const auto& value : *values) {
-      m_logFile << value << ",";
+    if (m_enableLogging) {
+      m_logFile << time_in_ms / 1000.0 << ",";
+      for (const auto& value : *values) {
+        m_logFile << value << ",";
+      }
+      m_logFile << std::endl;
     }
-    m_logFile << std::endl;
 
     pub->publish(msg);
   }
@@ -739,6 +1121,7 @@ private:
   std::string m_worldFrame;
   bool m_enableParameters;
   bool m_enableLogging;
+  bool m_enableGenericLogging;
   bool m_enableLoggingPose;
   int m_id;
   std::string m_type;
@@ -757,6 +1140,8 @@ private:
   ros::Subscriber m_subscribeCmdFullState;
   ros::Subscriber m_subscribeCmdVelocityWorld;
   ros::Subscriber m_subscribeCmdStop;
+  ros::Subscriber m_subscribeCmdCtbr;
+  ros::Publisher m_pubCtbrRawThrust;
 
   ros::Subscriber m_subscribeCmdHover; // Hover vel subscriber
 
@@ -769,8 +1154,23 @@ private:
   ros::Subscriber m_subscribeJoy;
 
   ros::Publisher m_pubPose;
+  ros::Publisher m_pubMocapState;
+  ros::Timer m_ctbrWatchdogTimer;
   std::unique_ptr<LogBlock<logPose>> m_logBlockPose;
 
+  MocapStateEstimator m_mocapStateEstimator;
+  bool m_ctbrThrustUnlocked;
+  bool m_ctbrCommandActive;
+  ros::Time m_ctbrLastCommand;
+  double m_ctbrMaxThrustNewton;
+  double m_ctbrThrustCurveExponent;
+  double m_ctbrThrustRawScaleMin;
+  double m_ctbrThrustRawScaleMax;
+  double m_ctbrMaxBodyRateRadPerSec;
+  double m_ctbrCommandTimeout;
+  double m_ctbrRollSign;
+  double m_ctbrPitchSign;
+  double m_ctbrYawSign;
   std::ofstream m_logFile;
   bool m_forceNoCache;
   bool m_initializedPosition;
@@ -799,7 +1199,8 @@ public:
     const std::vector<crazyswarm::LogBlock>& logBlocks,
     std::string interactiveObject,
     bool writeCSVs,
-    bool sendPositionOnly
+    bool sendPositionOnly,
+    double externalPoseRateHz
     )
     : m_cfs()
     , m_tracker(nullptr)
@@ -813,6 +1214,8 @@ public:
     , m_br()
     , m_interactiveObject(interactiveObject)
     , m_sendPositionOnly(sendPositionOnly)
+    , m_externalPoseRateHz(std::max(0.0, externalPoseRateHz))
+    , m_lastExternalPoseSendTime()
     , m_outputCSVs()
     , m_phase(0)
     , m_phaseStart()
@@ -856,6 +1259,8 @@ public:
   void runFast()
   {
     auto stamp = std::chrono::high_resolution_clock::now();
+    const auto mocapSampleTime = std::chrono::steady_clock::now();
+    const ros::Time mocapStamp = ros::Time::now();
 
     std::vector<CrazyflieBroadcaster::externalPose> states;
 
@@ -868,6 +1273,10 @@ public:
         bool found = publishRigidBody(cf->frame(), cf->id(), states);
         if (found) {
           cf->initializePositionIfNeeded(states.back().x, states.back().y, states.back().z);
+          const auto& rigidBody = m_pMocapRigidBodies->at(cf->frame());
+          cf->publishMocapState(rigidBody, mocapStamp, mocapSampleTime);
+        } else {
+          cf->publishInvalidMocapState(mocapStamp);
         }
       }
     } else {
@@ -887,7 +1296,7 @@ public:
 
           const Eigen::Affine3f& transform = m_tracker->objects()[i].transformation();
           Eigen::Quaternionf q(transform.rotation());
-          const auto& translation = transform.translation();
+          const Eigen::Vector3f translation = transform.translation();
 
           states.resize(states.size() + 1);
           states.back().id = m_cfs[i]->id();
@@ -900,6 +1309,8 @@ public:
           states.back().qw = q.w();
 
           m_cfs[i]->initializePositionIfNeeded(states.back().x, states.back().y, states.back().z);
+          libmotioncapture::RigidBody rigidBody(m_cfs[i]->frame(), translation, q);
+          m_cfs[i]->publishMocapState(rigidBody, mocapStamp, mocapSampleTime);
 
           tf::Transform tftransform;
           tftransform.setOrigin(tf::Vector3(translation.x(), translation.y(), translation.z()));
@@ -918,6 +1329,7 @@ public:
                                   << "," << rpy(0) << "," << rpy(1) << "," << rpy(2) << "\n";
           }
         } else {
+          m_cfs[i]->publishInvalidMocapState(mocapStamp);
           std::chrono::duration<double> elapsedSeconds = stamp - m_tracker->objects()[i].lastValidTime();
           ROS_WARN("No updated pose for CF %s for %f s.",
             m_cfs[i]->frame().c_str(),
@@ -928,17 +1340,26 @@ public:
 
     {
       auto start = std::chrono::high_resolution_clock::now();
-      if (!m_sendPositionOnly) {
-        m_cfbc.sendExternalPoses(states);
-      } else {
-        std::vector<CrazyflieBroadcaster::externalPosition> positions(states.size());
-        for (size_t i = 0; i < positions.size(); ++i) {
-          positions[i].id = states[i].id;
-          positions[i].x  = states[i].x;
-          positions[i].y  = states[i].y;
-          positions[i].z  = states[i].z;
+      const bool poseRateLimited = m_externalPoseRateHz > 0.0;
+      const bool posePeriodElapsed = !poseRateLimited ||
+        m_lastExternalPoseSendTime == std::chrono::steady_clock::time_point() ||
+        std::chrono::duration<double>(
+          mocapSampleTime - m_lastExternalPoseSendTime).count() >=
+          1.0 / m_externalPoseRateHz;
+      if (posePeriodElapsed && !states.empty()) {
+        if (!m_sendPositionOnly) {
+          m_cfbc.sendExternalPoses(states);
+        } else {
+          std::vector<CrazyflieBroadcaster::externalPosition> positions(states.size());
+          for (size_t i = 0; i < positions.size(); ++i) {
+            positions[i].id = states[i].id;
+            positions[i].x  = states[i].x;
+            positions[i].y  = states[i].y;
+            positions[i].z  = states[i].z;
+          }
+          m_cfbc.sendExternalPositions(positions);
         }
-        m_cfbc.sendExternalPositions(positions);
+        m_lastExternalPoseSendTime = mocapSampleTime;
       }
       auto end = std::chrono::high_resolution_clock::now();
       std::chrono::duration<double> elapsedSeconds = end-start;
@@ -958,11 +1379,15 @@ public:
   void runSlow()
   {
     ros::NodeHandle nl("~");
-    bool enableLogging;
-    nl.getParam("enable_logging", enableLogging);
+    bool enableLogging = false;
+    bool enableGenericLogging = false;
+    nl.param("enable_logging", enableLogging, false);
+    nl.param("enable_generic_logging", enableGenericLogging, false);
 
     while(ros::ok() && !m_isEmergency) {
-      if (enableLogging) {
+      // Keep the link alive while either legacy CSV logging or ROS-only
+      // GenericLogData telemetry is active.
+      if (enableLogging || enableGenericLogging) {
         for (const auto& cf : m_cfs) {
           cf->sendPing();
         }
@@ -1169,7 +1594,17 @@ private:
         sstr << std::setfill ('0') << std::setw(2) << std::hex << id;
         std::string idHex = sstr.str();
 
-        std::string uri = "radio://" + std::to_string(m_radio) + "/" + std::to_string(channel) + "/2M/E7E7E7E7" + idHex;
+        std::string uri;
+        if (crazyflie.hasMember("uri")) {
+          ROS_ASSERT(crazyflie["uri"].getType() == XmlRpc::XmlRpcValue::TypeString);
+          uri = static_cast<std::string>(crazyflie["uri"]);
+          if (uri.empty()) {
+            throw std::runtime_error("crazyflies.yaml error: uri must not be empty for cf" + std::to_string(id));
+          }
+        } else {
+          // Backward-compatible fallback for legacy YAML files without an explicit URI.
+          uri = "radio://" + std::to_string(m_radio) + "/" + std::to_string(channel) + "/2M/E7E7E7E7" + idHex;
+        }
         std::string tf_prefix = "cf" + std::to_string(id);
         std::string frame = "cf" + std::to_string(id);
         cfConfigs.push_back({uri, tf_prefix, frame, id, type});
@@ -1306,6 +1741,8 @@ private:
   tf::TransformBroadcaster m_br;
   latency m_latency;
   bool m_sendPositionOnly;
+  double m_externalPoseRateHz;
+  std::chrono::steady_clock::time_point m_lastExternalPoseSendTime;
   std::vector<std::unique_ptr<std::ofstream>> m_outputCSVs;
   int m_phase;
   std::chrono::high_resolution_clock::time_point m_phaseStart;
@@ -1360,8 +1797,22 @@ public:
   void run()
   {
     std::thread tSlow(&CrazyflieServer::runSlow, this);
-    runFast();
-    tSlow.join();
+    try {
+      runFast();
+    } catch (...) {
+      // runFast() can fail while connecting to the radio, requesting a TOC, or
+      // creating a log block.  Stop the callback thread before rethrowing;
+      // otherwise its joinable std::thread destructor calls std::terminate and
+      // hides the actual startup error behind exit code 134.
+      ros::shutdown();
+      if (tSlow.joinable()) {
+        tSlow.join();
+      }
+      throw;
+    }
+    if (tSlow.joinable()) {
+      tSlow.join();
+    }
   }
 
   void runFast()
@@ -1398,6 +1849,7 @@ public:
     bool printLatency;
     bool writeCSVs;
     bool sendPositionOnly;
+    double externalPoseRateHz;
     std::string motionCaptureType;
 
     ros::NodeHandle nl("~");
@@ -1413,6 +1865,8 @@ public:
     nl.param<int>("broadcasting_num_repeats", m_broadcastingNumRepeats, 15);
     nl.param<int>("broadcasting_delay_between_repeats_ms", m_broadcastingDelayBetweenRepeatsMs, 1);
     nl.param<bool>("send_position_only", sendPositionOnly, false);
+    nl.param<double>("external_pose_rate_hz", externalPoseRateHz, 0.0);
+    externalPoseRateHz = std::max(0.0, externalPoseRateHz);
 
     // tilde-expansion
     wordexp_t wordexp_result;
@@ -1500,7 +1954,8 @@ public:
                 logBlocks,
                 interactiveObject,
                 writeCSVs,
-                sendPositionOnly);
+                sendPositionOnly,
+                externalPoseRateHz);
             },
             channel,
             r
@@ -1916,6 +2371,8 @@ int main(int argc, char **argv)
 
   ros::init(argc, argv, "crazyflie_server");
 
+  try {
+
   // ros::NodeHandle n("~");
   // std::string worldFrame;
   // n.param<std::string>("world_frame", worldFrame, "/world");
@@ -1947,7 +2404,16 @@ int main(int argc, char **argv)
 
   // ROS_INFO("All CFs are ready!");
 
-  server.run();
+    server.run();
+  } catch (const std::exception& error) {
+    ROS_FATAL("crazyswarm_server 启动失败：%s", error.what());
+    ros::shutdown();
+    return 1;
+  } catch (...) {
+    ROS_FATAL("crazyswarm_server 启动失败：未知异常");
+    ros::shutdown();
+    return 1;
+  }
 
   return 0;
 }

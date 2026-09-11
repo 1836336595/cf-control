@@ -1,0 +1,23 @@
+(cl:defpackage crazyswarm-msg
+  (:use )
+  (:export
+   "<CTBR>"
+   "CTBR"
+   "<FULLSTATE>"
+   "FULLSTATE"
+   "<GENERICLOGDATA>"
+   "GENERICLOGDATA"
+   "<HOVER>"
+   "HOVER"
+   "<LOGBLOCK>"
+   "LOGBLOCK"
+   "<MOCAPSTATE>"
+   "MOCAPSTATE"
+   "<POSITION>"
+   "POSITION"
+   "<TRAJECTORYPOLYNOMIALPIECE>"
+   "TRAJECTORYPOLYNOMIALPIECE"
+   "<VELOCITYWORLD>"
+   "VELOCITYWORLD"
+  ))
+

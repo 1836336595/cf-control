@@ -5,17 +5,37 @@
   <rosparam command="load" file="$(find crazyswarm)/launch/crazyflieTypes.yaml" />
   <rosparam command="load" file="$(find crazyswarm)/launch/crazyflies.yaml" />
 
-  <node pkg="crazyswarm" type="crazyswarm_server" name="crazyswarm_server" output="screen" >
+  <!--
+    无刷 Crazyflie 2.1 (CF21BL) 起飞前必须先 ARM，而 crazyswarm_server 本身
+    不支持 ARM。因此用 launch-prefix 先运行 scripts/cf_arm_wrapper.sh：
+    内部先执行 cf_arm.py 发送 ARM 并等待固件确认（cflib 直连），ARM 成功后才
+    启动 crazyswarm_server；server 退出后自动 DISARM。如需在 ARM 前强制检查
+    NOKOV 位姿，可在 wrapper 中给 cf_arm.py 加 require-mocap 参数。
+  -->
+  <node pkg="crazyswarm" type="crazyswarm_server" name="crazyswarm_server" output="screen"
+        launch-prefix="$(find crazyswarm)/scripts/cf_arm_wrapper.sh" >
     <rosparam>
-      # Logging configuration (Use enable_logging to actually enable logging)
-      genericLogTopics: ["log1"]
-      genericLogTopicFrequencies: [10]
-      genericLogTopic_log1_Variables: ["stateEstimate.x", "ctrltarget.x"]
+      # 服务端参数名虽然叫 frequency，实际值是日志周期 ms：25=40 Hz，100=10 Hz，
+      # 0=只采样一次。单 Crazyradio 三机 CTBR 时将 EKF 日志限定为 40 Hz，
+      # 为外部定位广播和 CTBR 指令留出链路预算；位置/速度六浮点数仍在同一 block。
+      # 计算方法 25 / 10 = 2 ， 2 × 10 ms = 20 ms 实际频率 = 50 Hz
+      genericLogTopics: ["ekf_kinematics", "battery"]
+      genericLogTopicFrequencies: [25, 0]
+      genericLogTopic_ekf_kinematics_Variables:
+        ["stateEstimate.x", "stateEstimate.y", "stateEstimate.z",
+         "stateEstimate.vx", "stateEstimate.vy", "stateEstimate.vz"]
+      # 电池只用于启动前电压预检；服务端对 GenericLogData 使用 latch，避免一次性消息
+      # 在 ctbr_controller 订阅前发出后丢失。
+      genericLogTopic_battery_Variables: ["pm.vbat", "pm.vbatMV", "pm.state", "pm.batteryLevel"]
       # firmware parameters for all drones (use crazyflieTypes.yaml to set per type, or
       # allCrazyflies.yaml to set per drone)
       firmwareParams:
         commander:
           enHighLevel: 1
+        flightmode:
+          stabModeRoll: 0 # RATE: roll rate command
+          stabModePitch: 0 # RATE: pitch rate command
+          stabModeYaw: 0 # RATE: yaw rate command
         stabilizer:
           estimator: 2 # 1: complementary, 2: kalman
           controller: 2 # 1: PID, 2: mellinger
@@ -30,19 +50,44 @@
           extQuatStdDev: 0.5e-1
         kalman:
           resetEstimation: 1
+      # Host-side mocap-state and CTBR bridge parameters. CTBR is not sent
+      # until an external controller explicitly publishes a /cfX/cmd_ctbr message.
+      mocap_state_derivative_alpha: 0.2
+      mocap_state_max_dt: 0.1
+      # Nokov 丢失刚体时可能给出约 9999.999 m；超过此工作空间边界的状态无效。
+      mocap_state_max_abs_position_m: 10.0
+      ctbr_max_thrust_newton: 1.176798
+      # F/Fmax = (raw_thrust / 60000)^2；CTBR 的牛顿推力需作平方反解。
+      ctbr_thrust_curve_exponent: 2.0
+      # 起飞前电压冻结补偿只能在此范围内改变 raw PWM，避免错误标定放大推力。
+      ctbr_thrust_raw_scale_min: 0.90
+      ctbr_thrust_raw_scale_max: 1.12
+      ctbr_max_body_rate_rad_per_sec: 6.0
+      ctbr_command_timeout: 0.1
+      ctbr_roll_sign: 1.0
+      # 角速度 CTBR 直接对应固件 RPY rate 通道；pitch 不应沿用 cmdVel 的负号。
+      # 固件的 legacy yaw-rate 输入内部会取负，故在桥接处预先反号。
+      ctbr_pitch_sign: 1.0
+      ctbr_yaw_sign: -1.0
       # tracking
-      motion_capture_type: "vicon" # one of none,vicon,optitrack,optitrack_closed_source,qualisys,vrpn
-      object_tracking_type: "libobjecttracker" # one of motionCapture,libobjecttracker
-      send_position_only: False # set to False to send position+orientation; set to True to send position only
-      motion_capture_host_name: "vicon"
+      motion_capture_type: "nokov" # one of none,vicon,optitrack,optitrack_closed_source,qualisys,vrpn,nokov
+      object_tracking_type: "motionCapture" # one of motionCapture,libobjecttracker
+      # 保留 NOKOV 位置+四元数注入固件 EKF。三机完整 pose 每帧为 2 个广播包，
+      # 因此由服务端将它节流至 40 Hz；0 表示不节流。
+      send_position_only: False
+      external_pose_rate_hz: 40.0
+      motion_capture_host_name: "10.1.1.198"
       # motion_capture_interface_ip: "" # optional for optitrack with multiple interfaces
       save_point_clouds: "/dev/null" # set to a valid path to log mocap point cloud binary file.
       print_latency: False
       write_csvs: False
       force_no_cache: False
       enable_parameters: True
+      # 只启用 ROS GenericLogData，不写 server 工作目录下旧式 logcf编号.csv。
+      # CTBR 自己的飞行 CSV 统一保存到 scripts/ctbr_logs。
       enable_logging: False
-      enable_logging_pose: True
+      enable_generic_logging: True
+      enable_logging_pose: False
     </rosparam>
   </node>
 
@@ -58,6 +103,6 @@
   <node name="rviz" pkg="rviz" type="rviz" args="-d $(find crazyswarm)/launch/test.rviz"/>
 
   <!-- <node pkg="rqt_plot" type="rqt_plot" name="rqt_plot_x" args="/cf2/log1/values[0]"/> -->
-  <!-- <node pkg="rqt_plot" type="rqt_plot" name="rqt_plot_roll" args="/cf1/log1/values[2] /cf1/log1/values[3]"/> -->
+  <!-- <node pkg="rqt_plot" type="rqt_plot" name="rqt_plot_roll" args="/cf2/log1/values[2] /cf2/log1/values[3]"/> -->
 
 </launch>

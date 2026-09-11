@@ -1,0 +1,9 @@
+crazyflies:
+- channel: 80
+  id: 2
+  uri: "radio://0/80/2M/E7E7E7E702"
+  ctbr_enabled: true
+  # 仅用于 Crazyswarm 的物体跟踪初始猜测/仿真；真实飞行位姿来自 NOKOV。
+  initialPosition: [1.5, 1.5, 0.0]
+  # 选择 marker/dynamics/firmware 参数，服务端仍需要该字段。
+  type: medium

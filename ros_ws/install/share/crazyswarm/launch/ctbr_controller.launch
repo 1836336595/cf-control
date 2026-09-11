@@ -1,0 +1,22 @@
+<launch>
+  <!-- ROS 接口与启动确认。target_confirmed=false 时节点会拒绝启动。 -->
+  <arg name="target_confirmed" default="false" /> <!-- 人工确认允许真实飞行。 -->
+  <arg name="enable_realtime_visualization" default="true" /> <!-- 是否随控制器启动实时绘图。设为 false 可关闭。 -->
+
+  <!-- 控制器、绘图和 Path 参数统一从 YAML 加载；target_confirmed 由命令行显式确认。 -->
+  <!-- 与 hover_swarm 使用同一份飞机参数；控制器自动选择唯一 ctbr_enabled=true 的条目。 -->
+  <rosparam file="$(find crazyswarm)/launch/crazyflies.yaml" command="load" />
+  <rosparam file="$(find crazyswarm)/config/ctbr_controller.yaml" command="load" subst_value="true" />
+
+  <node pkg="crazyswarm" type="ctbr_controller.py" name="ctbr_controller" output="screen">
+  </node>
+
+  <!-- 实时绘图节点只读取 CSV，不参与飞行控制；没有图形环境时不会影响控制器。 -->
+  <node if="$(arg enable_realtime_visualization)"
+        pkg="crazyswarm"
+        type="ctbr_visualization.py"
+        name="ctbr_visualization"
+        output="screen"
+        required="false"
+        args="--ros-params" />
+</launch>
