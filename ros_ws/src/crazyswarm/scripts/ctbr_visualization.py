@@ -125,13 +125,10 @@ def latest_ctbr_log(log_directory=LOG_DIRECTORY):
     return max(candidates, key=os.path.getmtime)
 
 
-def load_log(path, vehicle_id=None):
+def load_log(path):
     with open(path, newline="") as log_file:
         rows = list(csv.DictReader(log_file))
     rows = [row for row in rows if row.get("mode") in ("control", "shadow")]
-    if vehicle_id is not None:
-        requested_id = str(int(vehicle_id))
-        rows = [row for row in rows if str(row.get("vehicle_id", "")) == requested_id]
     if not rows:
         raise ValueError("日志中没有有效控制样本")
 
@@ -163,17 +160,10 @@ def require_matplotlib():
     return pyplot
 
 
-def load_plot_data(log_path, max_abs_position_m, vehicle_id=None):
+def load_plot_data(log_path, max_abs_position_m):
     """读取一份 CSV，并转换为绘图所需的数组。"""
-    rows, column = load_log(log_path, vehicle_id=vehicle_id)
-    # Merged task logs carry a shared mission clock. Fall back to the legacy
-    # per-process control clock for older single-aircraft CSV files.
-    control_time_s = column("control_time_s")
-    mission_time_s = column("mission_time_s")
-    time_s = (
-        mission_time_s
-        if np.any(np.isfinite(mission_time_s)) else control_time_s
-    )
+    rows, column = load_log(log_path)
+    time_s = column("control_time_s")
     position = np.vstack((column("position_x"), column("position_y"), column("position_z")))
     target = np.vstack((column("target_x"), column("target_y"), column("target_z")))
     velocity = np.vstack((column("velocity_x"), column("velocity_y"), column("velocity_z")))
@@ -262,58 +252,11 @@ def load_plot_data(log_path, max_abs_position_m, vehicle_id=None):
         "sample_is_plausible": sample_is_plausible,
         "discarded_samples": discarded_samples,
         "rows": rows,
-        "vehicle_id": vehicle_id,
     }
 
 
-def vehicle_ids_from_log(log_path):
-    """Return sorted numeric vehicle ids present in a merged or single log."""
-    with open(log_path, newline="") as log_file:
-        rows = list(csv.DictReader(log_file))
-    rows = [row for row in rows if row.get("mode") in ("control", "shadow")]
-    ids = set()
-    for row in rows:
-        value = str(row.get("vehicle_id", "")).strip()
-        if value:
-            try:
-                ids.add(int(value))
-            except ValueError:
-                pass
-    return sorted(ids)
-
-
-def load_multi_plot_data(log_path, max_abs_position_m, vehicle_id=None):
-    """Load a merged task CSV grouped by vehicle id.
-
-    Legacy single-vehicle logs without a ``vehicle_id`` column are represented
-    by the ``None`` key so callers can use the same plotting path.
-    """
-    if vehicle_id is not None:
-        return {int(vehicle_id): load_plot_data(
-            log_path, max_abs_position_m, vehicle_id=int(vehicle_id)
-        )}
-    ids = vehicle_ids_from_log(log_path)
-    if not ids:
-        return {None: load_plot_data(log_path, max_abs_position_m)}
-    return {
-        current_id: load_plot_data(
-            log_path, max_abs_position_m, vehicle_id=current_id
-        )
-        for current_id in ids
-    }
-
-
-def load_multi_log(log_path, max_abs_position_m=10.0, vehicle_id=None):
-    """Compatibility-facing grouped loader for merged task CSV files."""
-    return load_multi_plot_data(
-        log_path, max_abs_position_m, vehicle_id=vehicle_id
-    )
-
-
-def create_figure(pyplot, vehicle_ids=None):
+def create_figure(pyplot):
     """创建固定布局；左侧 3D 轨迹图纵向占满并放大显示。"""
-    if vehicle_ids is not None:
-        return create_multi_figure(pyplot, list(vehicle_ids))
     figure = pyplot.figure("Crazyflie CTBR Realtime Visualization", figsize=(16, 14))
     grid = figure.add_gridspec(
         5,
@@ -464,102 +407,6 @@ def create_figure(pyplot, vehicle_ids=None):
     }
 
 
-_MULTI_COLORS = ("#0067b1", "#e05a33", "#2a9d45", "#8a3ffc", "#d47f00", "#008c95")
-
-
-def create_multi_figure(pyplot, vehicle_ids):
-    """Create the same five-panel layout with one line group per vehicle."""
-    figure = pyplot.figure("Crazyflie Multi-CTBR Visualization", figsize=(16, 14))
-    grid = figure.add_gridspec(
-        5, 2, width_ratios=(1.65, 1.0), left=0.05, right=0.95,
-        bottom=0.07, top=0.91, wspace=0.28, hspace=0.42,
-    )
-    trajectory_axes = figure.add_subplot(grid[:, 0], projection="3d")
-    trajectory_axes.set(xlabel="World X (m)", ylabel="World Y (m)", zlabel="World Z (m)",
-                        title="3D Position")
-    error_axes = figure.add_subplot(grid[0, 1])
-    error_axes.set(xlabel="Time (s)", ylabel="Position error (m)", title="Position Error")
-    attitude_axes = figure.add_subplot(grid[1, 1])
-    attitude_axes.set(xlabel="Time (s)", ylabel="Attitude (deg)", title="Attitude Tracking")
-    attitude_error_axes = attitude_axes.twinx()
-    attitude_error_axes.set_ylabel("tr(I - R_d.T R)")
-    velocity_axes = figure.add_subplot(grid[2, 1])
-    velocity_axes.set(xlabel="Time (s)", ylabel="Velocity (m/s)", title="Nokov Velocity")
-    acceleration_axes = figure.add_subplot(grid[3, 1])
-    acceleration_axes.set(xlabel="Time (s)", ylabel="Acceleration (m/s^2)", title="Nokov Acceleration")
-    command_axes = figure.add_subplot(grid[4, 1])
-    command_axes.set(xlabel="Time (s)", ylabel="Body-rate command (deg/s)", title="CTBR Command")
-    thrust_axes = command_axes.twinx()
-    thrust_axes.set_ylabel("Collective thrust (N)")
-    handles = {
-        "figure": figure,
-        "trajectory_axes": trajectory_axes,
-        "error_axes": error_axes,
-        "attitude_axes": attitude_axes,
-        "attitude_error_axes": attitude_error_axes,
-        "velocity_axes": velocity_axes,
-        "acceleration_axes": acceleration_axes,
-        "command_axes": command_axes,
-        "thrust_axes": thrust_axes,
-        "groups": {},
-    }
-    for index, vehicle_id in enumerate(vehicle_ids):
-        label = "cf%s" % vehicle_id if vehicle_id is not None else "vehicle"
-        color = _MULTI_COLORS[index % len(_MULTI_COLORS)]
-        measured, = trajectory_axes.plot([], [], [], color=color, label="%s measured" % label)
-        target, = trajectory_axes.plot([], [], [], "--", color=color, alpha=0.75,
-                                       label="%s reference" % label)
-        start = trajectory_axes.scatter([np.nan], [np.nan], [np.nan], color=color)
-        final = trajectory_axes.scatter([np.nan], [np.nan], [np.nan], marker="x", color=color)
-        error_lines = [error_axes.plot([], [], color=color, linestyle=style,
-                                        label="%s %s error" % (label, axis))[0]
-                       for axis, style in zip(("X", "Y", "Z"), ("-", "--", ":"))]
-        actual_attitude = [attitude_axes.plot([], [], color=color, linestyle=style,
-                                              label="%s %s" % (label, axis))[0]
-                           for axis, style in zip(("roll", "pitch", "yaw"), ("-", "--", ":"))]
-        desired_attitude = [attitude_axes.plot([], [], color=color, linestyle=style,
-                                               alpha=0.45, label="%s %s ref" % (label, axis))[0]
-                            for axis, style in zip(("roll", "pitch", "yaw"), ("-", "--", ":"))]
-        attitude_error, = attitude_error_axes.plot([], [], color=color, linewidth=1.2,
-                                                   label="%s trace error" % label)
-        velocity_lines = [velocity_axes.plot([], [], color=color, linestyle=style, alpha=alpha,
-                                             label="%s v%s%s" % (label, axis, suffix))[0]
-                          for axis, style, alpha, suffix in (
-                              ("x", "--", 0.55, " raw"), ("y", "--", 0.55, " raw"),
-                              ("z", "--", 0.55, " raw"))]
-        velocity_filtered = [velocity_axes.plot([], [], color=color, linestyle=style,
-                                                 linewidth=1.4,
-                                                 label="%s v%s filtered" % (label, axis))[0]
-                             for axis, style in zip(("x", "y", "z"), ("-", "-", "-"))]
-        acceleration_lines = [acceleration_axes.plot([], [], color=color, linestyle="--",
-                                                      alpha=0.55,
-                                                      label="%s a%s raw" % (label, axis))[0]
-                              for axis in ("x", "y", "z")]
-        acceleration_filtered = [acceleration_axes.plot([], [], color=color, linewidth=1.4,
-                                                         label="%s a%s filtered" % (label, axis))[0]
-                                 for axis in ("x", "y", "z")]
-        command_lines = [command_axes.plot([], [], color=color, linestyle=style,
-                                            label="%s %s rate" % (label, axis))[0]
-                         for axis, style in zip(("roll", "pitch", "yaw"), ("-", "--", ":"))]
-        thrust, = thrust_axes.plot([], [], color=color, linewidth=1.2,
-                                   label="%s thrust" % label)
-        handles["groups"][vehicle_id] = {
-            "measured": measured, "target": target, "start": start, "final": final,
-            "error": error_lines, "attitude": actual_attitude,
-            "desired_attitude": desired_attitude, "attitude_error": attitude_error,
-            "velocity": velocity_lines, "velocity_filtered": velocity_filtered,
-            "acceleration": acceleration_lines,
-            "acceleration_filtered": acceleration_filtered,
-            "command": command_lines, "thrust": thrust,
-        }
-    for axes in (error_axes, attitude_axes, velocity_axes, acceleration_axes, command_axes,
-                 attitude_error_axes, thrust_axes):
-        axes.grid(True)
-        axes.legend(loc="best", fontsize=7, ncol=2)
-    trajectory_axes.legend(loc="upper left", fontsize=8, ncol=2)
-    return handles
-
-
 def _set_3d_marker(marker, point):
     if point is None:
         marker._offsets3d = ([], [], [])
@@ -649,86 +496,12 @@ def update_figure(handles, data, title_prefix):
     return artists
 
 
-def update_multi_figure(handles, data_by_vehicle, title_prefix):
-    """Update a multi-vehicle figure from ``vehicle_id -> plot data``."""
-    all_positions = []
-    all_targets = []
-    artists = []
-    for vehicle_id, data in data_by_vehicle.items():
-        group = handles["groups"].get(vehicle_id)
-        if group is None:
-            continue
-        time_s = data["time_s"]
-        position = data["position"]
-        target = data["target"]
-        all_positions.append(position)
-        all_targets.append(target)
-        group["measured"].set_data(position[0], position[1])
-        group["measured"].set_3d_properties(position[2])
-        group["target"].set_data(target[0], target[1])
-        group["target"].set_3d_properties(target[2])
-        valid_position = np.flatnonzero(data["sample_is_plausible"])
-        valid_target = np.flatnonzero(np.all(np.isfinite(target), axis=0))
-        _set_3d_marker(
-            group["start"], position[:, valid_position[0]] if valid_position.size else None
-        )
-        _set_3d_marker(
-            group["final"], target[:, valid_target[-1]] if valid_target.size else None
-        )
-        for line, values in zip(group["error"], data["position_error"]):
-            line.set_data(time_s, values)
-        for line, values in zip(group["attitude"], data["rpy"]):
-            line.set_data(time_s, values)
-        for line, values in zip(group["desired_attitude"], data["desired_rpy"]):
-            line.set_data(time_s, values)
-        group["attitude_error"].set_data(time_s, data["attitude_error_trace"])
-        for line, values in zip(group["velocity"], data["velocity"]):
-            line.set_data(time_s, values)
-        for line, values in zip(group["velocity_filtered"], data["velocity_filtered"]):
-            line.set_data(time_s, values)
-        for line, values in zip(group["acceleration"], data["acceleration"]):
-            line.set_data(time_s, values)
-        for line, values in zip(group["acceleration_filtered"], data["acceleration_filtered"]):
-            line.set_data(time_s, values)
-        for line, values in zip(group["command"], data["rate_command"]):
-            line.set_data(time_s, values)
-        group["thrust"].set_data(time_s, data["thrust"])
-        artists.extend(
-            [group["measured"], group["target"], group["start"], group["final"]]
-            + group["error"] + group["attitude"] + group["desired_attitude"]
-            + [group["attitude_error"]] + group["velocity"]
-            + group["velocity_filtered"] + group["acceleration"]
-            + group["acceleration_filtered"] + group["command"] + [group["thrust"]]
-        )
-    if all_positions or all_targets:
-        _update_3d_limits(
-            handles["trajectory_axes"],
-            np.hstack(all_positions) if all_positions else np.empty((3, 0)),
-            np.hstack(all_targets) if all_targets else np.empty((3, 0)),
-        )
-    for axes in (handles["error_axes"], handles["attitude_axes"], handles["command_axes"],
-                 handles["thrust_axes"], handles["attitude_error_axes"],
-                 handles["velocity_axes"], handles["acceleration_axes"]):
-        axes.relim()
-        axes.autoscale_view()
-    labels = ["cf%s" % key if key is not None else "vehicle" for key in data_by_vehicle]
-    handles["figure"].suptitle(
-        "%s: %s" % (title_prefix, ", ".join(labels)), fontsize=14
-    )
-    return artists
-
-
-def plot(log_path, output_path, show, max_abs_position_m, vehicle_id=None):
+def plot(log_path, output_path, show, max_abs_position_m):
     """一次性绘制完整 CSV。"""
     pyplot = require_matplotlib()
-    grouped = load_multi_plot_data(log_path, max_abs_position_m, vehicle_id=vehicle_id)
-    if len(grouped) == 1:
-        data = next(iter(grouped.values()))
-        handles = create_figure(pyplot)
-        update_figure(handles, data, "CTBR Flight Log")
-    else:
-        handles = create_multi_figure(pyplot, list(grouped))
-        update_multi_figure(handles, grouped, "CTBR Flight Log")
+    data = load_plot_data(log_path, max_abs_position_m)
+    handles = create_figure(pyplot)
+    update_figure(handles, data, "CTBR Flight Log")
     if output_path:
         output_path = os.path.abspath(output_path)
         handles["figure"].savefig(output_path, dpi=150)
@@ -739,40 +512,23 @@ def plot(log_path, output_path, show, max_abs_position_m, vehicle_id=None):
         pyplot.close(handles["figure"])
 
 
-def realtime_plot(log_path, output_path, interval_s, max_abs_position_m, log_directory,
-                  vehicle_id=None):
+def realtime_plot(log_path, output_path, interval_s, max_abs_position_m, log_directory):
     """周期性重读正在增长的 CSV，实时更新曲线。"""
     pyplot = require_matplotlib()
     requested_log_path = log_path
-    grouped = None
-    merged_log = False
+    data = None
     # launch 与控制器同时启动时，CSV 可能尚未创建；等待首个有效样本。
-    while grouped is None:
+    while data is None:
         try:
             active_log_path = requested_log_path or latest_ctbr_log(log_directory)
-            grouped = load_multi_plot_data(
-                active_log_path, max_abs_position_m, vehicle_id=vehicle_id
-            )
-            merged_log = (
-                vehicle_id is None and
-                os.path.basename(active_log_path).startswith("multi_ctbr_")
-            )
-            if merged_log and len(grouped) < 2:
-                grouped = None
-                pyplot.pause(max(0.05, float(interval_s)))
-                continue
+            data = load_plot_data(active_log_path, max_abs_position_m)
         except (OSError, ValueError, SystemExit) as error:
             if requested_log_path:
                 raise SystemExit("无法读取 CTBR CSV：%s" % error)
             pyplot.pause(max(0.05, float(interval_s)))
 
-    multi = len(grouped) > 1 or merged_log
-    if multi:
-        handles = create_multi_figure(pyplot, list(grouped))
-        update_multi_figure(handles, grouped, "CTBR Realtime")
-    else:
-        handles = create_figure(pyplot)
-        update_figure(handles, next(iter(grouped.values())), "CTBR Realtime")
+    handles = create_figure(pyplot)
+    update_figure(handles, data, "CTBR Realtime")
 
     from matplotlib.animation import FuncAnimation
 
@@ -780,17 +536,11 @@ def realtime_plot(log_path, output_path, interval_s, max_abs_position_m, log_dir
         try:
             # 未指定路径时跟踪最新文件，确保本次 launch 创建的日志会被接管。
             active_log_path = requested_log_path or latest_ctbr_log(log_directory)
-            latest_grouped = load_multi_plot_data(
-                active_log_path, max_abs_position_m, vehicle_id=vehicle_id
-            )
+            latest = load_plot_data(active_log_path, max_abs_position_m)
         except (OSError, ValueError, SystemExit):
             # 控制器刚创建文件或正在写入表头时，保留上一帧等待下一次刷新。
             return []
-        if multi:
-            return update_multi_figure(handles, latest_grouped, "CTBR Realtime")
-        return update_figure(
-            handles, next(iter(latest_grouped.values())), "CTBR Realtime"
-        )
+        return update_figure(handles, latest, "CTBR Realtime")
 
     animation = FuncAnimation(
         handles["figure"],
@@ -829,10 +579,6 @@ def main():
         "--max-abs-position-m", type=float, default=10.0,
         help="过滤超出该位置范围的动捕样本（默认 10 m）",
     )
-    parser.add_argument(
-        "--vehicle-id", type=int, default=None,
-        help="只绘制指定 id；默认显示合并日志中的全部飞机",
-    )
     # roslaunch 会追加 __name:= 和 __log:= 等重映射参数；它们不属于绘图脚本自身。
     ros_remap_args = [argument for argument in sys.argv[1:] if not argument.startswith("__")]
     args, _ = parser.parse_known_args(ros_remap_args)
@@ -859,14 +605,10 @@ def main():
     if args.static or args.no_show:
         log_path = args.log or latest_ctbr_log(log_directory)
         print("Using CTBR log: %s" % log_path)
-        plot(
-            log_path, args.output, not args.no_show, args.max_abs_position_m,
-            vehicle_id=args.vehicle_id,
-        )
+        plot(log_path, args.output, not args.no_show, args.max_abs_position_m)
     else:
         realtime_plot(
-            args.log, args.output, args.interval, args.max_abs_position_m,
-            log_directory, vehicle_id=args.vehicle_id,
+            args.log, args.output, args.interval, args.max_abs_position_m, log_directory
         )
 
 

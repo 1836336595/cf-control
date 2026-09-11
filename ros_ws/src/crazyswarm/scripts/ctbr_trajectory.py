@@ -1,9 +1,9 @@
 #!/usr/bin/python3
-"""CTBR 任务参考轨迹。
+"""CTBR 圆周任务参考轨迹。
 
 本模块只生成期望状态，不订阅 ROS 话题，也不发送控制命令。它把任务流程和几何
-参考轨迹与 ``ctbr_controller.py`` 中的控制律分开，便于在圆周、编队八字、航点等任务
-之间切换，而不改动 CTBR 外环。
+参考轨迹与 ``ctbr_controller.py`` 中的控制律分开，便于以后替换为八字、航点或其他
+任务而不改动 CTBR 外环。
 
 圆周主体使用五次角度平滑和解析运动学：
 
@@ -36,21 +36,6 @@ def _as_vector(value, name, size=3):
 def _wrap_angle(angle):
     """将角度归一到 [-pi, pi]。"""
     return math.atan2(math.sin(float(angle)), math.cos(float(angle)))
-
-
-def _trajectory_mode(value):
-    """规范化并校验任务模式名称。"""
-    mode = str(value).strip().lower().replace("-", "_")
-    aliases = {
-        "circle": "circle",
-        "figure_eight_triangle": "figure_eight_triangle",
-        "triangle_figure_eight": "figure_eight_triangle",
-    }
-    if mode not in aliases:
-        raise ValueError(
-            "trajectory_mode 必须是 circle 或 figure_eight_triangle"
-        )
-    return aliases[mode]
 
 
 def _smoothstep5(elapsed, duration):
@@ -114,34 +99,17 @@ class CircularTrajectoryConfig:
     circle_max_tilt_rad: float
     landing_max_tilt_rad: float
     takeoff_min_collective_thrust: float
-    # 飞行阶段的最低总推力。它防止外环在高度超调时把集体推力压到零；降落确认后
-    # 仍由 zero_output 显式释放推力。
-    airborne_min_collective_thrust: float
-    # When set, use this absolute world-frame center instead of the legacy
-    # center offset relative to the measured start position.
-    circle_center_xy: object = None
-    # Per-vehicle phase offset used by multi-vehicle formations.
-    orbit_phase_rad: float = 0.0
-    # ``circle`` keeps the original single-vehicle/multi-phase circle.  In
-    # ``figure_eight_triangle`` the three phase offsets describe vertices of a
-    # rigid equilateral triangle whose centroid follows the figure-eight.
-    trajectory_mode: str = "circle"
-    formation_side_length_m: float = 0.5
-    figure_eight_radius_m: float = 0.8
-    # Peak angular speed of each smoothstep lobe, rad/s.
-    figure_eight_angular_speed_radps: float = 0.55
 
 
 class CircularFlightTrajectory:
-    """圆周或刚性三角形八字任务的参考生成器和安全阶段机。
+    """一圈水平圆周任务的参考生成器和安全阶段机。
 
     通常由调用方用第一帧有效 Nokov 状态调用 ``reset``；如果尚未调用，
     ``evaluate(state, now)`` 也会用其第一帧有效状态自动锁定起点。``state`` 至少
     包含 ``position`` 和 ``velocity``，可选 ``valid`` 字段为 ``False`` 时不会满足
     落地门控。起飞阶段结束后继续使用名义起飞点 x/y，并持续给出精确起飞高度 z
-    参考；该校正阶段按固定时间推进，不再因高度/速度误差反复重放起飞曲线。八字模式
-    中，``orbit_phase_rad`` 定义机体在三角形质心周围的恒定顶点偏移。落地阶段仍由实际
-    状态确认，避免未接触地面时释放推力。
+    参考；该校正阶段按固定时间推进，不再因高度/速度误差反复重放起飞曲线。落地阶段
+    仍由实际状态确认，避免未接触地面时释放推力。
     """
 
     def __init__(self, config):
@@ -153,16 +121,11 @@ class CircularFlightTrajectory:
 
     def _validate_config(self):
         cfg = self.config
-        _trajectory_mode(cfg.trajectory_mode)
         positive = (
             ("takeoff_height_m", cfg.takeoff_height_m),
             ("takeoff_duration_s", cfg.takeoff_duration_s),
             ("circle_radius_m", cfg.circle_radius_m),
             ("circle_angular_speed_radps", cfg.circle_angular_speed_radps),
-            ("formation_side_length_m", cfg.formation_side_length_m),
-            ("figure_eight_radius_m", cfg.figure_eight_radius_m),
-            ("figure_eight_angular_speed_radps",
-             cfg.figure_eight_angular_speed_radps),
             ("entry_duration_s", cfg.entry_duration_s),
             ("landing_duration_s", cfg.landing_duration_s),
             ("landing_max_speed_mps", cfg.landing_max_speed_mps),
@@ -184,7 +147,6 @@ class CircularFlightTrajectory:
             ("final_hover_s", cfg.final_hover_s),
             ("landing_settle_s", cfg.landing_settle_s),
             ("takeoff_min_collective_thrust", cfg.takeoff_min_collective_thrust),
-            ("airborne_min_collective_thrust", cfg.airborne_min_collective_thrust),
             # Deprecated compatibility field; it no longer controls the circle profile.
             ("circle_ramp_duration_s", cfg.circle_ramp_duration_s),
         )
@@ -199,19 +161,9 @@ class CircularFlightTrajectory:
                 raise ValueError("%s 必须在 (0, pi/2) 内" % name)
         if cfg.circle_center_offset_xy is not None:
             _as_vector(cfg.circle_center_offset_xy, "circle_center_offset_xy", size=2)
-        if cfg.circle_center_xy is not None:
-            _as_vector(cfg.circle_center_xy, "circle_center_xy", size=2)
-        if not math.isfinite(float(cfg.orbit_phase_rad)):
-            raise ValueError("orbit_phase_rad 必须是有限数")
 
-    def reset(self, start_position=None, start_yaw=0.0, now=0.0,
-              orbit_phase_rad=None):
-        """锁定第一帧起点并重置任务阶段。
-
-        ``orbit_phase_rad`` is optional for callers that reuse one trajectory
-        configuration object for several vehicles; when omitted, the phase in
-        ``CircularTrajectoryConfig`` is used.
-        """
+    def reset(self, start_position=None, start_yaw=0.0, now=0.0):
+        """锁定第一帧起点并重置任务阶段。"""
         self.initialized = start_position is not None
         self.start_time = float(now)
         self.start_yaw = float(start_yaw)
@@ -223,41 +175,17 @@ class CircularFlightTrajectory:
         self.circle_entry_start_position = None
         self.circle_center = None
         self.circle_start_position = None
-        self.formation_center = None
-        self.formation_offset = None
         self.landing_target_position = None
         self.active_landing_duration_s = None
-        phase = (
-            float(self.config.orbit_phase_rad)
-            if orbit_phase_rad is None else float(orbit_phase_rad)
+        self.circle_start_angle = float(self.config.circle_start_angle_rad)
+        total_angle = 2.0 * math.pi * float(self.config.circle_revolutions)
+        # The derivative of 10u^3 - 15u^4 + 6u^5 peaks at 15/8.  Interpret
+        # circle_angular_speed_radps as the requested peak, so the configured
+        # limit is not exceeded during the smoothstep motion.
+        omega_peak = float(self.config.circle_angular_speed_radps)
+        self.circle_duration_s = (
+            _SMOOTHSTEP5_MAX_DERIVATIVE * total_angle / omega_peak
         )
-        if not math.isfinite(phase):
-            raise ValueError("orbit_phase_rad 必须是有限数")
-        self.trajectory_mode = _trajectory_mode(self.config.trajectory_mode)
-        self.active_orbit_phase_rad = phase
-        self.circle_start_angle = float(self.config.circle_start_angle_rad) + phase
-        self.figure_eight_lobe_duration_s = None
-        if self.trajectory_mode == "circle":
-            total_angle = 2.0 * math.pi * float(self.config.circle_revolutions)
-            # The derivative of 10u^3 - 15u^4 + 6u^5 peaks at 15/8.  Interpret
-            # circle_angular_speed_radps as the requested peak, so the configured
-            # limit is not exceeded during the smoothstep motion.
-            omega_peak = float(self.config.circle_angular_speed_radps)
-            self.circle_duration_s = (
-                _SMOOTHSTEP5_MAX_DERIVATIVE * total_angle / omega_peak
-            )
-            self.main_duration_s = self.circle_duration_s
-        else:
-            # 使用单条连续的 Gerono 八字曲线，而不是在原点硬拼两个圆。这样
-            # 八字交点处保留非零速度，同时位置、速度和加速度连续。保留原先两
-            # 个圆叶总时长，避免切换模式后参考速度突然增大。
-            self.figure_eight_lobe_duration_s = (
-                _SMOOTHSTEP5_MAX_DERIVATIVE * 2.0 * math.pi /
-                float(self.config.figure_eight_angular_speed_radps)
-            )
-            self.main_duration_s = 2.0 * self.figure_eight_lobe_duration_s
-            # 保持旧的公开属性可用；在八字模式它表示整段主轨迹时长。
-            self.circle_duration_s = self.main_duration_s
         self.phase = "waiting_for_reset"
         self.phase_start_time = float(now)
         self.takeoff_arrival_time = None
@@ -267,42 +195,24 @@ class CircularFlightTrajectory:
         # 与时间相关的锚点整体后移，避免参考在不可观测期间跳到后续阶段。
         self.paused_at = None
         self.abort_position = None
-        self.emergency_landing_start_position = None
-        self.emergency_landing_yaw = None
         self._events = []
         if self.initialized:
             self._initialize_geometry()
             self.phase = "pre_takeoff_hold"
-            if self.trajectory_mode == "circle":
-                self._emit(
-                    "已锁定起点 [%.3f, %.3f, %.3f] m；保持 %.1f s 后上升 %.3f m；"
-                    "圆心 [%.3f, %.3f] m，半径 %.3f m，机头指向圆心。" % (
-                        self.start_position[0], self.start_position[1], self.start_position[2],
-                        self.config.reference_hold_s, self.config.takeoff_height_m,
-                        self.circle_center[0], self.circle_center[1],
-                        self.config.circle_radius_m,
-                    )
+            self._emit(
+                "已锁定起点 [%.3f, %.3f, %.3f] m；保持 %.1f s 后上升 %.3f m；"
+                "圆心 [%.3f, %.3f] m，半径 %.3f m，机头指向圆心。" % (
+                    self.start_position[0], self.start_position[1], self.start_position[2],
+                    self.config.reference_hold_s, self.config.takeoff_height_m,
+                    self.circle_center[0], self.circle_center[1], self.config.circle_radius_m,
                 )
-            else:
-                self._emit(
-                    "已锁定起点 [%.3f, %.3f, %.3f] m；保持 %.1f s 后上升 %.3f m；"
-                    "等边三角形边长 %.3f m，初始质心 [%.3f, %.3f] m；"
-                    "共同绕半径 %.3f m 的八字，机头指向编队质心。" % (
-                        self.start_position[0], self.start_position[1], self.start_position[2],
-                        self.config.reference_hold_s, self.config.takeoff_height_m,
-                        self.config.formation_side_length_m,
-                        self.circle_center[0], self.circle_center[1],
-                        self.config.figure_eight_radius_m,
-                    )
-                )
+            )
 
     def _initialize_geometry(self):
         cfg = self.config
         self.takeoff_position = self.start_position.copy()
         self.takeoff_position[2] += float(cfg.takeoff_height_m)
-        if cfg.circle_center_xy is not None:
-            center_xy = _as_vector(cfg.circle_center_xy, "circle_center_xy", size=2)
-        elif cfg.circle_center_offset_xy is not None:
+        if cfg.circle_center_offset_xy is not None:
             center_xy = self.start_position[:2] + _as_vector(
                 cfg.circle_center_offset_xy, "circle_center_offset_xy", size=2
             )
@@ -312,27 +222,15 @@ class CircularFlightTrajectory:
             [center_xy[0], center_xy[1], self.takeoff_position[2]], dtype=float
         )
         # Keep the nominal takeoff x/y through height correction and circle
-        # entry.  The measured horizontal drift must not redefine the nominal
-        # center or introduce a reference bump before the main trajectory.
+        # entry.  The measured horizontal drift must not redefine the circle
+        # center or introduce a reference bump before the circle.
         self.height_correction_position = self.takeoff_position.copy()
         self.circle_entry_start_position = self.takeoff_position.copy()
-        if self.trajectory_mode == "circle":
-            self.circle_start_position = self.circle_center + np.array([
-                cfg.circle_radius_m * math.cos(self.circle_start_angle),
-                cfg.circle_radius_m * math.sin(self.circle_start_angle), 0.0,
-            ])
-        else:
-            # Three vehicle phase offsets 0, 2pi/3, 4pi/3 place the vehicles
-            # on a circumcircle of side_length / sqrt(3), producing an exact
-            # equilateral triangle around the configured initial centroid.
-            self.formation_center = self.circle_center.copy()
-            circumradius = float(cfg.formation_side_length_m) / math.sqrt(3.0)
-            self.formation_offset = np.array([
-                circumradius * math.cos(self.active_orbit_phase_rad),
-                circumradius * math.sin(self.active_orbit_phase_rad), 0.0,
-            ])
-            self.circle_start_position = self.formation_center + self.formation_offset
-        # 主轨迹结束后保持最终点的 x/y，只把 z 降回起飞前高度。
+        self.circle_start_position = self.circle_center + np.array([
+            cfg.circle_radius_m * math.cos(self.circle_start_angle),
+            cfg.circle_radius_m * math.sin(self.circle_start_angle), 0.0,
+        ])
+        # 一圈结束后保持最终圆周点的 x/y，只把 z 降回起飞前高度。
         self.landing_target_position = self.circle_start_position.copy()
         self.landing_target_position[2] = self.start_position[2]
         self.active_landing_duration_s = max(
@@ -397,30 +295,6 @@ class CircularFlightTrajectory:
         self.paused_at = None
         self._transition("aborted", now, "轨迹安全中止：%s；保持零 CTBR 推力。" % reason)
 
-    def begin_emergency_landing(self, now, position, yaw, reason):
-        """从当前 NOKOV 位置开始一条慢速、受控的紧急降落参考。
-
-        EKF 运动学持续失效时不能像丢失 NOKOV 一样直接发送零推力。这里保留 NOKOV
-        的位置和姿态，在有限的零速度/零加速度反馈下将 z 平滑降至起飞高度；只有
-        实测高度已接近地面时才允许 ``zero_output``。
-        """
-        if self.phase in ("emergency_landing", "landed", "aborted"):
-            return
-        position = _as_vector(position, "emergency_landing_position")
-        self.emergency_landing_start_position = position.copy()
-        self.emergency_landing_yaw = float(yaw)
-        self.landing_target_position = position.copy()
-        self.landing_target_position[2] = self.start_position[2]
-        self.active_landing_duration_s = max(
-            float(self.config.landing_duration_s),
-            1.875 * abs(position[2] - self.landing_target_position[2]) /
-            float(self.config.landing_max_speed_mps),
-        )
-        self._transition(
-            "emergency_landing", now,
-            "EKF 运动学持续失效：%s；从当前位置开始受控降落。" % reason,
-        )
-
     def _static_target(
             self, position, yaw, phase, max_tilt_rad=None, min_thrust=0.0,
             zero_output=False):
@@ -459,23 +333,14 @@ class CircularFlightTrajectory:
             "flight_phase": "takeoff",
             "max_tilt_rad": cfg.takeoff_max_tilt_rad,
             "min_collective_thrust": (
-                cfg.airborne_min_collective_thrust if elapsed > 0.0 else 0.0
+                cfg.takeoff_min_collective_thrust
+                if elapsed > 0.0 and self._takeoff_requires_support(state) else 0.0
             ),
         }
 
-    @staticmethod
-    def _yaw_toward(position, center):
-        radial = np.asarray(center, dtype=float)[:2] - np.asarray(position, dtype=float)[:2]
-        return math.atan2(float(radial[1]), float(radial[0]))
-
     def _inward_yaw(self, position):
-        """圆周模式面向圆心；编队模式面向初始/当前编队质心。"""
-        center = (
-            self.formation_center
-            if self.trajectory_mode == "figure_eight_triangle"
-            else self.circle_center
-        )
-        return self._yaw_toward(position, center)
+        radial = self.circle_center[:2] - np.asarray(position, dtype=float)[:2]
+        return math.atan2(float(radial[1]), float(radial[0]))
 
     def _entry_target(self, elapsed):
         cfg = self.config
@@ -499,7 +364,7 @@ class CircularFlightTrajectory:
             "yaw_rate": velocity_scale * yaw_displacement,
             "flight_phase": "circle_entry",
             "max_tilt_rad": cfg.circle_max_tilt_rad,
-            "min_collective_thrust": cfg.airborne_min_collective_thrust,
+            "min_collective_thrust": 0.0,
         }
 
     def _set_height_correction_reference(self):
@@ -515,7 +380,8 @@ class CircularFlightTrajectory:
             "height_correction",
             max_tilt_rad=self.config.takeoff_max_tilt_rad,
             min_thrust=(
-                self.config.airborne_min_collective_thrust
+                self.config.takeoff_min_collective_thrust
+                if self._takeoff_requires_support(state) else 0.0
             ),
         )
 
@@ -553,7 +419,7 @@ class CircularFlightTrajectory:
             "yaw_rate": angular_velocity,
             "flight_phase": phase,
             "max_tilt_rad": cfg.circle_max_tilt_rad,
-            "min_collective_thrust": cfg.airborne_min_collective_thrust,
+            "min_collective_thrust": 0.0,
         }
 
     def _circle_target(self, elapsed):
@@ -584,124 +450,29 @@ class CircularFlightTrajectory:
         """Return the exact end point used by hover and landing references."""
         return self._circle_target(self.circle_duration_s)
 
-    def _figure_eight_target(self, elapsed):
-        """返回中心不断速的连续 Gerono 八字刚性编队参考。
-
-        编队质心的平面曲线为 ``x = r sin(theta)``、
-        ``y = r sin(theta) cos(theta)``，其中 ``theta`` 由全程五次
-        smoothstep 从 0 推进至 2pi。这样经过原点交点（theta=pi）时，
-        速度非零，且位置、速度、加速度都连续；仅任务起点/终点静止。
-        ``figure_eight_radius_m`` 是 x 方向每个叶瓣相对交点的最大范围。
-        """
-        (
-            angle_scale,
-            angular_velocity_scale,
-            angular_acceleration_scale,
-            angular_jerk_scale,
-        ) = _smoothstep5_with_jerk(elapsed, self.main_duration_s)
-        total_angle = 2.0 * math.pi
-        angle = total_angle * angle_scale
-        angular_velocity = total_angle * angular_velocity_scale
-        angular_acceleration = total_angle * angular_acceleration_scale
-        angular_jerk = total_angle * angular_jerk_scale
-        radius = float(self.config.figure_eight_radius_m)
-        sin_angle = math.sin(angle)
-        cos_angle = math.cos(angle)
-        sin_double_angle = math.sin(2.0 * angle)
-        cos_double_angle = math.cos(2.0 * angle)
-        centroid_position = self.formation_center + np.array([
-            radius * sin_angle,
-            radius * sin_angle * cos_angle,
-            0.0,
-        ])
-        centroid_velocity = np.array([
-            radius * cos_angle * angular_velocity,
-            radius * cos_double_angle * angular_velocity,
-            0.0,
-        ])
-        centroid_acceleration = np.array([
-            radius * (-sin_angle * angular_velocity * angular_velocity
-                      + cos_angle * angular_acceleration),
-            radius * (-2.0 * sin_double_angle * angular_velocity * angular_velocity
-                      + cos_double_angle * angular_acceleration),
-            0.0,
-        ])
-        jerk_xy = radius * np.array([
-            (-cos_angle * angular_velocity ** 3
-             - 3.0 * sin_angle * angular_velocity * angular_acceleration
-             + cos_angle * angular_jerk),
-            (-4.0 * cos_double_angle * angular_velocity ** 3
-             - 6.0 * sin_double_angle * angular_velocity * angular_acceleration
-             + cos_double_angle * angular_jerk),
-        ])
-        position = centroid_position + self.formation_offset
-        return {
-            "position": position,
-            "velocity": centroid_velocity,
-            "acceleration": centroid_acceleration,
-            "jerk": np.array([jerk_xy[0], jerk_xy[1], 0.0]),
-            # Each vehicle has a constant body-to-centroid bearing because the
-            # triangular formation only translates; hence yaw_rate is zero.
-            "yaw": self._yaw_toward(position, centroid_position),
-            "yaw_rate": 0.0,
-            "flight_phase": "figure_eight",
-            "max_tilt_rad": self.config.circle_max_tilt_rad,
-            "min_collective_thrust": self.config.airborne_min_collective_thrust,
-        }
-
-    def _main_target(self, elapsed):
-        if self.trajectory_mode == "figure_eight_triangle":
-            return self._figure_eight_target(elapsed)
-        return self._circle_target(elapsed)
-
-    def _main_endpoint_target(self):
-        return self._main_target(self.main_duration_s)
-
     def _landing_target(self, elapsed):
         cfg = self.config
         duration = float(self.active_landing_duration_s)
         position_scale, velocity_scale, acceleration_scale, jerk_scale = _smoothstep5_with_jerk(
             elapsed, duration
         )
-        final_target = self._main_endpoint_target()
-        displacement = self.landing_target_position - final_target["position"]
+        final_circle = self._circle_endpoint_target()
+        displacement = self.landing_target_position - final_circle["position"]
         target = {
-            "position": final_target["position"] + position_scale * displacement,
+            "position": final_circle["position"] + position_scale * displacement,
             "velocity": velocity_scale * displacement,
             "acceleration": acceleration_scale * displacement,
             "jerk": jerk_scale * displacement,
-            "yaw": final_target["yaw"],
+            "yaw": final_circle["yaw"],
             "yaw_rate": 0.0,
             "flight_phase": "landing",
             "max_tilt_rad": cfg.landing_max_tilt_rad,
-            "min_collective_thrust": cfg.airborne_min_collective_thrust,
+            "min_collective_thrust": 0.0,
         }
-        return target
-
-    def _emergency_landing_target(self, elapsed, state):
-        duration = float(self.active_landing_duration_s)
-        scale, velocity_scale, acceleration_scale, jerk_scale = _smoothstep5_with_jerk(
-            elapsed, duration
-        )
-        displacement = (
-            self.landing_target_position - self.emergency_landing_start_position
-        )
-        target = {
-            "position": self.emergency_landing_start_position + scale * displacement,
-            "velocity": velocity_scale * displacement,
-            "acceleration": acceleration_scale * displacement,
-            "jerk": jerk_scale * displacement,
-            "yaw": self.emergency_landing_yaw,
-            "yaw_rate": 0.0,
-            "flight_phase": "emergency_landing",
-            "max_tilt_rad": self.config.landing_max_tilt_rad,
-            "min_collective_thrust": self.config.airborne_min_collective_thrust,
-        }
-        position = self._state_value(state, "position")
-        if (elapsed >= duration and position is not None and
-                float(np.asarray(position, dtype=float).reshape(3)[2]) <=
-                float(self.landing_target_position[2]) +
-                float(self.config.landing_altitude_tolerance_m)):
+        # 参考轨迹到达地面后必须释放推力，让飞机真正接触地面。若仍调用
+        # 几何控制器，它会为 z=落地点补偿重力，把已经落地的飞机再次托起，
+        # 造成 landing_settle 反复进入/退出。
+        if elapsed >= duration:
             target["zero_output"] = True
         return target
 
@@ -781,7 +552,7 @@ class CircularFlightTrajectory:
         )
 
     def _landed_target(self):
-        final_circle = self._main_endpoint_target()
+        final_circle = self._circle_endpoint_target()
         return self._static_target(
             self.landing_target_position, final_circle["yaw"], "landed",
             max_tilt_rad=self.config.landing_max_tilt_rad,
@@ -840,15 +611,10 @@ class CircularFlightTrajectory:
             # measured altitude or vertical velocity excursions.
             target = self._height_correction_target(state)
             if elapsed >= cfg.takeoff_settle_s:
-                entry_message = (
-                    "高度校正参考完成，开始平滑进入等边三角形编队起点。"
-                    if self.trajectory_mode == "figure_eight_triangle" else
-                    "高度校正参考完成，开始平滑进入半径 %.3f m 的圆周。"
-                    % cfg.circle_radius_m
-                )
                 self._transition(
                     "circle_entry", now,
-                    entry_message,
+                    "高度校正参考完成，开始平滑进入半径 %.3f m 的圆周。"
+                    % cfg.circle_radius_m,
                 )
                 return self.evaluate(state, now)
             return target
@@ -856,40 +622,25 @@ class CircularFlightTrajectory:
         if self.phase == "circle_entry":
             target = self._entry_target(elapsed)
             if elapsed >= cfg.entry_duration_s:
-                if self.trajectory_mode == "figure_eight_triangle":
-                    self._transition(
-                        "figure_eight", now,
-                        "已进入三角形编队起点，开始共同绕五次平滑八字轨迹。",
-                    )
-                else:
-                    self._transition(
-                        "circle", now,
-                        "已进入圆周起点，开始五次角度平滑圆周轨迹。",
-                    )
+                self._transition("circle", now, "已进入圆周起点，开始五次角度平滑圆周轨迹。")
                 return self.evaluate(state, now)
             return target
 
-        if self.phase in ("circle", "figure_eight"):
-            target = self._main_target(elapsed)
-            if elapsed >= self.main_duration_s:
-                completion_message = (
-                    "八字轨迹完成，开始 %.1f s 最终点悬停。" % cfg.final_hover_s
-                    if self.trajectory_mode == "figure_eight_triangle" else
-                    "圆周完成，开始 %.1f s 最终点悬停。" % cfg.final_hover_s
-                )
+        if self.phase == "circle":
+            target = self._circle_target(elapsed)
+            if elapsed >= self.circle_duration_s:
                 self._transition(
                     "final_hover", now,
-                    completion_message,
+                    "圆周完成，开始 %.1f s 最终点悬停。" % cfg.final_hover_s,
                 )
                 return self.evaluate(state, now)
             return target
 
-        final_circle = self._main_endpoint_target()
+        final_circle = self._circle_endpoint_target()
         if self.phase == "final_hover":
             target = self._static_target(
                 final_circle["position"], final_circle["yaw"], "final_hover",
                 max_tilt_rad=cfg.circle_max_tilt_rad,
-                min_thrust=cfg.airborne_min_collective_thrust,
             )
             if elapsed >= cfg.final_hover_s:
                 self._transition(
@@ -947,9 +698,6 @@ class CircularFlightTrajectory:
                 return self.evaluate(state, now)
             return target
 
-        if self.phase == "emergency_landing":
-            return self._emergency_landing_target(elapsed, state)
-
         if self.phase == "landed":
             return self._landed_target()
         if self.phase == "aborted":
@@ -968,7 +716,7 @@ class CircularFlightTrajectory:
             + float(self.config.takeoff_duration_s)
             + float(self.config.takeoff_settle_s)
             + float(self.config.entry_duration_s)
-            + float(self.main_duration_s)
+            + float(self.circle_duration_s)
             + float(self.config.final_hover_s)
             + float(self.active_landing_duration_s or self.config.landing_duration_s)
         )

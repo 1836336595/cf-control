@@ -16,11 +16,9 @@ from collections import deque
 from pathlib import Path
 
 import numpy as np
-import yaml
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-CONTROLLER_CONFIG_PATH = SCRIPT_DIR.parent / "config" / "ctbr_controller.yaml"
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
@@ -52,22 +50,10 @@ def _install_ros_import_stubs():
 
     nav_msgs = types.ModuleType("nav_msgs")
     nav_msgs_msg = types.ModuleType("nav_msgs.msg")
-    class PathMessage:
-        def __init__(self):
-            self.header = types.SimpleNamespace(frame_id="", stamp=None)
-            self.poses = []
-
-    nav_msgs_msg.Path = PathMessage
+    nav_msgs_msg.Path = type("Path", (), {})
     nav_msgs.msg = nav_msgs_msg
     sys.modules["nav_msgs"] = nav_msgs
     sys.modules["nav_msgs.msg"] = nav_msgs_msg
-
-    std_msgs = types.ModuleType("std_msgs")
-    std_msgs_msg = types.ModuleType("std_msgs.msg")
-    std_msgs_msg.UInt16 = type("UInt16", (), {})
-    std_msgs.msg = std_msgs_msg
-    sys.modules["std_msgs"] = std_msgs
-    sys.modules["std_msgs.msg"] = std_msgs_msg
 
 
 def _controller_module():
@@ -81,145 +67,6 @@ def _controller_module():
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
-
-
-def test_vehicle_parameter_namespace_uses_cf_id_suffix():
-    """Changing a CF ID must select only its matching calibration root."""
-    module = _controller_module()
-
-    assert module.vehicle_parameter_namespace(2) == "/ctbr_controller_cf2"
-    assert module.vehicle_parameter_namespace(4) == "/ctbr_controller_cf4"
-
-
-def test_parameter_resolver_keeps_global_trajectory_and_cf_calibration_separate():
-    """A CF4 read must not silently fall back to CF2 or shared calibration."""
-    module = _controller_module()
-    values = {
-        "/ctbr_controller_cf2": {},
-        "/ctbr_controller_cf4": {},
-        "/ctbr_controller/control_rate_hz": 60.0,
-        "/ctbr_trajectory/figure_eight_radius_m": 0.8,
-        "/ctbr_controller_cf2/mass_kg": 0.0434,
-        "/ctbr_controller_cf4/mass_kg": 0.0460,
-        "/ctbr_controller_cf4/position_gain": [0.8, 0.8, 0.5],
-    }
-    resolver = module.CtbrParameterResolver(
-        lambda name, default=None: values.get(name, default),
-        lambda name: name in values,
-        vehicle_id=4,
-    )
-
-    assert resolver.global_param("control_rate_hz") == 60.0
-    assert resolver.trajectory_param("figure_eight_radius_m") == 0.8
-    assert resolver.vehicle_param("mass_kg") == 0.0460
-    assert resolver.vehicle_param("position_gain") == [0.8, 0.8, 0.5]
-
-
-def test_parameter_resolver_rejects_missing_vehicle_calibration_block():
-    """A newly enabled CF may not fly with another vehicle's tuning."""
-    module = _controller_module()
-
-    try:
-        module.CtbrParameterResolver(lambda *_args: None, lambda _name: False, 5)
-    except ValueError as error:
-        assert "CF5" in str(error)
-        assert "/ctbr_controller_cf5" in str(error)
-    else:
-        raise AssertionError("missing CF5 parameter block must be rejected")
-
-
-class _FakeParameterServer:
-    """Minimal ROS parameter-server boundary with only absolute YAML paths."""
-
-    _MISSING = object()
-
-    def __init__(self, roots):
-        self.values = {}
-        for root, mapping in roots.items():
-            root_path = "/" + root
-            self.values[root_path] = mapping
-            if isinstance(mapping, dict):
-                for name, value in mapping.items():
-                    self.values[root_path + "/" + name] = value
-
-    def has_param(self, name):
-        return name in self.values
-
-    def get_param(self, name, default=_MISSING):
-        if name in self.values:
-            return self.values[name]
-        if default is self._MISSING:
-            raise KeyError(name)
-        return default
-
-
-def _configure_controller_node_ros(module, roots):
-    """Keep production parameter routing real while replacing ROS transport only."""
-    server = _FakeParameterServer(roots)
-    module.rospy.get_param = server.get_param
-    module.rospy.has_param = server.has_param
-    module.rospy.Publisher = lambda *_args, **_kwargs: types.SimpleNamespace(
-        publish=lambda *_publish_args, **_publish_kwargs: None
-    )
-    module.rospy.Subscriber = lambda *_args, **_kwargs: types.SimpleNamespace()
-    module.rospy.loginfo = lambda *_args, **_kwargs: None
-    module.rospy.logwarn = lambda *_args, **_kwargs: None
-    module.rospy.on_shutdown = lambda *_args, **_kwargs: None
-    return server
-
-
-def _controller_parameter_roots():
-    roots = yaml.safe_load(CONTROLLER_CONFIG_PATH.read_text())
-    roots["ctbr_controller"]["target_confirmed"] = True
-    return roots
-
-
-def _node_logger():
-    return types.SimpleNamespace(path="/tmp/ctbr-test.csv", close=lambda: None)
-
-
-def test_controller_node_reads_cf_specific_calibration_from_absolute_namespace():
-    """Leaving one private ~mass read would reject the new YAML layout."""
-    module = _controller_module()
-    roots = _controller_parameter_roots()
-    roots["ctbr_controller_cf4"]["mass_kg"] = 0.0460
-    roots["ctbr_controller_cf4"]["position_gain"] = [0.8, 0.8, 0.5]
-    _configure_controller_node_ros(module, roots)
-
-    cf2 = module.CtbrControllerNode(
-        vehicle_config={"id": 2, "uri": "radio://0/80/2M/E7E7E7E702"},
-        logger=_node_logger(), auto_timer=False, register_shutdown=False,
-    )
-    cf4 = module.CtbrControllerNode(
-        vehicle_config={"id": 4, "uri": "radio://0/80/2M/E7E7E7E704"},
-        logger=_node_logger(), auto_timer=False, register_shutdown=False,
-    )
-
-    assert math.isclose(cf2.controller.config.mass, 0.0434)
-    assert math.isclose(cf4.controller.config.mass, 0.0460)
-    assert np.allclose(cf4.controller.config.position_gain, [0.8, 0.8, 0.5])
-    assert cf2.rate_hz == cf4.rate_hz == 60.0
-    assert cf2.trajectory_config.trajectory_mode == "figure_eight_triangle"
-    assert cf4.trajectory_config.trajectory_mode == "figure_eight_triangle"
-
-
-def test_controller_node_rejects_missing_cf_specific_parameter_block():
-    """An enabled CF5 must fail closed when its calibration map is absent."""
-    module = _controller_module()
-    roots = _controller_parameter_roots()
-    del roots["ctbr_controller_cf5"]
-    _configure_controller_node_ros(module, roots)
-
-    try:
-        module.CtbrControllerNode(
-            vehicle_config={"id": 5, "uri": "radio://0/80/2M/E7E7E7E705"},
-            logger=_node_logger(), auto_timer=False, register_shutdown=False,
-        )
-    except RuntimeError as error:
-        assert "CF5" in str(error)
-        assert "/ctbr_controller_cf5" in str(error)
-    else:
-        raise AssertionError("CF5 without a calibration block must be rejected")
 
 
 def _config(module, **overrides):
@@ -270,17 +117,6 @@ def _target(acceleration=None, jerk=None, yaw=0.0, yaw_rate=0.0):
         "yaw": float(yaw),
         "yaw_rate": float(yaw_rate),
     }
-
-
-def test_normal_trajectory_phase_transitions_preserve_position_integral():
-    module = _controller_module()
-
-    for phase in (
-            "takeoff", "height_correction", "circle_entry", "circle",
-            "final_hover", "landing", "landing_settle"):
-        assert not module.phase_requires_full_controller_reset(phase)
-    for phase in ("emergency_landing", "landed"):
-        assert module.phase_requires_full_controller_reset(phase)
 
 
 def test_analytic_omega_c_forwards_target_yaw_rate_without_attitude_error():
@@ -483,8 +319,8 @@ def test_controller_uses_filtered_acceleration_when_present():
     assert np.allclose(command["computed_body_rate"], np.zeros(3), atol=1e-12)
 
 
-def test_kinematic_feedback_keeps_nokov_pose_and_uses_pure_ekf_kinematics():
-    """NOKOV pose must not be mixed with EKF velocity/acceleration."""
+def test_kinematic_blend_keeps_nokov_position_and_rotation():
+    """Replacing the mocap pose while blending feedback would add radio latency."""
     module = _controller_module()
     mocap_rotation = module.quaternion_to_rotation(0.0, 0.0, 0.2, math.sqrt(0.96))
     mocap = {
@@ -505,22 +341,21 @@ def test_kinematic_feedback_keeps_nokov_pose_and_uses_pure_ekf_kinematics():
     }
 
     mixed = module.blend_kinematic_feedback(
-        mocap, ekf, now=10.0, ekf_weight=1.0,
+        mocap, ekf, now=10.0, ekf_weight=0.25,
         ekf_state_timeout=0.1, max_acceleration=20.0,
         max_position_delta=0.2,
     )
 
     assert np.allclose(mixed["position"], [1.0, -2.0, 0.4])
     assert np.allclose(mixed["rotation"], mocap_rotation)
-    assert np.allclose(mixed["control_velocity"], [5.0, 6.0, 7.0])
-    assert np.allclose(mixed["mixed_acceleration"], [10.0, 12.0, 14.0])
-    assert np.allclose(mixed["control_acceleration"], [10.0, 12.0, 14.0])
-    assert math.isclose(mixed["ekf_kinematics_weight_effective"], 1.0)
-    assert mixed["ekf_position_consistent"] is True
+    assert np.allclose(mixed["control_velocity"], [2.0, 3.0, 4.0])
+    assert np.allclose(mixed["mixed_acceleration"], [4.0, 6.0, 8.0])
+    assert np.allclose(mixed["control_acceleration"], [4.0, 6.0, 8.0])
+    assert math.isclose(mixed["ekf_kinematics_weight_effective"], 0.25)
 
 
-def test_kinematic_feedback_never_falls_back_to_mocap_when_ekf_is_stale():
-    """A delayed EKF log must not inject NOKOV derivative noise into CTBR."""
+def test_kinematic_blend_falls_back_to_mocap_when_ekf_is_stale():
+    """A delayed radio log must not affect CTBR feedback even when k is nonzero."""
     module = _controller_module()
     mocap = {
         "position": np.array([0.0, 0.0, 0.5]),
@@ -545,15 +380,14 @@ def test_kinematic_feedback_never_falls_back_to_mocap_when_ekf_is_stale():
         max_position_delta=20.0,
     )
 
-    assert np.allclose(mixed["control_velocity"], 0.0)
-    assert np.allclose(mixed["mixed_acceleration"], 0.0)
-    assert np.allclose(mixed["control_acceleration"], 0.0)
+    assert np.allclose(mixed["control_velocity"], [0.2, -0.1, 0.3])
+    assert np.allclose(mixed["mixed_acceleration"], [0.4, -0.2, 0.6])
+    assert np.allclose(mixed["control_acceleration"], [0.4, -0.2, 0.6])
     assert math.isclose(mixed["ekf_kinematics_weight_effective"], 0.0)
-    assert mixed["ekf_status"] == "stale_or_unready"
 
 
-def test_kinematic_feedback_uses_zero_kinematics_when_ekf_is_missing():
-    """No EKF sample must remain finite without using NOKOV derivatives."""
+def test_kinematic_blend_uses_mocap_when_ekf_is_missing():
+    """No EKF sample must not turn the pure-NOKOV fallback into NaN."""
     module = _controller_module()
     mocap = {
         "position": np.array([0.0, 0.0, 0.5]),
@@ -572,34 +406,9 @@ def test_kinematic_feedback_uses_zero_kinematics_when_ekf_is_missing():
 
     assert np.all(np.isfinite(mixed["control_velocity"]))
     assert np.all(np.isfinite(mixed["mixed_acceleration"]))
-    assert np.allclose(mixed["control_velocity"], 0.0)
-    assert np.allclose(mixed["mixed_acceleration"], 0.0)
+    assert np.allclose(mixed["control_velocity"], mocap["filtered_velocity"])
+    assert np.allclose(mixed["mixed_acceleration"], mocap["filtered_acceleration"])
     assert math.isclose(mixed["ekf_kinematics_weight_effective"], 0.0)
-
-
-def test_kinematic_feedback_holds_last_valid_ekf_without_using_mocap_derivatives():
-    module = _controller_module()
-    mocap = {
-        "position": np.array([0.0, 0.0, 0.5]),
-        "rotation": np.eye(3),
-        "filtered_velocity": np.array([9.0, 9.0, 9.0]),
-        "filtered_acceleration": np.array([9.0, 9.0, 9.0]),
-    }
-    held = {
-        "velocity": np.array([0.2, -0.1, 0.3]),
-        "acceleration": np.array([0.4, -0.2, 0.6]),
-        "valid_time": 9.95,
-    }
-    mixed = module.blend_kinematic_feedback(
-        mocap, None, now=10.0, ekf_weight=1.0,
-        ekf_state_timeout=0.1, max_acceleration=5.0,
-        max_position_delta=0.2, last_valid_ekf=held, hold_timeout_s=0.1,
-    )
-
-    assert np.allclose(mixed["control_velocity"], held["velocity"])
-    assert np.allclose(mixed["mixed_acceleration"], held["acceleration"])
-    assert mixed["ekf_kinematics_held"] is True
-    assert mixed["ekf_status"] == "held_last_valid"
 
 
 def test_ekf_callback_filters_firmware_velocity_with_firmware_sample_time():
@@ -974,7 +783,7 @@ def test_filter_update_and_timeout_reset_do_not_run_concurrently():
         trajectory=None,
         flight_phase="test",
         _publish_zero=lambda: None,
-        _write_invalid_log=lambda _now, _state, _reason="": None,
+        _write_invalid_log=lambda _now, _state: None,
     )
     message = types.SimpleNamespace(
         header=types.SimpleNamespace(stamp=types.SimpleNamespace(to_sec=lambda: 10.0)),
@@ -1035,7 +844,7 @@ def test_timer_rejects_stale_mocap_stamp_after_a_fresh_callback_arrival():
         trajectory=None,
         flight_phase="test",
         _publish_zero=lambda: events.append("zero"),
-        _write_invalid_log=lambda _now, _state, _reason="": events.append("invalid_log"),
+        _write_invalid_log=lambda _now, _state: events.append("invalid_log"),
         _publish_path=lambda _state: (_ for _ in ()).throw(
             AssertionError("stale state reached the control path")
         ),
@@ -1048,46 +857,6 @@ def test_timer_rejects_stale_mocap_stamp_after_a_fresh_callback_arrival():
         module.time.monotonic = original_monotonic
 
     assert events == ["controller_reset", "filter_reset", "zero", "invalid_log"]
-
-
-def test_state_ready_accepts_a_small_future_mocap_stamp_from_callback_scheduling():
-    """A newly queued callback may have a stamp milliseconds after the timer."""
-    module = _controller_module()
-    module.rospy.Time = types.SimpleNamespace(
-        now=lambda: types.SimpleNamespace(to_sec=lambda: 100.0)
-    )
-    node = types.SimpleNamespace(
-        lock=threading.Lock(),
-        latest_state={
-            "valid": True,
-            "received_time": 1.0,
-            "mocap_sample_time_s": 100.008,
-        },
-        state_timeout=0.1,
-        mocap_timestamp_future_tolerance_s=0.02,
-    )
-
-    assert module.CtbrControllerNode._state_ready(node, now=1.01) is True
-
-
-def test_state_ready_rejects_a_mocap_stamp_far_in_the_future():
-    """The scheduling tolerance must not hide a real ROS-clock fault."""
-    module = _controller_module()
-    module.rospy.Time = types.SimpleNamespace(
-        now=lambda: types.SimpleNamespace(to_sec=lambda: 100.0)
-    )
-    node = types.SimpleNamespace(
-        lock=threading.Lock(),
-        latest_state={
-            "valid": True,
-            "received_time": 1.0,
-            "mocap_sample_time_s": 100.021,
-        },
-        state_timeout=0.1,
-        mocap_timestamp_future_tolerance_s=0.02,
-    )
-
-    assert module.CtbrControllerNode._state_ready(node, now=1.01) is False
 
 
 def test_filter_columns_are_appended_after_legacy_csv_columns():
@@ -1108,10 +877,4 @@ def test_filter_columns_are_appended_after_legacy_csv_columns():
         "control_velocity_x", "control_velocity_y", "control_velocity_z",
         "mixed_acceleration_x", "mixed_acceleration_y", "mixed_acceleration_z",
         "control_acceleration_x", "control_acceleration_y", "control_acceleration_z",
-        "mission_time_s", "vehicle_id", "radio_uri", "orbit_phase_rad",
-        "formation_state", "global_abort_reason",
-        "position_integral_x", "position_integral_y", "position_integral_z",
-        "command_raw_thrust", "command_raw_thrust_age_s", "invalid_reason",
-        "ekf_position_error_m", "ekf_position_consistent",
-        "ekf_kinematics_held", "ekf_fault_age_s", "ekf_status",
     ]
