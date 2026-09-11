@@ -1,0 +1,162 @@
+# CTBR 控制器和实时绘图参数。
+# 数值单位写在每项注释中；target_confirmed 仍由 roslaunch 命令行显式确认。
+# 参数分为三层：全局控制器、公共轨迹和每架飞机的专属控制参数。
+# 新增 ctbr_enabled 飞机时，必须添加同 ID 的 ctbr_controller_cf<ID> 块。
+
+ctbr_controller:
+  target_confirmed: $(arg target_confirmed)   # 必须为 true 才允许真实飞行。
+  takeoff_vehicle_count: 3                    # 本次任务必须同时起飞的 ctbr_enabled 数量。
+  control_rate_hz: 70.0                       # 单 Crazyradio 多机 CTBR 控制循环频率，Hz；为外部定位和 EKF 日志预留链路容量。
+  state_timeout: 0.8                          # 动捕状态最大允许年龄，s。
+  mocap_timestamp_future_tolerance_s: 0.020   # 允许 header.stamp 比本机当前 ROS 时间略超前的调度容差，s。
+  max_abs_position_m: 10.0                    # 动捕位置工作空间边界，m。
+  max_mocap_velocity_mps: 1.0                 # 动捕速度限幅，m/s。
+  max_mocap_acceleration_mps2: 5.0            # 控制器加速度限幅，CSV 仍记录限幅前值，m/s^2。
+  mocap_velocity_filter_cutoff_hz: 7.0        # 控制器用的因果二阶速度低通截止频率，Hz。
+  mocap_velocity_filter_max_dt: 0.05          # 超过此动捕样本间隔时重置滤波器，s。
+
+  # NOKOV 只提供位置/姿态；EKF 提供控制器使用的速度/加速度。
+  ekf_kinematics_weight: 1.0                 # EKF 平移反馈比例；当前为纯 EKF 速度/加速度。
+  ekf_state_timeout: 0.15                    # EKF 日志主机接收后最大年龄，s。
+  ekf_max_position_delta_m: 0.30             # EKF 与 NOKOV 位置差超限时判定运动学失配，m。
+  ekf_alignment_position_delta_m: 0.05       # 起飞前要求 EKF/NOKOV 连续对齐的最大位置差，m。
+  ekf_alignment_hold_s: 1.0                  # 起飞前 EKF 对齐需连续保持的时间，s。
+  ekf_alignment_timeout_s: 5.0               # 预检期间等待 EKF 对齐的最长时间，s。
+  ekf_kinematics_hold_s: 0.10                # EKF 短暂异常时保持最后有效速度/加速度的上限，s。
+  ekf_fault_emergency_land_s: 0.35           # EKF 异常持续超过此时间后进入受控紧急降落，s。
+  ekf_timestamp_future_tolerance_s: 0.020    # EKF 回调相对控制 tick 微小超前的时间容差，s。
+  ekf_velocity_filter_cutoff_hz: 5.0         # EKF 速度因果二阶低通截止频率，Hz。
+  ekf_velocity_filter_max_dt: 0.05           # EKF 固件日志时间间隔上限，s。
+  trajectory_pause_abort_s: 1.0               # 状态连续失效超过此时长后中止轨迹，s。
+
+  # 电压预检的共同准入条件；电压-raw 推力标定在每架飞机块中。
+  require_preflight_voltage: true             # 是否必须完成起飞前电压预检。
+  preflight_voltage_samples: 1                # 电池日志为一次性采样，预检只需一个样本。
+  preflight_voltage_timeout_s: 5.0            # 预检最长等待时间，s。
+  preflight_battery_max_age_s: 0.3            # 最后一条电压样本最大年龄，s。
+  preflight_min_voltage_v: 3.8                # 允许起飞的最低电压，V。
+
+  gravity_mps2: 9.80665                       # 世界坐标重力常数，m/s^2。
+  log_directory: "$(find crazyswarm)/scripts/ctbr_logs" # CSV 输出目录。
+  # Path 话题由控制器根据 crazyflies.yaml 中每个 id 自动生成。
+  path_frame_id: "world"                     # Path 坐标系。
+  path_max_poses: 10000                       # Path 最大历史位姿数。
+  path_publish_interval_s: 0.1               # Path 发布周期，s。
+
+ctbr_trajectory:
+  # circle 保留原圆周；figure_eight_triangle 为三机刚性等边三角形绕连续八字。
+  trajectory_mode: figure_eight_triangle        # circle 或 figure_eight_triangle，可切换任务轨迹。
+  # circle 时为圆心；figure_eight_triangle 时为八字交点/初始编队质心，m。
+  circle_center_xy: [0.0, 0.0]                  # 公共世界坐标圆心/八字交点，m。
+  circle_center_offset_x: 1.0                 # 旧单机圆心相对起飞点 x 偏移，m。
+  circle_center_offset_y: 0.0                 # 旧单机圆心相对起飞点 y 偏移，m。
+  circle_radius_m: 1.0                        # 圆周半径，m。
+  circle_revolutions: 1.0                     # 圆周圈数。
+  circle_angular_speed_radps: 0.55            # 整圈五次角度轨迹峰值角速度，rad/s。
+  circle_start_angle_rad: 0.0                 # 公共基准起始角，rad；每机 phase 叠加。
+  formation_side_length_m: 0.8                # 八字模式等边三角形边长，m。
+  figure_eight_radius_m: 1.5                  # 每个叶瓣相对交点的 x 向最大范围，m。
+  figure_eight_angular_speed_radps: 0.55      # 保持原两叶总时长的速度参数，rad/s。
+
+  reference_hold_s: 2.0                       # 锁定起点后保持时间，s。
+  takeoff_height_m: 1.0                       # 相对起点的起飞高度，m。
+  takeoff_duration_s: 7.0                    # 五次多项式起飞时间，s。
+  takeoff_altitude_tolerance_m: 0.10          # 起飞阶段明显低于目标时的辅助推力阈值，m。
+  takeoff_vertical_velocity_tolerance_mps: 0.50 # 兼容旧门控诊断参数，m/s。
+  takeoff_settle_s: 1.0                       # 起飞后固定高度校正时间，不等待到位门限，s。
+  takeoff_max_tilt_deg: 5.0                   # 起飞阶段最大倾角，deg。
+  circle_entry_duration_s: 2.0                # 从起飞点平滑进入主轨迹时间，s。
+  circle_ramp_duration_s: 1.5                 # 兼容旧配置，整圈 smoothstep 不使用。
+  circle_max_tilt_deg: 10.0                   # 圆周/八字阶段最大倾角，deg。
+  final_hover_s: 3.0                          # 主轨迹结束后的终点悬停时间，s。
+  landing_duration_s: 4.0                    # 五次多项式降落最短时间，s。
+  landing_max_speed_mps: 0.25                # 降落参考最大速度，m/s。
+  landing_altitude_tolerance_m: 0.08          # 落地高度确认容差，m。
+  landing_vertical_velocity_tolerance_mps: 0.15 # 落地垂直速度确认容差，m/s。
+  landing_settle_s: 0.3                       # 落地条件连续稳定时间，s。
+  landing_condition_grace_s: 0.5              # 落地确认允许短暂失稳时间，s。
+  landing_max_tilt_deg: 5.0                   # 降落阶段最大倾角，deg。
+
+# 以下三个块分别对应 CF2、CF4、CF5；初始值可按单机测试结果独立调整。
+# 质量、推力和增益是容易因机体、螺旋桨、电机及安装状态而变化的参数。
+ctbr_controller_cf2: &ctbr_controller_default
+  mass_kg: 0.0434                             # 飞行器质量，kg。
+  max_total_thrust_newton: 1.176798           # 物理总推力上限，N。
+  max_command_thrust_newton: 0.80             # 控制器使用的总推力上限，N。
+  takeoff_min_thrust_newton: 0.30             # 起飞阶段最小总推力，N。
+  airborne_min_thrust_newton: 0.30            # 飞行阶段最小总推力，防止高度超调时切断电机，N。
+  max_tilt_deg: 10.0                          # 默认最大倾角，deg。
+  max_body_rate_radps: [3.0, 3.0, 2.0]       # p/q/r 最大角速度，rad/s。
+  position_gain: [0.75, 0.75, 0.45]           # 位置反馈增益，world xyz。 kp
+  velocity_gain: [0.45, 0.45, 0.35]           # 速度反馈增益，world xyz。 kd
+  integral_gain: [0.40, 0.40, 0.20]           # 位置积分反馈增益，world xyz。 ki
+  integral_limit: [0.8, 0.8, 0.8]             # 位置积分限幅，m*s。
+  attitude_gain: [2.0, 2.0, 2.0]              # 姿态反馈增益，机体 pqr。 kp
+  attitude_integral_gain: [0.4, 0.4, 0.4]    # 姿态积分反馈增益，机体 pqr。 ki
+  attitude_integral_limit: [0.8, 0.8, 0.8]   # 姿态积分限幅。
+  position_integral_c1: 0.35                 # C1 位置积分误差耦合系数。
+  use_body_rate_feedforward: true             # 是否启用期望姿态角速度前馈。
+  omega_c_method: analytic                    # V2 解析 Omega_c；可选 log_difference 和 analytic。
+  omega_c_force_norm_epsilon: 1.0e-7         # ||F_d|| 过小时关闭解析角速度前馈。
+  omega_c_heading_projection_epsilon: 1.0e-6 # 航向投影退化阈值。
+  preflight_voltage_reference_v: 4.20         # 推力标定参考电压，V。
+  preflight_raw_scale_exponent: 1.0           # 电压补偿幂指数。
+  preflight_raw_scale_min: 0.90               # raw 补偿下限。
+  preflight_raw_scale_max: 1.12               # raw 补偿上限。
+
+ctbr_controller_cf4:
+  # 如需对 CF4 单独调参，直接修改下面字段；不要改动全局或轨迹块。
+  mass_kg: 0.0463                             # 飞行器质量，kg。
+  max_total_thrust_newton: 1.176798           # 物理总推力上限，N。
+  max_command_thrust_newton: 0.80             # 控制器使用的总推力上限，N。
+  takeoff_min_thrust_newton: 0.30             # 起飞阶段最小总推力，N。
+  airborne_min_thrust_newton: 0.30            # 飞行阶段最小总推力，防止高度超调时切断电机，N。
+  max_tilt_deg: 10.0                          # 默认最大倾角，deg。
+  max_body_rate_radps: [3.0, 3.0, 2.0]       # p/q/r 最大角速度，rad/s。
+  position_gain: [0.40, 0.44, 0.45]           # 位置反馈增益，world xyz。 kp
+  velocity_gain: [0.30, 0.38, 0.35]           # 速度反馈增益，world xyz。 kd
+  integral_gain: [0.03, 0.03, 0.20]           # 位置积分反馈增益，world xyz。 ki
+  integral_limit: [0.35, 0.35, 0.8]             # 位置积分限幅，m*s。
+  attitude_gain: [1.7, 1.7, 2.0]              # 姿态反馈增益，机体 pqr。  kp
+  attitude_integral_gain: [0.3, 0.3, 0.4]    # 姿态积分反馈增益，机体 pqr。  ki
+  attitude_integral_limit: [0.6, 0.6, 0.8]   # 姿态积分限幅。
+  position_integral_c1: 0.35                 # C1 位置积分误差耦合系数。
+  use_body_rate_feedforward: true             # 是否启用期望姿态角速度前馈。
+  omega_c_method: analytic                    # V2 解析 Omega_c；可选 log_difference 和 analytic。
+  omega_c_force_norm_epsilon: 1.0e-7         # ||F_d|| 过小时关闭解析角速度前馈。
+  omega_c_heading_projection_epsilon: 1.0e-6 # 航向投影退化阈值。
+  preflight_voltage_reference_v: 4.20         # 推力标定参考电压，V。
+  preflight_raw_scale_exponent: 1.0           # 电压补偿幂指数。
+  preflight_raw_scale_min: 0.90               # raw 补偿下限。
+  preflight_raw_scale_max: 1.12               # raw 补偿上限。
+
+ctbr_controller_cf5:
+  # 如需对 CF5 单独调参，直接修改下面字段；不要改动全局或轨迹块。
+  mass_kg: 0.0422                             # 飞行器质量，kg。
+  max_total_thrust_newton: 1.176798           # 物理总推力上限，N。
+  max_command_thrust_newton: 0.80             # 控制器使用的总推力上限，N。
+  takeoff_min_thrust_newton: 0.30             # 起飞阶段最小总推力，N。
+  airborne_min_thrust_newton: 0.30            # 飞行阶段最小总推力，防止高度超调时切断电机，N。
+  max_tilt_deg: 10.0                          # 默认最大倾角，deg。
+  max_body_rate_radps: [3.0, 3.0, 2.0]       # p/q/r 最大角速度，rad/s。
+  position_gain: [0.40, 0.42, 0.45]           # 位置反馈增益，world xyz。 kp
+  velocity_gain: [0.25, 0.25, 0.35]           # 速度反馈增益，world xyz。 kd
+  integral_gain: [0.05, 0.05, 0.20]           # 位置积分反馈增益，world xyz。 ki
+  integral_limit: [0.8, 0.8, 0.8]             # 位置积分限幅，m*s。
+  attitude_gain: [2.0, 2.0, 2.0]              # 姿态反馈增益，机体 pqr。 kp
+  attitude_integral_gain: [0.4, 0.4, 0.4]    # 姿态积分反馈增益，机体 pqr。 ki
+  attitude_integral_limit: [0.8, 0.8, 0.8]   # 姿态积分限幅。
+  position_integral_c1: 0.35                 # C1 位置积分误差耦合系数。
+  use_body_rate_feedforward: true             # 是否启用期望姿态角速度前馈。
+  omega_c_method: analytic                    # V2 解析 Omega_c；可选 log_difference 和 analytic。
+  omega_c_force_norm_epsilon: 1.0e-7         # ||F_d|| 过小时关闭解析角速度前馈。
+  omega_c_heading_projection_epsilon: 1.0e-6 # 航向投影退化阈值。
+  preflight_voltage_reference_v: 4.20         # 推力标定参考电压，V。
+  preflight_raw_scale_exponent: 1.0           # 电压补偿幂指数。
+  preflight_raw_scale_min: 0.90               # raw 补偿下限。
+  preflight_raw_scale_max: 1.12               # raw 补偿上限。
+
+ctbr_visualization:
+  interval_s: 0.2                             # 实时绘图刷新周期，s。
+  max_abs_position_m: 10.0                    # 绘图过滤的最大动捕位置范围，m。
+  log_directory: "$(find crazyswarm)/scripts/ctbr_logs" # CSV 输出目录。

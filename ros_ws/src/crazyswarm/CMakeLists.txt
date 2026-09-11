@@ -6,12 +6,18 @@ project(crazyswarm)
 if(CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL x86_64 OR CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL amd64)
   option(LIBMOTIONCAPTURE_ENABLE_OPTITRACK_CLOSED_SOURCE "Enable optitrack closed source" ON)
 endif()
+
+# The checkout includes the Nokov SDK and backend. Keep it enabled for normal
+# catkin_make builds; callers can still override this with -D...=OFF.
+set(LIBMOTIONCAPTURE_ENABLE_NOKOV ON CACHE BOOL "Enable Nokov")
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/externalDependencies/libmotioncapture EXCLUDE_FROM_ALL)
 
 ## Find catkin macros and libraries
 ## if COMPONENTS list like find_package(catkin REQUIRED COMPONENTS xyz)
 ## is used, also find other catkin packages
 find_package(catkin REQUIRED COMPONENTS
+  geometry_msgs
+  nav_msgs
   message_generation
   std_msgs
   tf
@@ -74,6 +80,8 @@ add_message_files(
   FILES
   LogBlock.msg
   GenericLogData.msg
+  MocapState.msg
+  CTBR.msg
   FullState.msg
   VelocityWorld.msg
   TrajectoryPolynomialPiece.msg
@@ -135,6 +143,8 @@ catkin_package(
 #  LIBRARIES crazyflie
   CATKIN_DEPENDS
     message_runtime
+    geometry_msgs
+    nav_msgs
     std_msgs
     tf
     crazyflie_cpp
@@ -197,10 +207,25 @@ target_link_libraries(mocap_helper
 
 ## Mark executable scripts (Python etc.) for installation
 ## in contrast to setup.py, you can choose the destination
-# install(PROGRAMS
-#   scripts/my_python_script
-#   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
-# )
+install(PROGRAMS
+  scripts/ctbr_controller.py
+  scripts/ctbr_trajectory.py
+  scripts/ctbr_visualization.py
+  scripts/cf_arm.py
+  scripts/cf_arm_wrapper.sh
+  scripts/vehicle_config.py
+  DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+)
+
+# Keep the ARM wrapper and its companion Python module next to the source-style
+# launch-prefix path as well as in the normal executable destination. This
+# makes both devel-space and install-space launches use the same vehicle YAML.
+install(PROGRAMS
+  scripts/cf_arm.py
+  scripts/cf_arm_wrapper.sh
+  scripts/vehicle_config.py
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/scripts
+)
 
 ## Mark executables and/or libraries for installation
 # install(TARGETS crazyswarm crazyswarm_node
@@ -217,11 +242,15 @@ target_link_libraries(mocap_helper
 # )
 
 ## Mark other files for installation (e.g. launch and bag files, etc.)
-# install(FILES
-#   # myfile1
-#   # myfile2
-#   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
-# )
+install(FILES
+  launch/ctbr_controller.launch
+  launch/crazyflies.yaml
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/launch
+)
+install(FILES
+  config/ctbr_controller.yaml
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/config
+)
 
 #############
 ## Testing ##

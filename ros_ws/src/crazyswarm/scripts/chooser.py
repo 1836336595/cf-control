@@ -10,6 +10,8 @@ import re
 import time
 import threading
 
+from vehicle_config import vehicle_uri
+
 if __name__ == '__main__':
 	parser = argparse.ArgumentParser()
 	parser.add_argument(
@@ -45,7 +47,7 @@ if __name__ == '__main__':
 	def read_by_id(path):
 		by_id = {}
 		with open(path, 'r') as ymlfile:
-			root = yaml.load(ymlfile)
+			root = yaml.safe_load(ymlfile)
 			for node in root["crazyflies"]:
 				id = int(node["id"])
 				by_id[id] = node
@@ -63,7 +65,7 @@ if __name__ == '__main__':
 	allCrazyflies = read_by_id(os.path.join(args.configpath, "allCrazyflies.yaml"))
 	enabled = read_by_id(os.path.join(args.configpath, "crazyflies.yaml")).keys()
 	with open(os.path.join(args.configpath, "crazyflieTypes.yaml"), 'r') as ymlfile:
-		data = yaml.load(ymlfile)
+		data = yaml.safe_load(ymlfile)
 		cfTypes = data["crazyflieTypes"]
 
 	# compute absolute pixel coordinates from the initial positions
@@ -172,31 +174,27 @@ if __name__ == '__main__':
 	def sysOff():
 		nodes = selected_cfs()
 		for crazyflie in nodes:
-			id = "{0:02X}".format(crazyflie["id"])
-			uri = "radio://0/{}/2M/E7E7E7E7{}".format(crazyflie["channel"], id)
+			uri = vehicle_uri(crazyflie)
 			subprocess.call(["rosrun crazyflie_tools reboot --uri " + uri + " --mode sysoff"], shell=True)
 
 	def reboot():
 		nodes = selected_cfs()
 		for crazyflie in nodes:
-			id = "{0:02X}".format(crazyflie["id"])
-			uri = "radio://0/{}/2M/E7E7E7E7{}".format(crazyflie["channel"], id)
+			uri = vehicle_uri(crazyflie)
 			print(crazyflie["id"])
 			subprocess.call(["rosrun crazyflie_tools reboot --uri " + uri], shell=True)
 
 	def flashSTM():
 		nodes = selected_cfs()
 		for crazyflie in nodes:
-			id = "{0:02X}".format(crazyflie["id"])
-			uri = "radio://0/{}/2M/E7E7E7E7{}".format(crazyflie["channel"], id)
+			uri = vehicle_uri(crazyflie)
 			print("Flash STM32 FW to {}".format(uri))
 			subprocess.call(["rosrun crazyflie_tools flash --uri " + uri + " --target stm32 --filename " + args.stm32Fw], shell=True)
 
 	def flashNRF():
 		nodes = selected_cfs()
 		for crazyflie in nodes:
-			id = "{0:02X}".format(crazyflie["id"])
-			uri = "radio://0/{}/2M/E7E7E7E7{}".format(crazyflie["channel"], id)
+			uri = vehicle_uri(crazyflie)
 			print("Flash NRF51 FW to {}".format(uri))
 			subprocess.call(["rosrun crazyflie_tools flash --uri " + uri + " --target nrf51 --filename " + args.nrf51Fw], shell=True)
 
@@ -208,8 +206,7 @@ if __name__ == '__main__':
 		# query each CF
 		nodes = selected_cfs()
 		for crazyflie in nodes:
-			id = "{0:02X}".format(crazyflie["id"])
-			uri = "radio://0/{}/2M/E7E7E7E7{}".format(crazyflie["channel"], id)
+			uri = vehicle_uri(crazyflie)
 			cfType = crazyflie["type"]
 			bigQuad = cfTypes[cfType]["bigQuad"]
 			
