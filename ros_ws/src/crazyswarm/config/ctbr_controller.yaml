@@ -29,6 +29,19 @@ ctbr_controller:
   ekf_velocity_filter_max_dt: 0.05           # EKF 固件日志时间间隔上限，s。
   trajectory_pause_abort_s: 1.0               # 状态连续失效超过此时长后中止轨迹，s。
 
+  # MATLAB/formation 的分布式编队控制参数。仅在三机 figure_eight_triangle
+  # 主轨迹阶段启用；Python 的 formation_side_length_m 和
+  # figure_eight_radius_m 仍是编队几何尺寸的唯一来源。
+  formation_control_mode: leader_follower   # MATLAB 虚拟中心 leader-follower 控制律。
+  formation_kf: 2.8                          # 相对位置一致性增益，1/s^2。
+  formation_kvf: 2.1                         # 相对速度一致性增益，1/s。
+  formation_kbl: 2.0                         # 虚拟中心位置 pinning 增益，1/s^2。
+  formation_kvl: 1.6                         # 虚拟中心速度 pinning 增益，1/s。
+  formation_bl: [1.0, 1.0, 1.0]             # 各机虚拟中心 pinning 开关/权重。
+  formation_adjacency: [[0.0, 1.0, 1.0],   # MATLAB a(i,j) 通信图。
+                        [1.0, 0.0, 1.0],
+                        [1.0, 1.0, 0.0]]
+
   # 电压预检的共同准入条件；电压-raw 推力标定在每架飞机块中。
   require_preflight_voltage: true             # 是否必须完成起飞前电压预检。
   preflight_voltage_samples: 1                # 电池日志为一次性采样，预检只需一个样本。
@@ -38,9 +51,9 @@ ctbr_controller:
 
   gravity_mps2: 9.80665                       # 世界坐标重力常数，m/s^2。
   log_directory: "$(find crazyswarm)/scripts/ctbr_logs" # CSV 输出目录。
-  # Path 话题由控制器根据 crazyflies.yaml 中每个 id 自动生成。
+  # Path 话题由控制器根据 crazyflies.yaml 中每个 id 自动生成；只用于 RViz 显示，
+  # 不限制历史长度，也不参与“飞完一圈后降落”的任务时序。
   path_frame_id: "world"                     # Path 坐标系。
-  path_max_poses: 10000                       # Path 最大历史位姿数。
   path_publish_interval_s: 0.1               # Path 发布周期，s。
 
 ctbr_trajectory:

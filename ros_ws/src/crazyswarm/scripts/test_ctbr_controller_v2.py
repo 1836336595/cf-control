@@ -198,7 +198,8 @@ def test_controller_node_reads_cf_specific_calibration_from_absolute_namespace()
     assert math.isclose(cf2.controller.config.mass, 0.0434)
     assert math.isclose(cf4.controller.config.mass, 0.0460)
     assert np.allclose(cf4.controller.config.position_gain, [0.8, 0.8, 0.5])
-    assert cf2.rate_hz == cf4.rate_hz == 60.0
+    expected_rate = float(roots["ctbr_controller"]["control_rate_hz"])
+    assert cf2.rate_hz == cf4.rate_hz == expected_rate
     assert cf2.trajectory_config.trajectory_mode == "figure_eight_triangle"
     assert cf4.trajectory_config.trajectory_mode == "figure_eight_triangle"
 
@@ -1114,4 +1115,84 @@ def test_filter_columns_are_appended_after_legacy_csv_columns():
         "command_raw_thrust", "command_raw_thrust_age_s", "invalid_reason",
         "ekf_position_error_m", "ekf_position_consistent",
         "ekf_kinematics_held", "ekf_fault_age_s", "ekf_status",
+        "formation_acceleration_x", "formation_acceleration_y", "formation_acceleration_z",
+        "formation_acceleration_dot_x", "formation_acceleration_dot_y", "formation_acceleration_dot_z",
     ]
+
+
+def test_multi_vehicle_formation_override_matches_matlab_leader_follower_law():
+    """A position perturbation produces the MATLAB E/eLeader correction."""
+    module = _controller_module()
+    offsets = np.array([
+        [0.0, 0.5 / math.sqrt(3.0), 1.0],
+        [-0.25, -0.25 / math.sqrt(3.0), 1.0],
+        [0.25, -0.25 / math.sqrt(3.0), 1.0],
+    ])
+    center_acceleration = np.array([0.04, -0.03, 0.0])
+
+    class FakeVehicle:
+        def __init__(self, position, target):
+            self.lock = threading.Lock()
+            self.latest_state = {"position": np.asarray(position, dtype=float)}
+            self.target = target
+            self._ekf_kinematics_enabled = True
+
+        def _state_ready(self, _now):
+            return True
+
+        def _build_ekf_control_state(self, _state, _now):
+            return {
+                "control_velocity": np.zeros(3),
+                "control_acceleration": center_acceleration.copy(),
+                "ekf_state_valid": True,
+                "ekf_kinematics_held": False,
+            }
+
+        def _target_for(self, _state, _now):
+            return self.target
+
+    vehicles = []
+    for offset in offsets:
+        target = {
+            "position": offset.copy(),
+            "velocity": np.zeros(3),
+            "acceleration": center_acceleration.copy(),
+            "jerk": np.zeros(3),
+            "flight_phase": "figure_eight",
+        }
+        vehicles.append(FakeVehicle(offset.copy(), target))
+
+    # Move only aircraft 0 by +0.1 m in ROS world x.
+    vehicles[0].latest_state["position"][0] += 0.1
+    node = types.SimpleNamespace(
+        multi_mode=True,
+        vehicles=vehicles,
+        formation_control_mode="leader_follower",
+        formation_kf=2.8,
+        formation_kvf=2.1,
+        formation_kbl=2.0,
+        formation_kvl=1.6,
+        formation_bl=np.ones(3),
+        formation_adjacency=np.ones((3, 3)) - np.eye(3),
+    )
+    result = module.MultiCtbrControllerNode._formation_overrides(node, 1.0)
+
+    # For aircraft 0: E_x=0.2 and eLeader_x=0.1, hence
+    # a_form,x=-2.8*0.2-2.0*0.1=-0.76 m/s^2.
+    assert np.allclose(
+        result[id(vehicles[0])]["formation_acceleration"],
+        np.array([-0.76, 0.0, 0.0]),
+        atol=1e-12,
+    )
+    # Each neighbor sees E_x=-0.1 and receives +0.28 m/s^2.
+    for vehicle in vehicles[1:]:
+        assert np.allclose(
+            result[id(vehicle)]["formation_acceleration"],
+            np.array([0.28, 0.0, 0.0]),
+            atol=1e-12,
+        )
+        assert np.allclose(
+            result[id(vehicle)]["formation_acceleration_dot"],
+            np.zeros(3),
+            atol=1e-12,
+        )

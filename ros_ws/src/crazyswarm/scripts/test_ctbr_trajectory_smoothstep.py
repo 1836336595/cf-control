@@ -317,8 +317,8 @@ def test_circle_entry_and_final_hover_boundaries_are_position_continuous():
     assert np.allclose(circle_end["acceleration"], final_hover["acceleration"], atol=1e-9)
 
 
-def test_figure_eight_triangle_keeps_side_length_and_faces_formation_centroid():
-    """三台机的相位顶点保持 0.5 m 等边三角形，并始终朝向实时质心。"""
+def test_figure_eight_triangle_keeps_side_length_and_follows_velocity_heading():
+    """三台机保持等边间距，机头沿 MATLAB formation 的水平速度方向。"""
     phases = (0.0, 2.0 * math.pi / 3.0, 4.0 * math.pi / 3.0)
     trajectories = []
     for phase in phases:
@@ -346,10 +346,18 @@ def test_figure_eight_triangle_keeps_side_length_and_faces_formation_centroid():
                 rel_tol=1e-10, abs_tol=1e-10,
             )
         for target in targets:
-            expected_yaw = math.atan2(
-                centroid[1] - target["position"][1],
-                centroid[0] - target["position"][0],
-            )
+            velocity = target["velocity"]
+            acceleration = target["acceleration"]
+            speed_squared = float(velocity[0] ** 2 + velocity[1] ** 2)
+            if speed_squared <= 1.0e-12:
+                expected_yaw = 0.0
+                expected_yaw_rate = 0.0
+            else:
+                expected_yaw = math.atan2(velocity[1], velocity[0])
+                expected_yaw_rate = (
+                    velocity[0] * acceleration[1]
+                    - velocity[1] * acceleration[0]
+                ) / speed_squared
             assert math.isclose(
                 math.atan2(
                     math.sin(target["yaw"] - expected_yaw),
@@ -358,7 +366,9 @@ def test_figure_eight_triangle_keeps_side_length_and_faces_formation_centroid():
                 0.0,
                 abs_tol=1e-10,
             )
-            assert math.isclose(target["yaw_rate"], 0.0, abs_tol=1e-12)
+            assert math.isclose(
+                target["yaw_rate"], expected_yaw_rate, abs_tol=1e-10
+            )
 
         # 刚性平移：三机的平动速度、加速度和 jerk 必须一致。
         for key in ("velocity", "acceleration", "jerk"):
@@ -410,6 +420,10 @@ def test_figure_eight_crossing_is_continuous_without_stopping():
     assert np.allclose(entry["position"], start["position"], atol=1e-10)
     assert np.allclose(entry["velocity"], start["velocity"], atol=1e-10)
     assert np.allclose(entry["acceleration"], start["acceleration"], atol=1e-10)
+    # The first Gerono reference velocity is +x, so the entry transition must
+    # end at the same heading used by the MATLAB reference.
+    assert math.isclose(entry["yaw"], 0.0, abs_tol=1e-10)
+    assert math.isclose(start["yaw"], 0.0, abs_tol=1e-10)
 
 
 def test_smoothstep_helper_still_returns_zero_endpoint_derivatives():

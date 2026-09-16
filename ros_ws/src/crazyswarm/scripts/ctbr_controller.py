@@ -622,23 +622,38 @@ class GeometricCtbrController:
         if not np.all(np.isfinite(target_jerk)):
             target_jerk = np.zeros(3)
 
-        # ROS world 系按 z 向上处理：F = m(g e3 + a_d) - Kp ep - Kv ev - Ki ei。
+        # ROS world 系按 z 向上处理：F = m(g e3 + a_d + a_form)
+        # - Kp ep - Kv ev - Ki ei。a_form 是 MATLAB formation 控制律
+        # 在 z-up 坐标下的附加编队加速度；没有编队控制时为零。
+        formation_acceleration = np.asarray(
+            target.get("formation_acceleration", np.zeros(3)), dtype=float
+        ).reshape(3)
+        formation_acceleration_dot = np.asarray(
+            target.get("formation_acceleration_dot", np.zeros(3)), dtype=float
+        ).reshape(3)
+        if not np.all(np.isfinite(formation_acceleration)):
+            formation_acceleration = np.zeros(3)
+        if not np.all(np.isfinite(formation_acceleration_dot)):
+            formation_acceleration_dot = np.zeros(3)
         raw_desired_force = (
-            self.config.mass * (target_acceleration + np.array([0.0, 0.0, self.config.gravity]))
+            self.config.mass * (
+                target_acceleration + formation_acceleration
+                + np.array([0.0, 0.0, self.config.gravity])
+            )
             - self.config.position_gain * position_error
             - self.config.velocity_gain * velocity_error
             - self.config.integral_gain * self.position_integral
         )
-        # raw_desired_force_dot = (
-        #     self.config.mass * target_jerk
-        #     - self.config.position_gain * velocity_error
-        #     - self.config.velocity_gain * (current_acceleration - target_acceleration)
-        #     - self.config.integral_gain * saturated_integral_rate
-        # )
+        # The V2/formation derivative uses the *full* desired acceleration
+        # u_i = a_d + a_form in the velocity-feedback term.  Comparing the
+        # measured acceleration only with a_d would omit the formation law
+        # from A_dot and make analytic Omega_c inconsistent with the force
+        # direction actually sent to the vehicle.
+        desired_acceleration = target_acceleration + formation_acceleration
         raw_desired_force_dot = (
-            self.config.mass * target_jerk
+            self.config.mass * (target_jerk + formation_acceleration_dot)
             - self.config.position_gain * velocity_error
-            - self.config.velocity_gain * (current_acceleration - target_acceleration)
+            - self.config.velocity_gain * (current_acceleration - desired_acceleration)
             - self.config.integral_gain * saturated_integral_rate
         )
 
@@ -744,6 +759,8 @@ class GeometricCtbrController:
             "position_error": position_error,
             "velocity_error": velocity_error,
             "desired_force": desired_force,
+            "formation_acceleration": formation_acceleration,
+            "formation_acceleration_dot": formation_acceleration_dot,
             "computed_rotation": computed_rotation,
             "computed_body_rate": computed_body_rate,
             "omega_c_method": omega_c_method,
@@ -810,6 +827,10 @@ class FlightCsvLogger:
         # EKF 健康状态追加在末尾；不改变旧 CSV 的列号布局。
         "ekf_position_error_m", "ekf_position_consistent",
         "ekf_kinematics_held", "ekf_fault_age_s", "ekf_status",
+        # Formation terms are new diagnostics and must remain at the end so
+        # legacy CSV consumers keep their original column positions.
+        "formation_acceleration_x", "formation_acceleration_y", "formation_acceleration_z",
+        "formation_acceleration_dot_x", "formation_acceleration_dot_y", "formation_acceleration_dot_z",
     ]
 
     def __init__(self, directory, prefix):
@@ -1244,14 +1265,11 @@ class CtbrControllerNode:
         if self.logger is None:
             self.logger = FlightCsvLogger(log_directory, log_prefix)
         self.path_frame_id = str(self.params.global_param("path_frame_id", "world"))
-        self.path_max_poses = int(self.params.global_param("path_max_poses", 10000))
         self.path_publish_interval_s = float(
             self.params.global_param("path_publish_interval_s", 0.1)
         )
-        if not self.path_frame_id or self.path_max_poses < 1:
-            raise rospy.ROSInitException(
-                "path_frame_id 不能为空且 path_max_poses 必须为正数"
-            )
+        if not self.path_frame_id:
+            raise rospy.ROSInitException("path_frame_id 不能为空")
         if self.path_publish_interval_s <= 0.0:
             raise rospy.ROSInitException("path_publish_interval_s 必须为正数")
         self.path_publisher = rospy.Publisher(
@@ -1780,7 +1798,10 @@ class CtbrControllerNode:
         """Latch a fleet-wide abort reason; subsequent cycles only send zero CTBR."""
         self.global_abort_reason = str(reason or "")
 
-    def _timer_callback(self, _event, now=None):
+    def _timer_callback(
+            self, _event, now=None, target_override=None,
+            control_state_override=None, formation_acceleration=None,
+            formation_acceleration_dot=None):
         """控制周期入口：先执行状态失效保护，再计算、发布并记录同一份命令。"""
         now = time.monotonic() if now is None else float(now)
         dt = now - self.last_tick
@@ -1896,8 +1917,22 @@ class CtbrControllerNode:
             self._write_log(now, state, target, command)
             return
 
-        target = self._target_for(state, now)
-        control_state = self._build_ekf_control_state(state, now)
+        target = (
+            self._target_for(state, now)
+            if target_override is None else target_override
+        )
+        control_state = (
+            self._build_ekf_control_state(state, now)
+            if control_state_override is None else control_state_override
+        )
+        if formation_acceleration is not None:
+            target = dict(target)
+            target["formation_acceleration"] = np.asarray(
+                formation_acceleration, dtype=float
+            ).reshape(3)
+            target["formation_acceleration_dot"] = np.zeros(3) if (
+                formation_acceleration_dot is None
+            ) else np.asarray(formation_acceleration_dot, dtype=float).reshape(3)
         if (self._ekf_kinematics_enabled and
                 not control_state["ekf_state_valid"] and
                 not control_state["ekf_kinematics_held"] and
@@ -1947,8 +1982,6 @@ class CtbrControllerNode:
         pose.pose.orientation.w = 1.0
         self.path_message.header.stamp = pose.header.stamp
         self.path_message.poses.append(pose)
-        if len(self.path_message.poses) > self.path_max_poses:
-            del self.path_message.poses[:-self.path_max_poses]
         now = time.monotonic()
         if now - self.last_path_publish_time >= self.path_publish_interval_s:
             self.last_path_publish_time = now
@@ -1983,6 +2016,8 @@ class CtbrControllerNode:
             "position_error": state["position"] - target["position"],
             "velocity_error": measured_velocity - target["velocity"],
             "desired_force": np.zeros(3),
+            "formation_acceleration": np.zeros(3),
+            "formation_acceleration_dot": np.zeros(3),
             "computed_rotation": state["rotation"],
             "computed_body_rate": np.zeros(3),
             "omega_c_method": "zero",
@@ -2103,6 +2138,14 @@ class CtbrControllerNode:
         self._with_xyz(row, "position_error", command["position_error"])
         self._with_xyz(row, "velocity_error", command["velocity_error"])
         self._with_xyz(row, "desired_force", command["desired_force"])
+        self._with_xyz(
+            row, "formation_acceleration",
+            command.get("formation_acceleration", np.zeros(3)),
+        )
+        self._with_xyz(
+            row, "formation_acceleration_dot",
+            command.get("formation_acceleration_dot", np.zeros(3)),
+        )
         self._with_xyz(
             row, "position_integral", command.get("position_integral", np.zeros(3))
         )
@@ -2234,6 +2277,51 @@ class MultiCtbrControllerNode:
             self.logger.close()
             raise rospy.ROSInitException("多机控制频率和中止阈值必须为正数")
 
+        # MATLAB formation/leader-follower gains are acceleration gains.  They
+        # are applied only during the figure-eight phase; circle and single-CF
+        # runs retain the existing independent geometric CTBR controller.
+        self.formation_control_mode = str(rospy.get_param(
+            GLOBAL_CTBR_PARAMETER_ROOT + "/formation_control_mode",
+            "leader_follower",
+        )).strip().lower().replace("-", "_")
+        if self.formation_control_mode != "leader_follower":
+            self.logger.close()
+            raise rospy.ROSInitException(
+                "formation_control_mode 当前仅支持 leader_follower"
+            )
+        self.formation_kf = float(rospy.get_param(
+            GLOBAL_CTBR_PARAMETER_ROOT + "/formation_kf", 2.8
+        ))
+        self.formation_kvf = float(rospy.get_param(
+            GLOBAL_CTBR_PARAMETER_ROOT + "/formation_kvf", 2.1
+        ))
+        self.formation_kbl = float(rospy.get_param(
+            GLOBAL_CTBR_PARAMETER_ROOT + "/formation_kbl", 2.0
+        ))
+        self.formation_kvl = float(rospy.get_param(
+            GLOBAL_CTBR_PARAMETER_ROOT + "/formation_kvl", 1.6
+        ))
+        self.formation_bl = np.asarray(rospy.get_param(
+            GLOBAL_CTBR_PARAMETER_ROOT + "/formation_bl", [1.0, 1.0, 1.0]
+        ), dtype=float).reshape(-1)
+        self.formation_adjacency = np.asarray(rospy.get_param(
+            GLOBAL_CTBR_PARAMETER_ROOT + "/formation_adjacency",
+            [[0.0, 1.0, 1.0], [1.0, 0.0, 1.0], [1.0, 1.0, 0.0]],
+        ), dtype=float)
+        if (not all(math.isfinite(value) and value >= 0.0 for value in (
+                self.formation_kf, self.formation_kvf,
+                self.formation_kbl, self.formation_kvl)) or
+                self.formation_bl.size != len(self.vehicle_configs) or
+                self.formation_adjacency.shape != (
+                    len(self.vehicle_configs), len(self.vehicle_configs)) or
+                not np.all(np.isfinite(self.formation_adjacency)) or
+                np.any(self.formation_adjacency < 0.0)):
+            self.logger.close()
+            raise rospy.ROSInitException(
+                "formation 参数维度、增益和邻接矩阵必须有效"
+            )
+        np.fill_diagonal(self.formation_adjacency, 0.0)
+
         mission_start = time.monotonic()
         self.vehicles = [
             CtbrControllerNode(
@@ -2279,6 +2367,116 @@ class MultiCtbrControllerNode:
             vehicle.set_global_abort(self.global_abort_reason)
         rospy.logerr("多机 CTBR 全局中止：%s；所有飞机发送零推力", reason)
 
+    def _formation_overrides(self, now):
+        """Compute MATLAB formation acceleration corrections in ROS z-up.
+
+        MATLAB uses z-down and computes ``u_i`` as a desired acceleration.  A
+        sign flip on the z component maps it to ROS z-up; since the current
+        reference has constant altitude, this is equivalent to using the
+        already z-up center derivatives below.  The returned correction is
+        ``u_i - a_c`` so the existing CTBR position PID remains available as a
+        local stabilizing loop.
+        """
+        if (not self.multi_mode or len(self.vehicles) < 2 or
+                self.formation_control_mode != "leader_follower"):
+            return {}
+
+        states = []
+        controls = []
+        targets = []
+        for vehicle in self.vehicles:
+            with vehicle.lock:
+                state = vehicle.latest_state
+            if state is None or not vehicle._state_ready(now):
+                return {}
+            control_state = vehicle._build_ekf_control_state(state, now)
+            if (vehicle._ekf_kinematics_enabled and
+                    not control_state["ekf_state_valid"] and
+                    not control_state["ekf_kinematics_held"]):
+                return {}
+            target = vehicle._target_for(state, now)
+            if target.get("flight_phase") != "figure_eight":
+                return {}
+            states.append(state)
+            controls.append(control_state)
+            targets.append(target)
+
+        count = len(self.vehicles)
+        positions = np.vstack([state["position"] for state in states])
+        velocities = np.vstack([
+            control["control_velocity"] for control in controls
+        ])
+        accelerations = np.vstack([
+            control["control_acceleration"] for control in controls
+        ])
+        references = np.vstack([target["position"] for target in targets])
+        reference_velocity = np.vstack([target["velocity"] for target in targets])
+        reference_acceleration = np.vstack([
+            target["acceleration"] for target in targets
+        ])
+        reference_jerk = np.vstack([
+            target.get("jerk", np.zeros(3)) for target in targets
+        ])
+        offsets = references - np.mean(references, axis=0)
+        center_position = np.mean(references, axis=0)
+        center_velocity = np.mean(reference_velocity, axis=0)
+        center_acceleration = np.mean(reference_acceleration, axis=0)
+        center_jerk = np.mean(reference_jerk, axis=0)
+        formation_acceleration = np.zeros((count, 3))
+        formation_acceleration_dot = np.zeros((count, 3))
+
+        for i in range(count):
+            relative_position_sum = np.zeros(3)
+            relative_velocity_sum = np.zeros(3)
+            acceleration_difference_sum = np.zeros(3)
+            for j in range(count):
+                weight = self.formation_adjacency[i, j]
+                if j == i or weight == 0.0:
+                    continue
+                relative_position_sum += weight * (
+                    (positions[i] - positions[j]) - (offsets[i] - offsets[j])
+                )
+                relative_velocity_sum += weight * (
+                    velocities[i] - velocities[j]
+                )
+                acceleration_difference_sum += weight * (
+                    accelerations[i] - accelerations[j]
+                )
+
+            error_to_reference = positions[i] - references[i]
+            velocity_to_reference = velocities[i] - center_velocity
+            desired_acceleration = (
+                center_acceleration
+                - self.formation_kf * relative_position_sum
+                - self.formation_kvf * relative_velocity_sum
+                - self.formation_kbl * self.formation_bl[i] * error_to_reference
+                - self.formation_kvl * self.formation_bl[i] * velocity_to_reference
+            )
+            desired_acceleration_dot = (
+                center_jerk
+                - self.formation_kf * relative_velocity_sum
+                - self.formation_kvf * acceleration_difference_sum
+                - self.formation_kbl * self.formation_bl[i] * velocity_to_reference
+                - self.formation_kvl * self.formation_bl[i] * (
+                    accelerations[i] - center_acceleration
+                )
+            )
+
+            formation_acceleration[i] = desired_acceleration - targets[i]["acceleration"]
+            formation_acceleration_dot[i] = (
+                desired_acceleration_dot - targets[i].get("jerk", np.zeros(3))
+            )
+
+        return {
+            id(vehicle): {
+                "target": targets[i],
+                "control_state": controls[i],
+                "formation_acceleration": formation_acceleration[i],
+                "formation_acceleration_dot": formation_acceleration_dot[i],
+            }
+            for i, vehicle in enumerate(self.vehicles)
+        }
+
     def _timer_callback(self, _event):
         now = time.monotonic()
 
@@ -2323,9 +2521,18 @@ class MultiCtbrControllerNode:
             ]
             self._set_abort("NOKOV 状态失效：%s" % ",".join(invalid_ids))
 
+        formation_overrides = self._formation_overrides(now)
         for vehicle in self.vehicles:
             vehicle.set_fleet_gate(True)
-            vehicle._timer_callback(None, now=now)
+            override = formation_overrides.get(id(vehicle), {})
+            vehicle._timer_callback(
+                None,
+                now=now,
+                target_override=override.get("target"),
+                control_state_override=override.get("control_state"),
+                formation_acceleration=override.get("formation_acceleration"),
+                formation_acceleration_dot=override.get("formation_acceleration_dot"),
+            )
         self.logger.flush()
 
     def _shutdown(self):

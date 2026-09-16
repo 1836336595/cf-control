@@ -32,8 +32,8 @@ ROS 参数 token 使用下划线，避免连字符带来的非法或不兼容名
   降落以及 EKF 滤波参数；
 - 任务安全：`trajectory_pause_abort_s`；
 - 通用预检准入：是否要求电压预检、采样数、超时、样本年龄与最低允许电压；
-- 输出基础设施：`log_directory`、`path_frame_id`、`path_max_poses`、
-  `path_publish_interval_s`。
+- 输出基础设施：`log_directory`、`path_frame_id`、`path_publish_interval_s`；Path
+  不再作为有界历史缓存，也不参与任务结束或降落判定。
 
 ### `/ctbr_trajectory` — shared trajectory parameters
 

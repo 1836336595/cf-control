@@ -488,7 +488,15 @@ class CircularFlightTrajectory:
             else self.circle_entry_start_position
         )
         displacement = self.circle_start_position - entry_start
-        target_yaw = self._inward_yaw(self.circle_start_position)
+        # The MATLAB formation reference points the body x-axis along the
+        # horizontal velocity.  At the beginning of the Gerono trajectory the
+        # velocity is +x, so transition to yaw=0 here instead of introducing a
+        # 180-degree yaw jump from the inward-facing entry heading.
+        target_yaw = (
+            0.0
+            if self.trajectory_mode == "figure_eight_triangle"
+            else self._inward_yaw(self.circle_start_position)
+        )
         yaw_displacement = _wrap_angle(target_yaw - self.start_yaw)
         return {
             "position": entry_start + position_scale * displacement,
@@ -584,6 +592,23 @@ class CircularFlightTrajectory:
         """Return the exact end point used by hover and landing references."""
         return self._circle_target(self.circle_duration_s)
 
+    @staticmethod
+    def _velocity_heading(velocity, acceleration, fallback=0.0):
+        """Return MATLAB formation reference heading and its time derivative.
+
+        The MATLAB formation reference points ``b1d`` along horizontal velocity.
+        At a stationary endpoint the heading is held at the supplied fallback.
+        """
+        velocity = np.asarray(velocity, dtype=float).reshape(3)
+        acceleration = np.asarray(acceleration, dtype=float).reshape(3)
+        vx, vy = float(velocity[0]), float(velocity[1])
+        speed_squared = vx * vx + vy * vy
+        if speed_squared <= 1.0e-12:
+            return _wrap_angle(fallback), 0.0
+        yaw = math.atan2(vy, vx)
+        yaw_rate = (vx * float(acceleration[1]) - vy * float(acceleration[0])) / speed_squared
+        return _wrap_angle(yaw), float(yaw_rate)
+
     def _figure_eight_target(self, elapsed):
         """返回中心不断速的连续 Gerono 八字刚性编队参考。
 
@@ -635,15 +660,20 @@ class CircularFlightTrajectory:
              + cos_double_angle * angular_jerk),
         ])
         position = centroid_position + self.formation_offset
+        # MATLAB formation_figure_eight_reference uses the horizontal velocity
+        # as b1d.  The Python spatial curve is the same curve because
+        # r*sin(theta)*cos(theta) == (r/2)*sin(2*theta); only the requested
+        # radius and timing remain owned by the Python configuration.
+        target_yaw, target_yaw_rate = self._velocity_heading(
+            centroid_velocity, centroid_acceleration, fallback=0.0
+        )
         return {
             "position": position,
             "velocity": centroid_velocity,
             "acceleration": centroid_acceleration,
             "jerk": np.array([jerk_xy[0], jerk_xy[1], 0.0]),
-            # Each vehicle has a constant body-to-centroid bearing because the
-            # triangular formation only translates; hence yaw_rate is zero.
-            "yaw": self._yaw_toward(position, centroid_position),
-            "yaw_rate": 0.0,
+            "yaw": target_yaw,
+            "yaw_rate": target_yaw_rate,
             "flight_phase": "figure_eight",
             "max_tilt_rad": self.config.circle_max_tilt_rad,
             "min_collective_thrust": self.config.airborne_min_collective_thrust,
