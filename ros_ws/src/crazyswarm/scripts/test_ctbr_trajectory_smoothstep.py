@@ -433,3 +433,93 @@ def test_smoothstep_helper_still_returns_zero_endpoint_derivatives():
     assert math.isclose(position1, 1.0)
     assert math.isclose(velocity1, 0.0, abs_tol=1e-12)
     assert math.isclose(acceleration1, 0.0, abs_tol=1e-12)
+
+
+def _figure_eight_trajectory(phase, heading):
+    trajectory = CircularFlightTrajectory(_config(
+        trajectory_mode="figure_eight_triangle",
+        circle_center_xy=np.array([0.0, 0.0]),
+        figure_eight_heading=heading,
+        orbit_phase_rad=phase,
+    ))
+    trajectory.reset(np.array([0.4, -0.3, 0.2]), start_yaw=0.0, now=0.0)
+    return trajectory
+
+
+def test_center_heading_is_constant_and_has_zero_yaw_rate():
+    """A center-pointing nose must not rotate, and must be free of grazing."""
+    phases = (0.0, 2.0 * math.pi / 3.0, 4.0 * math.pi / 3.0)
+    fleet = [_figure_eight_trajectory(p, "center") for p in phases]
+    duration = float(fleet[0].main_duration_s)
+
+    for elapsed in np.linspace(0.0, duration, 41):
+        targets = [t._figure_eight_target(float(elapsed)) for t in fleet]
+        # The three vehicles keep a rigid triangle, so their true centroid is
+        # recoverable from the references themselves.
+        centroid = np.mean([np.asarray(t["position"]) for t in targets], axis=0)
+
+        for trajectory, target in zip(fleet, targets):
+            heading = np.array([
+                math.cos(target["yaw"]), math.sin(target["yaw"]), 0.0,
+            ])
+            to_center = centroid - np.asarray(target["position"])
+            to_center[2] = 0.0
+            assert np.linalg.norm(to_center) > 1e-6
+            # Body-x must be antiparallel to the offset, i.e. point at the center.
+            assert float(heading @ to_center) > 0.0
+            assert float(np.linalg.norm(np.cross(heading, to_center))) < 1e-9
+            assert math.isclose(target["yaw_rate"], 0.0, abs_tol=1e-15)
+
+        # Constant heading: compare each vehicle against its own first sample.
+        for trajectory, target in zip(fleet, targets):
+            first = trajectory._figure_eight_target(0.0)["yaw"]
+            assert math.isclose(target["yaw"], first, abs_tol=1e-12)
+
+
+def test_center_heading_points_inward_for_every_vehicle():
+    """Each vertex of the triangle must face the shared centroid."""
+    expected = {
+        0.0: -180.0,
+        2.0 * math.pi / 3.0: -60.0,
+        4.0 * math.pi / 3.0: 60.0,
+    }
+    for phase, degrees in expected.items():
+        trajectory = _figure_eight_trajectory(phase, "center")
+        target = trajectory._figure_eight_target(0.0)
+        delta = math.degrees(target["yaw"]) - degrees
+        assert abs(math.atan2(math.sin(math.radians(delta)),
+                              math.cos(math.radians(delta)))) < 1e-9
+
+
+def test_velocity_heading_remains_the_default_and_still_rotates():
+    """The MATLAB-faithful tangent heading must stay selectable."""
+    trajectory = _figure_eight_trajectory(0.0, "velocity")
+    duration = float(trajectory.main_duration_s)
+    yaws = [
+        math.degrees(trajectory._figure_eight_target(float(e))["yaw"])
+        for e in np.linspace(0.05 * duration, 0.95 * duration, 25)
+    ]
+    assert max(yaws) - min(yaws) > 45.0, "tangent heading must sweep the curve"
+
+
+def test_center_heading_removes_the_entry_yaw_step():
+    """Entry must end exactly at the constant formation heading."""
+    trajectory = _figure_eight_trajectory(math.pi, "center")
+    entry = trajectory._entry_target(float(trajectory.config.entry_duration_s))
+    main = trajectory._figure_eight_target(0.0)
+
+    assert math.isclose(entry["yaw"], main["yaw"], abs_tol=1e-9)
+    assert math.isclose(entry["yaw_rate"], 0.0, abs_tol=1e-9)
+
+
+def test_unknown_figure_eight_heading_is_rejected():
+    try:
+        CircularFlightTrajectory(_config(
+            trajectory_mode="figure_eight_triangle",
+            figure_eight_heading="sideways",
+        ))
+    except ValueError as error:
+        assert "figure_eight_heading" in str(error)
+    else:
+        raise AssertionError("an unknown heading mode must be rejected")
+

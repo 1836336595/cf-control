@@ -7,7 +7,7 @@ ctbr_controller:
   target_confirmed: $(arg target_confirmed)   # 必须为 true 才允许真实飞行。
   takeoff_vehicle_count: 3                    # 本次任务必须同时起飞的 ctbr_enabled 数量。
   control_rate_hz: 70.0                       # 单 Crazyradio 多机 CTBR 控制循环频率，Hz；为外部定位和 EKF 日志预留链路容量。
-  state_timeout: 0.8                          # 动捕状态最大允许年龄，s。
+  state_timeout: 0.5                          # 动捕状态最大允许年龄，s。
   mocap_timestamp_future_tolerance_s: 0.020   # 允许 header.stamp 比本机当前 ROS 时间略超前的调度容差，s。
   max_abs_position_m: 10.0                    # 动捕位置工作空间边界，m。
   max_mocap_velocity_mps: 1.0                 # 动捕速度限幅，m/s。
@@ -29,16 +29,42 @@ ctbr_controller:
   ekf_velocity_filter_max_dt: 0.05           # EKF 固件日志时间间隔上限，s。
   trajectory_pause_abort_s: 1.0               # 状态连续失效超过此时长后中止轨迹，s。
 
-  # MATLAB/formation 的分布式编队控制参数。仅在三机 figure_eight_triangle
-  # 主轨迹阶段启用；Python 的 formation_side_length_m 和
-  # figure_eight_radius_m 仍是编队几何尺寸的唯一来源。
+  # MATLAB/formation 的分布式编队控制律，仅在三机 figure_eight_triangle 主轨迹
+  # 阶段启用。该阶段复现带虚拟中心积分项的 leader_follower 控制律：
+  #   u_i = p̈_c - kf*Σa_ij*e_ij - kvf*Σa_ij*(η_i-η_j)
+  #         - kl*b_i*e_i - kvl*b_i*η_i - kil*b_i*e_ic
+  #   F_i = m_i(u_i + g*e3)
+  # 其中 e_ij = (p_i-p_j)-(r_i-r_j)  相对编队误差，
+  #      e_i  = p_i - p_c - r_i        相对虚拟中心位置误差，
+  #      η_i  = v_i - ṗ_c              相对虚拟中心速度误差，
+  #      e_ic = ∫(η_i + c1*e_i)dτ      积分项，用于消除推力标定/风阻等稳态偏差。
+  # 编队阶段只使用编队增益，不再叠加每架飞机的 position_gain、velocity_gain 和
+  # integral_gain；那些 PID 增益只服务于起飞、入轨、悬停和降落等安全阶段。
+  #
+  # 【增益放在哪里】kf / kvf / kbl / kvl / kil / c1 / limit 与 position_gain 一样
+  # 已经下沉到每架的 ctbr_controller_cf<ID> 块，可以逐机单独调参。本块里若仍写
+  # 这些键，则作为该机的默认值（每机块里的同名声明的优先级更高）；这里保留一份
+  # 全局默认值，方便三机共用一组标称参数。bl 与 adjacency 描述任务层面的通信拓扑，
+  # 属全局参数，不逐机覆盖。
+  #
+  # 【维度】所有增益都支持标量（xyz 相同）或 3 元列表（world xyz 逐轴独立），
+  # 与 position_gain 的写法一致。各轴是解耦的：增益只作用于本轴的分量，而目标
+  # 相对几何由 r_i（offset）决定、不会被缩放，所以某轴增益不同只改变该轴的刚度
+  # 与收敛速度，不改变编队最终收敛到的形状。
+  #
+  # 编队阶段不使用倾角锥限制：MATLAB 直接由未限幅的 A 构造 b3c = -A/||A||，
+  # 只对集体推力做标量裁剪。若在此处限制水平力，其上限会依赖逐机不同的竖直力，
+  # 导致三架飞机饱和程度不一致并拉开队形。
   formation_control_mode: leader_follower   # MATLAB 虚拟中心 leader-follower 控制律。
-  formation_kf: 2.8                          # 相对位置一致性增益，1/s^2。
-  formation_kvf: 2.1                         # 相对速度一致性增益，1/s。
-  formation_kbl: 2.0                         # 虚拟中心位置 pinning 增益，1/s^2。
-  formation_kvl: 1.6                         # 虚拟中心速度 pinning 增益，1/s。
-  formation_bl: [1.0, 1.0, 1.0]             # 各机虚拟中心 pinning 开关/权重。
-  formation_adjacency: [[0.0, 1.0, 1.0],   # MATLAB a(i,j) 通信图。
+  formation_kf: 4.0                          # 相对位置一致性增益 k_f 全局默认，1/s^2。
+  formation_kvf: 2.1                         # 相对速度一致性增益 k_vf 全局默认，1/s。
+  formation_kbl: 4.0                         # 虚拟中心位置 pinning 增益 k_l 全局默认，1/s^2。
+  formation_kvl: 1.6                         # 虚拟中心速度 pinning 增益 k_vl 全局默认，1/s。
+  formation_kil: 0.2                         # 虚拟中心积分 pinning 增益 k_il 全局默认，1/s^2；0 表示关闭该项。
+  formation_integral_c1: 0.35                # 积分项位置误差耦合系数 c1 全局默认，1/s。
+  formation_integral_limit_m: 0.30           # 积分状态 e_ic 逐轴限幅全局默认，m；防止长期饱和。
+  formation_bl: [1.0, 1.0, 1.0]             # 各机虚拟中心 pinning 权重 b_i（全局通信拓扑）。
+  formation_adjacency: [[0.0, 1.0, 1.0],   # MATLAB a(i,j) 通信图（全局通信拓扑）。
                         [1.0, 0.0, 1.0],
                         [1.0, 1.0, 0.0]]
 
@@ -69,7 +95,11 @@ ctbr_trajectory:
   circle_start_angle_rad: 0.0                 # 公共基准起始角，rad；每机 phase 叠加。
   formation_side_length_m: 0.8                # 八字模式等边三角形边长，m。
   figure_eight_radius_m: 1.5                  # 每个叶瓣相对交点的 x 向最大范围，m。
-  figure_eight_angular_speed_radps: 0.55      # 保持原两叶总时长的速度参数，rad/s。
+  figure_eight_angular_speed_radps: 0.40      # 保持原两叶总时长的速度参数，rad/s。
+  # 八字阶段机头朝向。velocity = MATLAB 的 b1d（水平速度方向，机头随切线旋转，
+  # 全程约转 288° 且入轨瞬间有 45° 跳变）；center = 始终指向虚拟编队中心，
+  # 航向恒定、yaw_rate 恒为 0，姿态环负担最小，且入轨无航向跳变。
+  figure_eight_heading: center                # center 或 velocity。
 
   reference_hold_s: 2.0                       # 锁定起点后保持时间，s。
   takeoff_height_m: 1.0                       # 相对起点的起飞高度，m。
@@ -77,11 +107,11 @@ ctbr_trajectory:
   takeoff_altitude_tolerance_m: 0.10          # 起飞阶段明显低于目标时的辅助推力阈值，m。
   takeoff_vertical_velocity_tolerance_mps: 0.50 # 兼容旧门控诊断参数，m/s。
   takeoff_settle_s: 1.0                       # 起飞后固定高度校正时间，不等待到位门限，s。
-  takeoff_max_tilt_deg: 5.0                   # 起飞阶段最大倾角，deg。
+  takeoff_max_tilt_deg: 8.0                   # 起飞阶段最大倾角，deg。
   circle_entry_duration_s: 2.0                # 从起飞点平滑进入主轨迹时间，s。
   circle_ramp_duration_s: 1.5                 # 兼容旧配置，整圈 smoothstep 不使用。
   circle_max_tilt_deg: 10.0                   # 圆周/八字阶段最大倾角，deg。
-  final_hover_s: 3.0                          # 主轨迹结束后的终点悬停时间，s。
+  final_hover_s: 0.5                          # 主轨迹结束后的终点悬停时间，s。
   landing_duration_s: 4.0                    # 五次多项式降落最短时间，s。
   landing_max_speed_mps: 0.25                # 降落参考最大速度，m/s。
   landing_altitude_tolerance_m: 0.08          # 落地高度确认容差，m。
@@ -93,7 +123,11 @@ ctbr_trajectory:
 # 以下三个块分别对应 CF2、CF4、CF5；初始值可按单机测试结果独立调整。
 # 质量、推力和增益是容易因机体、螺旋桨、电机及安装状态而变化的参数。
 ctbr_controller_cf2: &ctbr_controller_default
-  mass_kg: 0.0434                             # 飞行器质量，kg。
+  mass_kg: 0.0434                             # 飞行器质量，kg（实测真值，不要改）。
+  # 推力标定修正：实测悬停 k = 实际推力/指令推力，修正量取 1/sqrt(k)，
+  # 因为 C++ 桥接层按 F ∝ raw^2 映射。与电压补偿相乘后写入 thrust_raw_scale。
+  # 2026-09-16 18:35 飞行实测 k=0.963 -> 1.019。
+  thrust_scale_correction: 1.066              # 推力标定修正系数（无量纲）。
   max_total_thrust_newton: 1.176798           # 物理总推力上限，N。
   max_command_thrust_newton: 0.80             # 控制器使用的总推力上限，N。
   takeoff_min_thrust_newton: 0.30             # 起飞阶段最小总推力，N。
@@ -104,7 +138,16 @@ ctbr_controller_cf2: &ctbr_controller_default
   velocity_gain: [0.45, 0.45, 0.35]           # 速度反馈增益，world xyz。 kd
   integral_gain: [0.40, 0.40, 0.20]           # 位置积分反馈增益，world xyz。 ki
   integral_limit: [0.8, 0.8, 0.8]             # 位置积分限幅，m*s。
-  attitude_gain: [2.0, 2.0, 2.0]              # 姿态反馈增益，机体 pqr。 kp
+  # 编队增益逐机独立，写法与 position_gain 相同：标量 = xyz 相同，
+  # 3 元列表 = world xyz 逐轴独立。留空/删除则沿用 /ctbr_controller 的全局默认值。
+  formation_kf: [4.0, 4.0, 4.0]               # 相对位置一致性增益 k_f，1/s^2。
+  formation_kvf: [2.1, 2.1, 2.1]              # 相对速度一致性增益 k_vf，1/s。
+  formation_kbl: [4.0, 4.0, 4.0]              # 虚拟中心位置 pinning 增益 k_l，1/s^2。
+  formation_kvl: [1.6, 1.6, 2.4]              # 虚拟中心速度 pinning 增益 k_vl，1/s。
+  formation_kil: [6.0, 6.0, 1.5]              # 虚拟中心积分 pinning 增益 k_il，1/s^2；0 关闭该项。
+  formation_integral_c1: 0.35                 # 积分项位置误差耦合系数 c1，1/s。
+  formation_integral_limit_m: 0.30            # 积分状态 e_ic 逐轴限幅，m。
+  attitude_gain: [3.5, 3.5, 2.0]              # 姿态反馈增益，机体 pqr。 kp
   attitude_integral_gain: [0.4, 0.4, 0.4]    # 姿态积分反馈增益，机体 pqr。 ki
   attitude_integral_limit: [0.8, 0.8, 0.8]   # 姿态积分限幅。
   position_integral_c1: 0.35                 # C1 位置积分误差耦合系数。
@@ -119,18 +162,28 @@ ctbr_controller_cf2: &ctbr_controller_default
 
 ctbr_controller_cf4:
   # 如需对 CF4 单独调参，直接修改下面字段；不要改动全局或轨迹块。
-  mass_kg: 0.0463                             # 飞行器质量，kg。
+  mass_kg: 0.0461                             # 飞行器质量，kg（实测真值，不要改）。
+  # 2026-09-16 18:35 飞行实测 k=1.069 -> 1/sqrt(k)=0.967。
+  thrust_scale_correction: 0.942               # 推力标定修正系数（无量纲）。
   max_total_thrust_newton: 1.176798           # 物理总推力上限，N。
   max_command_thrust_newton: 0.80             # 控制器使用的总推力上限，N。
   takeoff_min_thrust_newton: 0.30             # 起飞阶段最小总推力，N。
   airborne_min_thrust_newton: 0.30            # 飞行阶段最小总推力，防止高度超调时切断电机，N。
   max_tilt_deg: 10.0                          # 默认最大倾角，deg。
-  max_body_rate_radps: [3.0, 3.0, 2.0]       # p/q/r 最大角速度，rad/s。
+  max_body_rate_radps: [2.5, 2.5, 2.0]       # p/q/r 最大角速度，rad/s。
   position_gain: [0.40, 0.44, 0.45]           # 位置反馈增益，world xyz。 kp
   velocity_gain: [0.30, 0.38, 0.35]           # 速度反馈增益，world xyz。 kd
   integral_gain: [0.03, 0.03, 0.20]           # 位置积分反馈增益，world xyz。 ki
   integral_limit: [0.35, 0.35, 0.8]             # 位置积分限幅，m*s。
-  attitude_gain: [1.7, 1.7, 2.0]              # 姿态反馈增益，机体 pqr。  kp
+  # 编队增益逐机独立：CF4 姿态响应偏弱，可单独调大 kf/kbl 而不影响另外两架。
+  formation_kf: [5.0, 5.0, 5.0]               # 相对位置一致性增益 k_f，1/s^2。
+  formation_kvf: [2.1, 2.1, 2.1]              # 相对速度一致性增益 k_vf，1/s。
+  formation_kbl: [4.0, 4.0, 4.0]              # 虚拟中心位置 pinning 增益 k_l，1/s^2。
+  formation_kvl: [1.6, 1.6, 2.4]              # 虚拟中心速度 pinning 增益 k_vl，1/s。
+  formation_kil: [6.0, 6.0, 1.5]              # 虚拟中心积分 pinning 增益 k_il，1/s^2；0 关闭该项。
+  formation_integral_c1: 0.35                 # 积分项位置误差耦合系数 c1，1/s。
+  formation_integral_limit_m: 0.30            # 积分状态 e_ic 逐轴限幅，m。
+  attitude_gain: [4.5, 4.5, 2.0]              # 姿态反馈增益，机体 pqr。  kp
   attitude_integral_gain: [0.3, 0.3, 0.4]    # 姿态积分反馈增益，机体 pqr。  ki
   attitude_integral_limit: [0.6, 0.6, 0.8]   # 姿态积分限幅。
   position_integral_c1: 0.35                 # C1 位置积分误差耦合系数。
@@ -145,7 +198,10 @@ ctbr_controller_cf4:
 
 ctbr_controller_cf5:
   # 如需对 CF5 单独调参，直接修改下面字段；不要改动全局或轨迹块。
-  mass_kg: 0.0422                             # 飞行器质量，kg。
+  mass_kg: 0.0420                             # 飞行器质量，kg（实测真值，不要改）。
+  # 2026-09-16 18:35 飞行实测 k=1.260 -> 1/sqrt(k)=0.891。这是三架中偏差最大的一架，
+  # 也是进八字后高度抬升最明显的来源。
+  thrust_scale_correction: 0.921              # 推力标定修正系数（无量纲）。
   max_total_thrust_newton: 1.176798           # 物理总推力上限，N。
   max_command_thrust_newton: 0.80             # 控制器使用的总推力上限，N。
   takeoff_min_thrust_newton: 0.30             # 起飞阶段最小总推力，N。
@@ -156,7 +212,16 @@ ctbr_controller_cf5:
   velocity_gain: [0.25, 0.25, 0.35]           # 速度反馈增益，world xyz。 kd
   integral_gain: [0.05, 0.05, 0.20]           # 位置积分反馈增益，world xyz。 ki
   integral_limit: [0.8, 0.8, 0.8]             # 位置积分限幅，m*s。
-  attitude_gain: [2.0, 2.0, 2.0]              # 姿态反馈增益，机体 pqr。 kp
+  # 编队增益逐机独立：CF5 是三机中标定偏差最大的一架，可单独调大 kil 加快
+  # 稳态偏差收敛，而不影响另外两架。
+  formation_kf: [4.0, 4.0, 4.0]               # 相对位置一致性增益 k_f，1/s^2。
+  formation_kvf: [2.1, 2.1, 2.1]              # 相对速度一致性增益 k_vf，1/s。
+  formation_kbl: [4.0, 4.0, 4.0]              # 虚拟中心位置 pinning 增益 k_l，1/s^2。
+  formation_kvl: [1.6, 1.6, 2.4]              # 虚拟中心速度 pinning 增益 k_vl，1/s。
+  formation_kil: [6.0, 6.0, 1.5]              # 虚拟中心积分 pinning 增益 k_il，1/s^2；0 关闭该项。
+  formation_integral_c1: 0.35                 # 积分项位置误差耦合系数 c1，1/s。
+  formation_integral_limit_m: 0.30            # 积分状态 e_ic 逐轴限幅，m。
+  attitude_gain: [3.5, 3.5, 2.0]              # 姿态反馈增益，机体 pqr。 kp
   attitude_integral_gain: [0.4, 0.4, 0.4]    # 姿态积分反馈增益，机体 pqr。 ki
   attitude_integral_limit: [0.8, 0.8, 0.8]   # 姿态积分限幅。
   position_integral_c1: 0.35                 # C1 位置积分误差耦合系数。

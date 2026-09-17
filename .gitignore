@@ -1,5 +1,6 @@
 ros_ws/build/
 ros_ws/devel/
+ros_ws/install/
 ros_ws/src/CMakeLists.txt
 .DS_Store
 *.pyc
@@ -11,3 +12,18 @@ firm
 client
 launch # ignore launch symlink
 !*ros_ws/*launch* # don't ignore folders with launch in the name
+
+# Python caches / test output
+__pycache__/
+.pytest_cache/
+*.egg-info/
+
+# CTBR 实飞日志：体积可达几百 MB，不进入版本库。
+# 仓库里只保留 ctbr_logs/sample_flight.csv 作为 CSV 列格式的样例。
+ros_ws/src/crazyswarm/scripts/ctbr_logs/*.csv
+!ros_ws/src/crazyswarm/scripts/ctbr_logs/sample_flight.csv
+
+# 编辑器与本地环境
+.vscode/settings.json
+*.bag
+*.log

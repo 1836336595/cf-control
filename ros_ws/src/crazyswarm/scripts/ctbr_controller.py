@@ -57,6 +57,10 @@ from nav_msgs.msg import Path
 
 GLOBAL_CTBR_PARAMETER_ROOT = "/ctbr_controller"
 TRAJECTORY_PARAMETER_ROOT = "/ctbr_trajectory"
+# 编队控制律适用的阶段。final_hover 与 figure_eight 共用同一条 law，这样从八字
+# 切到终点悬停时控制律和积分状态都连续：编队积分里积累的推力 trim 会直接延续到
+# 悬停，而不是被清零后由几何 PID 慢慢重建（那会造成切换后长时间的高度下沉）。
+FORMATION_LAW_PHASES = ("figure_eight", "final_hover")
 _PARAMETER_MISSING = object()
 
 
@@ -115,6 +119,20 @@ class CtbrParameterResolver:
     def vehicle_param(self, name, default=_PARAMETER_MISSING):
         return self._read(self.vehicle_root, name, default)
 
+    def formation_param(self, name, default=_PARAMETER_MISSING):
+        """Read a formation gain from the per-CF block, then the global block.
+
+        Formation gains live in ``/ctbr_controller_cf<ID>`` so each vehicle can
+        be tuned independently, exactly like ``position_gain``.  The global
+        ``/ctbr_controller`` block keeps working as a shared default, so an
+        existing configuration that only sets the global value still applies to
+        every vehicle.
+        """
+        path = self._path(self.vehicle_root, name)
+        if self._has_param(path):
+            return self._get_param(path)
+        return self._read(GLOBAL_CTBR_PARAMETER_ROOT, name, default)
+
 
 def as_vector(value, name):
     """把 ROS 参数或消息字段转成长度为 3 的有限浮点向量。"""
@@ -127,6 +145,24 @@ def as_vector(value, name):
 def clamp_vector(vector, lower, upper):
     """逐元素限幅；所有积分器、角速度和推力相关向量均通过此函数防止发散。"""
     return np.minimum(np.maximum(vector, lower), upper)
+
+
+def as_gain_vector(value, name, minimum=0.0):
+    """Parse a scalar or 3-element gain into a length-3 world-xyz array.
+
+    A scalar is broadcast across x/y/z, which keeps every existing configuration
+    valid; a 3-element list gives independent per-axis gains exactly like
+    ``position_gain`` / ``velocity_gain``.  ``minimum`` rejects values that would
+    make the closed loop non-passive (negative or non-finite gains).
+    """
+    vector = np.asarray(value, dtype=float).reshape(-1)
+    if vector.size == 1:
+        vector = np.repeat(vector, 3)
+    if vector.size != 3 or not np.all(np.isfinite(vector)):
+        raise ValueError("%s 必须是标量或 3 个有限数值" % name)
+    if np.any(vector < float(minimum)):
+        raise ValueError("%s 不能小于 %g" % (name, minimum))
+    return vector
 
 
 class SecondOrderVelocityFilter:
@@ -404,6 +440,34 @@ def _limit_force_with_derivative(force, force_dot, max_command_thrust, max_tilt_
     return limited, limited_dot
 
 
+def _limit_acceleration_with_derivative(acceleration, acceleration_dot, max_acceleration):
+    """Uniformly scale a desired-acceleration vector to a magnitude ceiling.
+
+    Unlike :func:`_limit_force_with_derivative`, every component (and its time
+    derivative) is scaled by the *same* factor, so the vector direction never
+    changes.  That keeps ``b3 = F/||F||`` exactly on the control law's intent,
+    which is what the MATLAB ``leader_follower`` implementation relies on: it
+    builds ``b3c = -A/||A||`` from an unlimited ``A`` and only clips the scalar
+    collective thrust afterwards.
+
+    A non-positive or non-finite ``max_acceleration`` disables the ceiling and
+    returns the input unchanged, which is the MATLAB-faithful default.
+    """
+    acceleration = np.asarray(acceleration, dtype=float).reshape(3)
+    acceleration_dot = np.asarray(acceleration_dot, dtype=float).reshape(3)
+    limit = float(max_acceleration)
+    if not math.isfinite(limit) or limit <= 0.0:
+        return acceleration.copy(), acceleration_dot.copy()
+    norm = float(np.linalg.norm(acceleration))
+    if norm <= limit or norm < 1e-12:
+        return acceleration.copy(), acceleration_dot.copy()
+    scale = limit / norm
+    # s = L/||u|| => s_dot = -L * (u . u_dot) / ||u||^3
+    norm_dot = float(acceleration @ acceleration_dot) / norm
+    scale_dot = -limit * norm_dot / (norm ** 2)
+    return scale * acceleration, scale_dot * acceleration + scale * acceleration_dot
+
+
 def analytic_omega_c(computed_rotation, desired_force, desired_force_dot, target, config):
     """Calculate V2's continuous-time ``Omega_c = vee(R_c.T @ R_c_dot)``.
 
@@ -580,27 +644,36 @@ class GeometricCtbrController:
             # 关闭速度反馈，避免圆周阶段把 -v_d 误当成真实速度误差并积分进去。
             velocity_error = np.zeros(3)
 
-        # C1 形式积分同时吸收位置静差与速度静差；逐轴限幅避免低电、饱和或丢帧时
-        # 长期累积，恢复后出现突然的大推力。保留积分器的有效导数，供 A_dot 使用。
-        position_integral_rate = (
-            velocity_error + self.config.position_integral_c1 * position_error
-        )
-        self.position_integral += dt * position_integral_rate
-        self.position_integral = clamp_vector(
-            self.position_integral,
-            -self.config.integral_limit,
-            self.config.integral_limit,
-        )
-        saturated_integral_rate = position_integral_rate.copy()
-        upper_active = np.logical_and(
-            self.position_integral >= self.config.integral_limit - 1e-12,
-            position_integral_rate > 0.0,
-        )
-        lower_active = np.logical_and(
-            self.position_integral <= -self.config.integral_limit + 1e-12,
-            position_integral_rate < 0.0,
-        )
-        saturated_integral_rate[upper_active | lower_active] = 0.0
+        # MATLAB leader_follower 阶段把编队控制律算出的完整期望加速度 u_i 当作
+        # 唯一外环指令：u_i 内部已含相对位置/相对速度和虚拟中心 pinning 反馈，
+        # 此时绝不能叠加几何 PID，位置积分也保持为零，避免离开该阶段时把旧 trim
+        # 积分重新注入。起飞、入轨、悬停和降落仍使用位置/速度/积分反馈。
+        formation_law_active = bool(target.get("formation_law_active", False))
+        if formation_law_active:
+            self.position_integral = np.zeros(3)
+            saturated_integral_rate = np.zeros(3)
+        else:
+            # C1 形式积分同时吸收位置静差与速度静差；逐轴限幅避免低电、饱和或丢帧时
+            # 长期累积，恢复后出现突然的大推力。保留积分器的有效导数，供 A_dot 使用。
+            position_integral_rate = (
+                velocity_error + self.config.position_integral_c1 * position_error
+            )
+            self.position_integral += dt * position_integral_rate
+            self.position_integral = clamp_vector(
+                self.position_integral,
+                -self.config.integral_limit,
+                self.config.integral_limit,
+            )
+            saturated_integral_rate = position_integral_rate.copy()
+            upper_active = np.logical_and(
+                self.position_integral >= self.config.integral_limit - 1e-12,
+                position_integral_rate > 0.0,
+            )
+            lower_active = np.logical_and(
+                self.position_integral <= -self.config.integral_limit + 1e-12,
+                position_integral_rate < 0.0,
+            )
+            saturated_integral_rate[upper_active | lower_active] = 0.0
 
         target_acceleration = np.asarray(
             target.get("acceleration", np.zeros(3)), dtype=float
@@ -622,9 +695,13 @@ class GeometricCtbrController:
         if not np.all(np.isfinite(target_jerk)):
             target_jerk = np.zeros(3)
 
-        # ROS world 系按 z 向上处理：F = m(g e3 + a_d + a_form)
-        # - Kp ep - Kv ev - Ki ei。a_form 是 MATLAB formation 控制律
-        # 在 z-up 坐标下的附加编队加速度；没有编队控制时为零。
+        # ROS world 系按 z 向上处理。
+        # MATLAB leader_follower 阶段：u_i 已由编队控制律（相对位置 E、相对速度 V
+        # 和虚拟中心 pinning）完整给出，因此
+        #     F = m (u_i + g e3)，
+        # 不再叠加 -Kp ep - Kv ev - Ki ei，严格复现 MATLAB 的
+        #     A = -mass * (gravity * e3 - u)。
+        # 其他阶段（起飞、入轨、悬停、降落）保留原几何 PID 外环。
         formation_acceleration = np.asarray(
             target.get("formation_acceleration", np.zeros(3)), dtype=float
         ).reshape(3)
@@ -635,38 +712,83 @@ class GeometricCtbrController:
             formation_acceleration = np.zeros(3)
         if not np.all(np.isfinite(formation_acceleration_dot)):
             formation_acceleration_dot = np.zeros(3)
-        raw_desired_force = (
-            self.config.mass * (
-                target_acceleration + formation_acceleration
+        if formation_law_active:
+            # ``formation_acceleration`` 在本阶段就是完整期望加速度 u_i；按 MATLAB
+            # 虚拟中心约定它已包含中心前馈，因此这里不再加 target_acceleration，
+            # 也不使用 position_gain/velocity_gain/integral_gain 的任何一项。
+            raw_desired_force = self.config.mass * (
+                formation_acceleration
                 + np.array([0.0, 0.0, self.config.gravity])
             )
-            - self.config.position_gain * position_error
-            - self.config.velocity_gain * velocity_error
-            - self.config.integral_gain * self.position_integral
-        )
-        # The V2/formation derivative uses the *full* desired acceleration
-        # u_i = a_d + a_form in the velocity-feedback term.  Comparing the
-        # measured acceleration only with a_d would omit the formation law
-        # from A_dot and make analytic Omega_c inconsistent with the force
-        # direction actually sent to the vehicle.
-        desired_acceleration = target_acceleration + formation_acceleration
-        raw_desired_force_dot = (
-            self.config.mass * (target_jerk + formation_acceleration_dot)
-            - self.config.position_gain * velocity_error
-            - self.config.velocity_gain * (current_acceleration - desired_acceleration)
-            - self.config.integral_gain * saturated_integral_rate
-        )
+            raw_desired_force_dot = self.config.mass * formation_acceleration_dot
+        else:
+            raw_desired_force = (
+                self.config.mass * (
+                    target_acceleration + formation_acceleration
+                    + np.array([0.0, 0.0, self.config.gravity])
+                )
+                - self.config.position_gain * position_error
+                - self.config.velocity_gain * velocity_error
+                - self.config.integral_gain * self.position_integral
+            )
+            # The V2/formation derivative uses the *full* desired acceleration
+            # u_i = a_d + a_form in the velocity-feedback term.  Comparing the
+            # measured acceleration only with a_d would omit the formation law
+            # from A_dot and make analytic Omega_c inconsistent with the force
+            # direction actually sent to the vehicle.
+            desired_acceleration = target_acceleration + formation_acceleration
+            raw_desired_force_dot = (
+                self.config.mass * (target_jerk + formation_acceleration_dot)
+                - self.config.position_gain * velocity_error
+                - self.config.velocity_gain * (current_acceleration - desired_acceleration)
+                - self.config.integral_gain * saturated_integral_rate
+            )
 
-        # 先限制竖直推力，再依照最大倾角限制水平合力。水平力上限依赖当前可用的
-        # 竖直力，确保大位置误差不会要求接近 90 deg 的危险倾斜；同时求该限幅的导数，
-        # 使解析 Omega_c 与实际用于构造姿态的合力方向一致。
-        max_tilt_rad = float(target.get("max_tilt_rad", self.config.max_tilt_rad))
-        desired_force, desired_force_dot = _limit_force_with_derivative(
-            raw_desired_force,
-            raw_desired_force_dot,
-            self.config.max_command_thrust,
-            max_tilt_rad,
-        )
+        if formation_law_active:
+            # MATLAB 忠实实现：leader_follower 阶段不对合力方向做任何限制。
+            # MATLAB 直接令 b3c = -A/||A||，只在最后对集体推力做标量裁剪；
+            # 若在这里插入倾角锥，姿态目标方向会偏离控制律本意，而且水平力上限
+            # 依赖逐机不同的竖直力，会造成三架飞机限制不一致、队形被拉开。
+            # 这里只保留一个三维统一（保方向）的加速度安全阀，默认关闭。
+            acceleration_limit = float(
+                target.get("formation_max_accel_mps2", 0.0)
+            )
+            limited_acceleration, limited_acceleration_dot = (
+                _limit_acceleration_with_derivative(
+                    formation_acceleration,
+                    formation_acceleration_dot,
+                    acceleration_limit,
+                )
+            )
+            raw_desired_force = self.config.mass * (
+                limited_acceleration
+                + np.array([0.0, 0.0, self.config.gravity])
+            )
+            raw_desired_force_dot = self.config.mass * limited_acceleration_dot
+            # 让日志与返回值反映真正驱动合力的加速度，便于离线核对安全阀是否触发。
+            formation_acceleration = limited_acceleration
+            formation_acceleration_dot = limited_acceleration_dot
+            desired_force = raw_desired_force.copy()
+            desired_force_dot = raw_desired_force_dot.copy()
+            # 只对竖直分量做标量裁剪，等价于 MATLAB 的 max(thrust,0) 与 100% 上限。
+            # 该分支不改变 xy 分量，因此保持方向；只有在力已经贴近竖直极限时才会
+            # 轻微改变方向，与 MATLAB 的推力饱和行为一致。
+            desired_force[2] = float(np.clip(
+                desired_force[2], 0.0, self.config.max_command_thrust
+            ))
+            if (raw_desired_force[2] <= 0.0 or
+                    raw_desired_force[2] >= self.config.max_command_thrust):
+                desired_force_dot[2] = 0.0
+        else:
+            # 其他阶段（起飞、入轨、悬停、降落）继续使用倾角锥：这些阶段是安全
+            # 优先的机动，位置误差小时几乎不会触发，触及时限制水平力是期望行为。
+            max_tilt_rad = float(target.get("max_tilt_rad", self.config.max_tilt_rad))
+            desired_force, desired_force_dot = _limit_force_with_derivative(
+                raw_desired_force,
+                raw_desired_force_dot,
+                self.config.max_command_thrust,
+                max_tilt_rad,
+            )
 
         force_norm = float(np.linalg.norm(desired_force))
         if force_norm < float(self.config.omega_c_force_norm_epsilon):
@@ -761,6 +883,7 @@ class GeometricCtbrController:
             "desired_force": desired_force,
             "formation_acceleration": formation_acceleration,
             "formation_acceleration_dot": formation_acceleration_dot,
+            "formation_law_active": formation_law_active,
             "computed_rotation": computed_rotation,
             "computed_body_rate": computed_body_rate,
             "omega_c_method": omega_c_method,
@@ -831,6 +954,14 @@ class FlightCsvLogger:
         # legacy CSV consumers keep their original column positions.
         "formation_acceleration_x", "formation_acceleration_y", "formation_acceleration_z",
         "formation_acceleration_dot_x", "formation_acceleration_dot_y", "formation_acceleration_dot_z",
+        # 1 表示本周期使用 MATLAB leader_follower 完整 u_i（不含几何 PID）；
+        # 0 表示使用几何 PID 外环。追加在末尾以保持旧列号布局。
+        "formation_law_active",
+        # 每机推力标定修正系数（静态配置值），与电压补偿相乘后写入
+        # thrust_raw_scale。追加在末尾以便离线从 CSV 反推实际推力。
+        "thrust_scale_correction",
+        # 编队积分项 e_ic = ∫(η_i + c1*e_i)dτ。追加在末尾以保持旧列号布局。
+        "formation_integral_x", "formation_integral_y", "formation_integral_z",
     ]
 
     def __init__(self, directory, prefix):
@@ -1140,6 +1271,9 @@ class CtbrControllerNode:
                 figure_eight_angular_speed_radps=float(
                     trajectory_param("figure_eight_angular_speed_radps", 0.55)
                 ),
+                figure_eight_heading=str(
+                    trajectory_param("figure_eight_heading", "velocity")
+                ),
             )
             # 这里先做一次无起点构造，尽早报告参数错误；实际圆心/编队质心到第一帧后才解析。
             CircularFlightTrajectory(self.trajectory_config)
@@ -1180,6 +1314,12 @@ class CtbrControllerNode:
         self.preflight_raw_scale_max = float(
             self.params.vehicle_param("preflight_raw_scale_max")
         )
+        # 每机推力标定修正系数。它独立于电压补偿：电压补偿只跟踪电池电压，
+        # 而这个系数补偿电机/螺旋桨/推力曲线本身的偏差（悬停实测 k = 实际推力/指令推力，
+        # 修正量取 1/sqrt(k)）。分开保存便于诊断，也避免把电压参考值当成标定旋钮。
+        self.thrust_scale_correction = float(
+            self.params.vehicle_param("thrust_scale_correction", 1.0)
+        )
         if (self.preflight_voltage_samples_required < 1 or
                 self.preflight_voltage_timeout_s <= 0.0 or
                 self.preflight_battery_max_age_s <= 0.0 or
@@ -1187,9 +1327,11 @@ class CtbrControllerNode:
                 self.preflight_voltage_reference_v <= 0.0 or
                 self.preflight_raw_scale_exponent <= 0.0 or
                 self.preflight_raw_scale_min <= 0.0 or
-                self.preflight_raw_scale_max < self.preflight_raw_scale_min):
+                self.preflight_raw_scale_max < self.preflight_raw_scale_min or
+                not math.isfinite(self.thrust_scale_correction) or
+                self.thrust_scale_correction <= 0.0):
             raise rospy.ROSInitException(
-                "预起飞电压采样、阈值和 raw 推力缩放参数必须有效"
+                "预起飞电压采样、阈值、raw 推力缩放和推力标定修正参数必须有效"
             )
 
         # max_total_thrust 是物理标定上限（120 gf）；max_command_thrust 是本次控制器
@@ -1309,6 +1451,8 @@ class CtbrControllerNode:
         # 轨迹模块在第一帧有效状态后创建；latest_* 由 ROS 回调线程写入，必须受锁保护。
         self.trajectory = None
         self.last_trajectory_phase = None
+        # 编队积分状态的只读副本，仅用于 CSV 诊断。
+        self.formation_integral_state = np.zeros(3)
         self.flight_phase = "waiting_for_state"
         self.preflight_voltage_started_time = None
         self.preflight_voltage_v = math.nan
@@ -1603,6 +1747,8 @@ class CtbrControllerNode:
             raw_scale = (self.preflight_voltage_reference_v / preflight_voltage_v) ** (
                 self.preflight_raw_scale_exponent
             )
+            # 电压补偿之后再叠加每机推力标定修正。两者相乘但分开校验：范围检查
+            # 只针对电压补偿，避免标定修正被误判成电压异常。
             if (raw_scale < self.preflight_raw_scale_min or
                     raw_scale > self.preflight_raw_scale_max):
                 self._fail_preflight_voltage(
@@ -1614,12 +1760,14 @@ class CtbrControllerNode:
                 return self._preflight_hold_target(state, "preflight_voltage_failed")
 
             self.preflight_voltage_v = preflight_voltage_v
-            self.thrust_raw_scale = raw_scale
+            self.thrust_raw_scale = raw_scale * self.thrust_scale_correction
             self.preflight_voltage_ready = True
             self.controller.reset()
             rospy.loginfo(
-                "电压预检完成：中位数 %.3f V，冻结 raw 推力缩放 %.3f（参考 %.3f V）",
-                self.preflight_voltage_v, self.thrust_raw_scale,
+                "电压预检完成：中位数 %.3f V，电压 raw 缩放 %.3f，"
+                "推力标定修正 %.3f，合计 %.3f（参考 %.3f V）",
+                self.preflight_voltage_v, raw_scale,
+                self.thrust_scale_correction, self.thrust_raw_scale,
                 self.preflight_voltage_reference_v,
             )
             return None
@@ -1801,7 +1949,8 @@ class CtbrControllerNode:
     def _timer_callback(
             self, _event, now=None, target_override=None,
             control_state_override=None, formation_acceleration=None,
-            formation_acceleration_dot=None):
+            formation_acceleration_dot=None, formation_max_accel_mps2=0.0,
+            formation_integral=None):
         """控制周期入口：先执行状态失效保护，再计算、发布并记录同一份命令。"""
         now = time.monotonic() if now is None else float(now)
         dt = now - self.last_tick
@@ -1933,6 +2082,16 @@ class CtbrControllerNode:
             target["formation_acceleration_dot"] = np.zeros(3) if (
                 formation_acceleration_dot is None
             ) else np.asarray(formation_acceleration_dot, dtype=float).reshape(3)
+            # 该标志使几何控制器把 formation_acceleration 当作完整的 MATLAB u_i：
+            # F = m(u_i + g e3)，不再叠加 position_gain/velocity_gain/integral_gain，
+            # 并且不做倾角锥限制（MATLAB 只裁剪标量推力）。
+            target["formation_law_active"] = True
+            target["formation_max_accel_mps2"] = float(formation_max_accel_mps2)
+            # 编队积分状态只用于 CSV 诊断；它已经包含在 u_i 里，不参与控制计算。
+            self.formation_integral_state = np.zeros(3) if formation_integral is None \
+                else np.asarray(formation_integral, dtype=float).reshape(3).copy()
+        else:
+            self.formation_integral_state = np.zeros(3)
         if (self._ekf_kinematics_enabled and
                 not control_state["ekf_state_valid"] and
                 not control_state["ekf_kinematics_held"] and
@@ -2018,6 +2177,7 @@ class CtbrControllerNode:
             "desired_force": np.zeros(3),
             "formation_acceleration": np.zeros(3),
             "formation_acceleration_dot": np.zeros(3),
+            "formation_law_active": False,
             "computed_rotation": state["rotation"],
             "computed_body_rate": np.zeros(3),
             "omega_c_method": "zero",
@@ -2077,6 +2237,7 @@ class CtbrControllerNode:
             "preflight_voltage_ready": int(self.preflight_voltage_ready),
             "preflight_voltage_failed": int(self.preflight_voltage_failed),
             "thrust_raw_scale": self.thrust_raw_scale,
+            "thrust_scale_correction": self.thrust_scale_correction,
         }
 
     def _battery_log_fields(self, now):
@@ -2149,6 +2310,11 @@ class CtbrControllerNode:
         self._with_xyz(
             row, "position_integral", command.get("position_integral", np.zeros(3))
         )
+        row["formation_law_active"] = int(
+            bool(command.get("formation_law_active", False))
+        )
+        # 编队积分状态由多机管理器推进，这里只记录本周期生效的值。
+        self._with_xyz(row, "formation_integral", self.formation_integral_state)
         self._with_xyz(row, "attitude_error", command["attitude_error"])
         self._with_xyz(row, "computed_rate", command.get("computed_body_rate", np.zeros(3)))
         self._with_xyz(row, "command_rate", command["body_rate_command"])
@@ -2289,28 +2455,19 @@ class MultiCtbrControllerNode:
             raise rospy.ROSInitException(
                 "formation_control_mode 当前仅支持 leader_follower"
             )
-        self.formation_kf = float(rospy.get_param(
-            GLOBAL_CTBR_PARAMETER_ROOT + "/formation_kf", 2.8
-        ))
-        self.formation_kvf = float(rospy.get_param(
-            GLOBAL_CTBR_PARAMETER_ROOT + "/formation_kvf", 2.1
-        ))
-        self.formation_kbl = float(rospy.get_param(
-            GLOBAL_CTBR_PARAMETER_ROOT + "/formation_kbl", 2.0
-        ))
-        self.formation_kvl = float(rospy.get_param(
-            GLOBAL_CTBR_PARAMETER_ROOT + "/formation_kvl", 1.6
-        ))
+        # 通信图与 bl 权重是全局的：它们描述任务层面的拓扑，不属于单机标定。
         self.formation_bl = np.asarray(rospy.get_param(
             GLOBAL_CTBR_PARAMETER_ROOT + "/formation_bl", [1.0, 1.0, 1.0]
         ), dtype=float).reshape(-1)
+        # 0 或负数表示关闭；编队阶段默认不做任何方向限制，忠实复现 MATLAB。
+        self.formation_max_accel_mps2 = float(rospy.get_param(
+            GLOBAL_CTBR_PARAMETER_ROOT + "/formation_max_accel_mps2", 0.0
+        ))
         self.formation_adjacency = np.asarray(rospy.get_param(
             GLOBAL_CTBR_PARAMETER_ROOT + "/formation_adjacency",
             [[0.0, 1.0, 1.0], [1.0, 0.0, 1.0], [1.0, 1.0, 0.0]],
         ), dtype=float)
-        if (not all(math.isfinite(value) and value >= 0.0 for value in (
-                self.formation_kf, self.formation_kvf,
-                self.formation_kbl, self.formation_kvl)) or
+        if (not math.isfinite(self.formation_max_accel_mps2) or
                 self.formation_bl.size != len(self.vehicle_configs) or
                 self.formation_adjacency.shape != (
                     len(self.vehicle_configs), len(self.vehicle_configs)) or
@@ -2321,6 +2478,12 @@ class MultiCtbrControllerNode:
                 "formation 参数维度、增益和邻接矩阵必须有效"
             )
         np.fill_diagonal(self.formation_adjacency, 0.0)
+
+        # 每架飞机的编队积分状态 e_ic 及其上一次推进时刻。积分只在八字编队阶段
+        # 推进；离开该阶段或重新进入时清空，避免把旧的 trim 带入新阶段。
+        self.formation_integral = np.zeros((len(self.vehicle_configs), 3))
+        self.formation_integral_last_time = None
+        self.formation_integral_active = False
 
         mission_start = time.monotonic()
         self.vehicles = [
@@ -2333,6 +2496,17 @@ class MultiCtbrControllerNode:
             )
             for vehicle_config in self.vehicle_configs
         ]
+        # 编队增益逐机读取：每架可在自己的 ctbr_controller_cf<ID> 块里覆盖，
+        # 未设置的沿用 /ctbr_controller 的全局默认值。每个增益既支持标量
+        # （xyz 相同）也支持 3 元列表（world xyz 逐轴独立）。
+        try:
+            self.formation_gains = [
+                self._read_formation_gains(vehicle) for vehicle in self.vehicles
+            ]
+        except (TypeError, ValueError) as error:
+            self.logger.close()
+            raise rospy.ROSInitException("formation 增益无效：%s" % error)
+
         self.mission_start_time = mission_start
         self.fleet_gate_open = False
         self.global_abort_reason = ""
@@ -2345,6 +2519,40 @@ class MultiCtbrControllerNode:
             "多机 CTBR 控制器已启动：%d 架飞机，共用一份日志 %s",
             len(self.vehicles), self.logger.path,
         )
+
+    def _read_formation_gains(self, vehicle):
+        """Read one vehicle's formation gains, falling back to the global block.
+
+        Each gain accepts a scalar (identical on x/y/z, the historical form) or a
+        3-element list for independent world-xyz tuning like ``position_gain``.
+        The scalar ``c1`` / ``limit`` entries are shared with the other vehicles
+        because they define the integrator's own time constant, not a per-axis
+        control authority.
+        """
+        reader = vehicle.params.formation_param
+        return {
+            "kf": as_gain_vector(reader("formation_kf", [4.0] * 3), "formation_kf"),
+            "kvf": as_gain_vector(
+                reader("formation_kvf", [2.1] * 3), "formation_kvf"
+            ),
+            "kbl": as_gain_vector(
+                reader("formation_kbl", [4.0] * 3), "formation_kbl"
+            ),
+            "kvl": as_gain_vector(
+                reader("formation_kvl", [1.6] * 3), "formation_kvl"
+            ),
+            "kil": as_gain_vector(
+                reader("formation_kil", [0.0] * 3), "formation_kil"
+            ),
+            "integral_c1": as_gain_vector(
+                reader("formation_integral_c1", 0.35),
+                "formation_integral_c1",
+            ),
+            "integral_limit_m": as_gain_vector(
+                reader("formation_integral_limit_m", 0.30),
+                "formation_integral_limit_m",
+            ),
+        }
 
     def _all_states_ready(self, now):
         return all(vehicle._state_ready(now) for vehicle in self.vehicles)
@@ -2367,15 +2575,42 @@ class MultiCtbrControllerNode:
             vehicle.set_global_abort(self.global_abort_reason)
         rospy.logerr("多机 CTBR 全局中止：%s；所有飞机发送零推力", reason)
 
-    def _formation_overrides(self, now):
-        """Compute MATLAB formation acceleration corrections in ROS z-up.
+    def _formation_integral_reset(self):
+        """Clear the formation trim integrator and its timestep anchor."""
+        shape = (len(self.vehicles), 3)
+        self.formation_integral = np.zeros(shape)
+        self.formation_integral_last_time = None
+        self.formation_integral_active = False
 
-        MATLAB uses z-down and computes ``u_i`` as a desired acceleration.  A
-        sign flip on the z component maps it to ROS z-up; since the current
-        reference has constant altitude, this is equivalent to using the
-        already z-up center derivatives below.  The returned correction is
-        ``u_i - a_c`` so the existing CTBR position PID remains available as a
-        local stabilizing loop.
+    def _formation_overrides(self, now):
+        """Compute the MATLAB leader_follower desired acceleration ``u_i``.
+
+        MATLAB uses z-down; the center derivatives built here are already in
+        ROS world z-up, and since the figure-eight reference has constant
+        altitude the conversion is a pure z sign flip that leaves those terms
+        unchanged.  The returned value is the *complete* desired acceleration
+
+        ``u_i = a_c - kf*E - kvf*V - kbl*b*e_i - kvl*b*eta_i - kil*b*e_ic``
+
+        i.e. exactly what MATLAB feeds into ``A = -mass*(g*e3 - u)``.  The
+        caller marks the target as ``formation_law_active`` so
+        ``GeometricCtbrController`` does not add its own position/velocity/
+        integral feedback on top.
+
+        All gains come from ``self.formation_gains[i]`` and are world-xyz
+        vectors, so each vehicle can be tuned independently and per axis.  The
+        axes stay decoupled: a gain only multiplies terms of its own axis, and
+        the *target* relative geometry lives in ``offsets`` and is never scaled.
+        An anisotropic gain therefore changes each axis' stiffness / convergence
+        rate independently, not the shape the fleet converges to.
+
+        The law runs for every phase in :data:`FORMATION_LAW_PHASES`.  Keeping
+        ``final_hover`` on the same law makes the figure-eight -> hover hand-off
+        continuous: the integrator that carried the thrust trim through the
+        figure-eight keeps carrying it in hover, instead of being discarded and
+        rebuilt by the geometric PID (which used to let the fleet sink for
+        seconds after the switch).  The hover reference is a static point, so
+        the law degrades to a plain formation-holding controller there.
         """
         if (not self.multi_mode or len(self.vehicles) < 2 or
                 self.formation_control_mode != "leader_follower"):
@@ -2395,7 +2630,7 @@ class MultiCtbrControllerNode:
                     not control_state["ekf_kinematics_held"]):
                 return {}
             target = vehicle._target_for(state, now)
-            if target.get("flight_phase") != "figure_eight":
+            if target.get("flight_phase") not in FORMATION_LAW_PHASES:
                 return {}
             states.append(state)
             controls.append(control_state)
@@ -2418,14 +2653,25 @@ class MultiCtbrControllerNode:
             target.get("jerk", np.zeros(3)) for target in targets
         ])
         offsets = references - np.mean(references, axis=0)
-        center_position = np.mean(references, axis=0)
         center_velocity = np.mean(reference_velocity, axis=0)
         center_acceleration = np.mean(reference_acceleration, axis=0)
         center_jerk = np.mean(reference_jerk, axis=0)
         formation_acceleration = np.zeros((count, 3))
         formation_acceleration_dot = np.zeros((count, 3))
+        # 积分项 e_ic = ∫(η_i + c1*e_i)dτ，在控制 tick 上以真实 dt 累积。
+        # 只在编队阶段推进；离开该阶段时重置，避免把旧 trim 带入后续阶段。
+        integral_rate = np.zeros((count, 3))
+        if self.formation_integral_last_time is not None:
+            dt = float(now) - float(self.formation_integral_last_time)
+            if not (0.0 < dt <= 0.5):
+                # 时间跳变/长时间中断：本周期不积分，避免一次性大跳。
+                dt = 0.0
+        else:
+            dt = 0.0
+        self.formation_integral_last_time = float(now)
 
         for i in range(count):
+            gains = self.formation_gains[i]
             relative_position_sum = np.zeros(3)
             relative_velocity_sum = np.zeros(3)
             acceleration_difference_sum = np.zeros(3)
@@ -2443,28 +2689,57 @@ class MultiCtbrControllerNode:
                     accelerations[i] - accelerations[j]
                 )
 
+            # MATLAB leader_follower：每架飞机同时接收通信图上的相对项和
+            # 虚拟中心 pinning 项；bl(i) 的取值即 pinning 权重 b。
+            # 所有增益都是 world-xyz 三维向量，逐轴独立；标量配置会被广播成
+            # 三个相同分量，因此旧配置行为不变。
             error_to_reference = positions[i] - references[i]
-            velocity_to_reference = velocities[i] - center_velocity
-            desired_acceleration = (
-                center_acceleration
-                - self.formation_kf * relative_position_sum
-                - self.formation_kvf * relative_velocity_sum
-                - self.formation_kbl * self.formation_bl[i] * error_to_reference
-                - self.formation_kvl * self.formation_bl[i] * velocity_to_reference
-            )
-            desired_acceleration_dot = (
-                center_jerk
-                - self.formation_kf * relative_velocity_sum
-                - self.formation_kvf * acceleration_difference_sum
-                - self.formation_kbl * self.formation_bl[i] * velocity_to_reference
-                - self.formation_kvl * self.formation_bl[i] * (
-                    accelerations[i] - center_acceleration
-                )
-            )
+            eta = velocities[i] - reference_velocity[i]
+            eta_dot = accelerations[i] - center_acceleration
+            pinning_gain = gains["kbl"] * self.formation_bl[i]
+            velocity_pinning_gain = gains["kvl"] * self.formation_bl[i]
+            integral_gain = gains["kil"] * self.formation_bl[i]
+            integral_c1 = gains["integral_c1"]
+            integral_limit = gains["integral_limit_m"]
 
-            formation_acceleration[i] = desired_acceleration - targets[i]["acceleration"]
+            # 积分器状态更新（饱和积分：到达限幅且仍朝界外推时不继续累积）。
+            # ``a_dot`` 使用饱和后的积分导数，与位置环的做法一致。
+            raw_integral_rate = eta + integral_c1 * error_to_reference
+            if dt > 0.0:
+                self.formation_integral[i] = self.formation_integral[i] + dt * raw_integral_rate
+                self.formation_integral[i] = clamp_vector(
+                    self.formation_integral[i], -integral_limit, integral_limit
+                )
+                saturated = raw_integral_rate.copy()
+                upper = np.logical_and(
+                    self.formation_integral[i] >= integral_limit - 1e-12,
+                    raw_integral_rate > 0.0,
+                )
+                lower = np.logical_and(
+                    self.formation_integral[i] <= -integral_limit + 1e-12,
+                    raw_integral_rate < 0.0,
+                )
+                saturated[upper | lower] = 0.0
+                integral_rate[i] = saturated
+            else:
+                # 本周期不推进积分（时间跳变或首个编队周期），a_dot 中该项为 0。
+                integral_rate[i] = np.zeros(3)
+
+            formation_acceleration[i] = (
+                center_acceleration
+                - gains["kf"] * relative_position_sum
+                - gains["kvf"] * relative_velocity_sum
+                - pinning_gain * error_to_reference
+                - velocity_pinning_gain * eta
+                - integral_gain * self.formation_integral[i]
+            )
             formation_acceleration_dot[i] = (
-                desired_acceleration_dot - targets[i].get("jerk", np.zeros(3))
+                center_jerk
+                - gains["kf"] * relative_velocity_sum
+                - gains["kvf"] * acceleration_difference_sum
+                - pinning_gain * eta
+                - velocity_pinning_gain * eta_dot
+                - integral_gain * integral_rate[i]
             )
 
         return {
@@ -2473,9 +2748,18 @@ class MultiCtbrControllerNode:
                 "control_state": controls[i],
                 "formation_acceleration": formation_acceleration[i],
                 "formation_acceleration_dot": formation_acceleration_dot[i],
+                "formation_integral": self.formation_integral[i].copy(),
             }
             for i, vehicle in enumerate(self.vehicles)
         }
+
+    def _fleet_in_formation_phase(self):
+        """Return whether any vehicle already flies the MATLAB formation law."""
+        if not self.multi_mode or self.formation_control_mode != "leader_follower":
+            return False
+        return any(
+            vehicle.flight_phase == "figure_eight" for vehicle in self.vehicles
+        )
 
     def _timer_callback(self, _event):
         now = time.monotonic()
@@ -2522,6 +2806,23 @@ class MultiCtbrControllerNode:
             self._set_abort("NOKOV 状态失效：%s" % ",".join(invalid_ids))
 
         formation_overrides = self._formation_overrides(now)
+        if not formation_overrides and self._fleet_in_formation_phase():
+            # 有飞机已经在飞 MATLAB leader_follower 控制律，本周期却拿不到编队解
+            # （例如某一架的状态或 EKF 暂时不可用）。此时绝不能静默回退到几何 PID
+            # 外环：那会在没有任何接缝的情况下改变控制律。这里保持高频告警并继续
+            # 使用各机自身的目标，让已有的状态/EKF 保护逻辑来处理异常；不主动下发
+            # 零推力中止，因为编队飞行中直接断推力比继续闭环更危险。
+            rospy.logwarn_throttle(
+                1.0,
+                "八字编队阶段无法计算 leader_follower 控制律；"
+                "本周期沿用各机自身目标，请检查状态与 EKF 健康度。",
+            )
+        # 积分项只在连续可用的编队解之间推进：一旦某周期算不出编队解，
+        # 就清空积分并重置计时锚点，恢复时从零重新累积。
+        if formation_overrides:
+            self.formation_integral_active = True
+        elif self.formation_integral_active:
+            self._formation_integral_reset()
         for vehicle in self.vehicles:
             vehicle.set_fleet_gate(True)
             override = formation_overrides.get(id(vehicle), {})
@@ -2532,6 +2833,8 @@ class MultiCtbrControllerNode:
                 control_state_override=override.get("control_state"),
                 formation_acceleration=override.get("formation_acceleration"),
                 formation_acceleration_dot=override.get("formation_acceleration_dot"),
+                formation_max_accel_mps2=self.formation_max_accel_mps2,
+                formation_integral=override.get("formation_integral"),
             )
         self.logger.flush()
 

@@ -60,8 +60,11 @@
       # F/Fmax = (raw_thrust / 60000)^2；CTBR 的牛顿推力需作平方反解。
       ctbr_thrust_curve_exponent: 2.0
       # 起飞前电压冻结补偿只能在此范围内改变 raw PWM，避免错误标定放大推力。
-      ctbr_thrust_raw_scale_min: 0.90
-      ctbr_thrust_raw_scale_max: 1.12
+      # 该窗口必须同时覆盖「电压补偿」和「每机推力标定修正 thrust_scale_correction」，
+      # 因为两者相乘后才作为 thrust_raw_scale 发给桥接层。cf5 的标定修正为 0.891，
+      # 低于旧的 0.90 下限，会被桥接层整包拒绝并切断推力，因此下限放宽到 0.80。
+      ctbr_thrust_raw_scale_min: 0.80
+      ctbr_thrust_raw_scale_max: 1.20
       ctbr_max_body_rate_rad_per_sec: 6.0
       ctbr_command_timeout: 0.1
       ctbr_roll_sign: 1.0
