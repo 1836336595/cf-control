@@ -1236,13 +1236,15 @@ def _formation_node(module, vehicles, **overrides):
     """
     defaults = dict(
         kf=4.0, kvf=2.1, kbl=4.0, kvl=1.6, kil=0.0,
-        integral_c1=0.35, integral_limit_m=0.30,
+        integral_c1=0.35, integral_limit_m=0.30, bl=1.0,
     )
     defaults.update(overrides)
-    gains = {
-        key: module.as_gain_vector(value, "test_%s" % key)
-        for key, value in defaults.items()
-    }
+    gains = {}
+    for key, value in defaults.items():
+        if key == "bl":
+            gains[key] = module.as_pinning_weight(value)
+        else:
+            gains[key] = module.as_gain_vector(value, "test_%s" % key)
     count = len(vehicles)
     values = dict(
         multi_mode=True,
@@ -1252,7 +1254,6 @@ def _formation_node(module, vehicles, **overrides):
         formation_integral=np.zeros((count, 3)),
         formation_integral_last_time=None,
         formation_integral_active=False,
-        formation_bl=np.ones(count),
         formation_adjacency=np.ones((count, count)) - np.eye(count),
     )
     return types.SimpleNamespace(**values)
@@ -1289,6 +1290,83 @@ class _FakeFleetVehicle:
 
     def _target_for(self, _state, _now):
         return self.target
+
+
+def test_formation_pinning_weight_is_read_per_vehicle():
+    """``formation_bl`` (MATLAB b_i) must come from the vehicle's own block.
+
+    It used to be a global positional array indexed by launch order, so
+    reordering ``crazyflies.yaml`` silently shifted the pinning weight to a
+    different aircraft.  Reading it through ``formation_param`` binds it to the
+    CF ID instead.
+    """
+    module = _controller_module()
+    server = _FakeParameterServer({})
+    server.values.update({
+        "/ctbr_controller_cf2": {},
+        "/ctbr_controller_cf4": {},
+        # Only CF4 de-emphasises the virtual center.
+        "/ctbr_controller_cf4/formation_bl": 0.25,
+    })
+    server.has_param = lambda name: name in server.values
+    server.get_param = lambda name, default=None: server.values.get(name, default)
+
+    def bl_for(cf_id):
+        resolver = module.CtbrParameterResolver(
+            server.get_param, server.has_param, vehicle_id=cf_id
+        )
+        vehicle = types.SimpleNamespace(params=resolver)
+        gains = module.MultiCtbrControllerNode._read_formation_gains(
+            types.SimpleNamespace(), vehicle
+        )
+        return gains["bl"]
+
+    assert bl_for(2) == 1.0
+    assert bl_for(4) == 0.25
+
+
+def test_pinning_weight_rejects_negative_or_non_finite_values():
+    module = _controller_module()
+
+    assert module.as_pinning_weight(0) == 0.0
+    assert module.as_pinning_weight(2.5) == 2.5
+    for invalid in (-1.0, float("nan"), float("inf")):
+        try:
+            module.as_pinning_weight(invalid)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("formation_bl=%r 应被拒绝" % invalid)
+
+
+def test_pinning_weight_scales_only_the_center_terms():
+    """b_i multiplies kbl/kvl/kil but must not touch the graph terms kf/kvf."""
+    module = _controller_module()
+    offsets = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    error = 0.2
+
+    def acceleration_for(bl):
+        fleet = [
+            _FakeFleetVehicle(offsets[i] + error, offsets[i]) for i in range(3)
+        ]
+        # Only the center-pinning channel is active: kf = kvf = 0 removes the
+        # graph-relative terms, so any change must come from b_i scaling kbl.
+        node = _formation_node(
+            module, fleet, bl=bl, kbl=4.0, kf=0.0, kvf=0.0, kvl=0.0, kil=0.0
+        )
+        result = module.MultiCtbrControllerNode._formation_overrides(node, 1.0)
+        return np.array([
+            result[id(vehicle)]["formation_acceleration"] for vehicle in fleet
+        ])
+
+    full = acceleration_for(1.0)
+    half = acceleration_for(0.5)
+    none = acceleration_for(0.0)
+
+    # A pure translation: -kbl*b*e_i along the error direction.
+    assert np.allclose(full[:, 0], -4.0 * error, atol=1e-12)
+    assert np.allclose(half, 0.5 * full, atol=1e-12)
+    assert np.allclose(none, 0.0, atol=1e-12)
 
 
 def test_formation_integral_accumulates_and_enters_the_law():

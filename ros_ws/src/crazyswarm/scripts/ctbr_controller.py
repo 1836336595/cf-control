@@ -165,6 +165,21 @@ def as_gain_vector(value, name, minimum=0.0):
     return vector
 
 
+def as_pinning_weight(value):
+    """Parse the scalar MATLAB virtual-center pinning weight ``b_i``.
+
+    ``b_i`` scales that vehicle's virtual-center pinning terms (``kbl``/``kvl``/
+    ``kil``).  It is a single scalar rather than a world-xyz vector because
+    MATLAB defines it per vehicle, not per axis; accepting a 3-element list here
+    would silently diverge from the reference law.  ``b_i <= 0`` effectively
+    disables pinning for that vehicle, leaving only the graph-relative terms.
+    """
+    scalar = float(value)
+    if not math.isfinite(scalar) or scalar < 0.0:
+        raise ValueError("formation_bl 必须是大于等于 0 的有穷数")
+    return scalar
+
+
 class SecondOrderVelocityFilter:
     """Causal second-order Butterworth filter for three-axis velocity samples.
 
@@ -2455,10 +2470,10 @@ class MultiCtbrControllerNode:
             raise rospy.ROSInitException(
                 "formation_control_mode 当前仅支持 leader_follower"
             )
-        # 通信图与 bl 权重是全局的：它们描述任务层面的拓扑，不属于单机标定。
-        self.formation_bl = np.asarray(rospy.get_param(
-            GLOBAL_CTBR_PARAMETER_ROOT + "/formation_bl", [1.0, 1.0, 1.0]
-        ), dtype=float).reshape(-1)
+        # 通信图 adjacency 是全局的：它描述任务层面的拓扑。
+        # b_i（虚拟中心 pinning 权重）则是单机属性，已下放到各自的
+        # ctbr_controller_cf<ID> 块；它按 CF ID 索引而不是按启动顺序，
+        # 因此在 crazyflies.yaml 里调换飞机顺序不会静默串位。
         # 0 或负数表示关闭；编队阶段默认不做任何方向限制，忠实复现 MATLAB。
         self.formation_max_accel_mps2 = float(rospy.get_param(
             GLOBAL_CTBR_PARAMETER_ROOT + "/formation_max_accel_mps2", 0.0
@@ -2468,14 +2483,13 @@ class MultiCtbrControllerNode:
             [[0.0, 1.0, 1.0], [1.0, 0.0, 1.0], [1.0, 1.0, 0.0]],
         ), dtype=float)
         if (not math.isfinite(self.formation_max_accel_mps2) or
-                self.formation_bl.size != len(self.vehicle_configs) or
                 self.formation_adjacency.shape != (
                     len(self.vehicle_configs), len(self.vehicle_configs)) or
                 not np.all(np.isfinite(self.formation_adjacency)) or
                 np.any(self.formation_adjacency < 0.0)):
             self.logger.close()
             raise rospy.ROSInitException(
-                "formation 参数维度、增益和邻接矩阵必须有效"
+                "formation 参数维度和邻接矩阵必须有效"
             )
         np.fill_diagonal(self.formation_adjacency, 0.0)
 
@@ -2528,6 +2542,11 @@ class MultiCtbrControllerNode:
         The scalar ``c1`` / ``limit`` entries are shared with the other vehicles
         because they define the integrator's own time constant, not a per-axis
         control authority.
+
+        ``formation_bl`` is the MATLAB pinning weight ``b_i``: it scales how
+        strongly this vehicle is anchored to the virtual center.  It lives in
+        the per-CF block so it is bound by CF ID rather than by the order
+        vehicles appear in ``crazyflies.yaml``.
         """
         reader = vehicle.params.formation_param
         return {
@@ -2552,6 +2571,7 @@ class MultiCtbrControllerNode:
                 reader("formation_integral_limit_m", 0.30),
                 "formation_integral_limit_m",
             ),
+            "bl": as_pinning_weight(reader("formation_bl", 1.0)),
         }
 
     def _all_states_ready(self, now):
@@ -2692,13 +2712,14 @@ class MultiCtbrControllerNode:
             # MATLAB leader_follower：每架飞机同时接收通信图上的相对项和
             # 虚拟中心 pinning 项；bl(i) 的取值即 pinning 权重 b。
             # 所有增益都是 world-xyz 三维向量，逐轴独立；标量配置会被广播成
-            # 三个相同分量，因此旧配置行为不变。
+            # 三个相同分量，因此旧配置行为不变。bl 是逐机标量，与 kbl 相乘后
+            # 对三轴施加同一个权重，与 MATLAB 一致。
             error_to_reference = positions[i] - references[i]
             eta = velocities[i] - reference_velocity[i]
             eta_dot = accelerations[i] - center_acceleration
-            pinning_gain = gains["kbl"] * self.formation_bl[i]
-            velocity_pinning_gain = gains["kvl"] * self.formation_bl[i]
-            integral_gain = gains["kil"] * self.formation_bl[i]
+            pinning_gain = gains["kbl"] * gains["bl"]
+            velocity_pinning_gain = gains["kvl"] * gains["bl"]
+            integral_gain = gains["kil"] * gains["bl"]
             integral_c1 = gains["integral_c1"]
             integral_limit = gains["integral_limit_m"]
 

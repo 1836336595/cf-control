@@ -97,9 +97,20 @@ e_ic = ∫(η_i + c1·e_i)dτ          积分项
 
 `formation_kf` / `formation_kvf` / `formation_kbl` / `formation_kvl` / `formation_kil`
 与 `position_gain` 一样**逐机可调**，写法也一致：标量表示 xyz 相同，3 元列表表示
-world xyz 逐轴独立。读取顺序是先取该机的 `ctbr_controller_cf<ID>` 块，没有则回退到
-`/ctbr_controller` 的全局默认值。`formation_bl` 和 `formation_adjacency` 描述任务层的
-通信拓扑，属全局参数，不逐机覆盖。
+world xyz 逐轴独立。这 8 个增益（含 `formation_integral_c1`、
+`formation_integral_limit_m` 和逐机标量 `formation_bl`）**只在各自的
+`ctbr_controller_cf<ID>` 块里声明**，全局块不再提供默认值：一旦某架漏写，参数解析
+会静默落到标称值而不报错，三架很容易拿到不一致的增益（`formation_kil` 的全局默认曾
+与三架实际值相差 30 倍）。新增飞机时必须在本机块中写全这 8 个键，
+`test_vehicle_config.py` 会校验。
+
+`formation_bl` 是 MATLAB 的虚拟中心 pinning 权重 $b_i$，表示该机被锚定到编队中心的
+强度（$b_i=0$ 表示只靠邻居相对项跟随）：它原本是全局的位置数组，下标对应飞机在
+`crazyflies.yaml` 里的启动顺序，调换顺序就会静默串位；现在下放到机块后按 CF ID 索引，
+与顺序无关。
+
+只有 `formation_adjacency`（MATLAB $a_{ij}$ 通信图）是全局参数，它描述机间拓扑，
+不逐机覆盖。
 
 ### 机头朝向
 

@@ -41,11 +41,15 @@ ctbr_controller:
   # 编队阶段只使用编队增益，不再叠加每架飞机的 position_gain、velocity_gain 和
   # integral_gain；那些 PID 增益只服务于起飞、入轨、悬停和降落等安全阶段。
   #
-  # 【增益放在哪里】kf / kvf / kbl / kvl / kil / c1 / limit 与 position_gain 一样
-  # 已经下沉到每架的 ctbr_controller_cf<ID> 块，可以逐机单独调参。本块里若仍写
-  # 这些键，则作为该机的默认值（每机块里的同名声明的优先级更高）；这里保留一份
-  # 全局默认值，方便三机共用一组标称参数。bl 与 adjacency 描述任务层面的通信拓扑，
-  # 属全局参数，不逐机覆盖。
+  # 【增益放在哪里】kf / kvf / kbl / kvl / kil / c1 / limit / bl 全部下沉到每架的
+  # ctbr_controller_cf<ID> 块里逐机声明，本块不再提供全局默认值。原因：这些键
+  # 一旦在本机块里漏写，就会静默继承到全局值而不报错（例如 kil 全局是 0.2，
+  # 而三架实际用 [6.0, 6.0, 1.5]，相差 30 倍），三架很容易拿到不一致的增益。
+  # bl 原本是全局的位置数组（按下标对应启动顺序），调换 crazyflies.yaml 里的
+  # 飞机顺序就会静默串位，因此改成逐机声明、按 CF ID 索引。
+  # 参数解析仍保留"先本机块、后全局块"的顺序，两者都没有时落到代码里的标称值；
+  # 因此新增飞机时必须在本机块中显式写出这些键，test_vehicle_config.py 会校验。
+  # adjacency 描述机间通信图，属全局参数，不逐机覆盖。
   #
   # 【维度】所有增益都支持标量（xyz 相同）或 3 元列表（world xyz 逐轴独立），
   # 与 position_gain 的写法一致。各轴是解耦的：增益只作用于本轴的分量，而目标
@@ -56,15 +60,22 @@ ctbr_controller:
   # 只对集体推力做标量裁剪。若在此处限制水平力，其上限会依赖逐机不同的竖直力，
   # 导致三架飞机饱和程度不一致并拉开队形。
   formation_control_mode: leader_follower   # MATLAB 虚拟中心 leader-follower 控制律。
-  formation_kf: 4.0                          # 相对位置一致性增益 k_f 全局默认，1/s^2。
-  formation_kvf: 2.1                         # 相对速度一致性增益 k_vf 全局默认，1/s。
-  formation_kbl: 4.0                         # 虚拟中心位置 pinning 增益 k_l 全局默认，1/s^2。
-  formation_kvl: 1.6                         # 虚拟中心速度 pinning 增益 k_vl 全局默认，1/s。
-  formation_kil: 0.2                         # 虚拟中心积分 pinning 增益 k_il 全局默认，1/s^2；0 表示关闭该项。
-  formation_integral_c1: 0.35                # 积分项位置误差耦合系数 c1 全局默认，1/s。
-  formation_integral_limit_m: 0.30           # 积分状态 e_ic 逐轴限幅全局默认，m；防止长期饱和。
-  formation_bl: [1.0, 1.0, 1.0]             # 各机虚拟中心 pinning 权重 b_i（全局通信拓扑）。
-  formation_adjacency: [[0.0, 1.0, 1.0],   # MATLAB a(i,j) 通信图（全局通信拓扑）。
+  # MATLAB a(i,j) 通信图。a[i][j] > 0 表示第 i 架把第 j 架当作邻居，数值即它在
+  # 相对项求和 Σ a_ij 里的权重；0 表示互不通信。矩阵本身不必对称，但通常取对称。
+  #
+  # 【重要】行列下标 = crazyflies.yaml 中 ctbr_enabled 条目出现的顺序，不是 CF ID。
+  # 当前启用顺序为 [2, 4, 5]，所以下标 0/1/2 分别是 CF2/CF4/CF5：
+  #              j=0(CF2) j=1(CF4) j=2(CF5)
+  #     i=0 CF2   [  0.0      1.0      1.0  ]   ← 第 0 行第 1 列的 1 = 2↔4 通信
+  #     i=1 CF4   [  1.0      0.0      1.0  ]   ← 4↔2、4↔5
+  #     i=2 CF5   [  1.0      1.0      0.0  ]   ← 5↔2、5↔4
+  # 即全连接：三架都能直接拿到另外两架的相对位置和相对速度。
+  # 对角线（自己与自己）必须为 0，代码在启动时会强制置 0。
+  #
+  # ⚠ 调换 crazyflies.yaml 里飞机的顺序，会让本矩阵静默错位到别的飞机上
+  #   （和 bl 之前的问题一样）。test_vehicle_config.py 会校验这里的下标顺序
+  #   与实际启用顺序一致，顺序变了必须同步修改矩阵和上面这段说明。
+  formation_adjacency: [[0.0, 1.0, 1.0],
                         [1.0, 0.0, 1.0],
                         [1.0, 1.0, 0.0]]
 
@@ -126,7 +137,6 @@ ctbr_controller_cf2: &ctbr_controller_default
   mass_kg: 0.0434                             # 飞行器质量，kg（实测真值，不要改）。
   # 推力标定修正：实测悬停 k = 实际推力/指令推力，修正量取 1/sqrt(k)，
   # 因为 C++ 桥接层按 F ∝ raw^2 映射。与电压补偿相乘后写入 thrust_raw_scale。
-  # 2026-09-16 18:35 飞行实测 k=0.963 -> 1.019。
   thrust_scale_correction: 1.066              # 推力标定修正系数（无量纲）。
   max_total_thrust_newton: 1.176798           # 物理总推力上限，N。
   max_command_thrust_newton: 0.80             # 控制器使用的总推力上限，N。
@@ -139,7 +149,8 @@ ctbr_controller_cf2: &ctbr_controller_default
   integral_gain: [0.40, 0.40, 0.20]           # 位置积分反馈增益，world xyz。 ki
   integral_limit: [0.8, 0.8, 0.8]             # 位置积分限幅，m*s。
   # 编队增益逐机独立，写法与 position_gain 相同：标量 = xyz 相同，
-  # 3 元列表 = world xyz 逐轴独立。留空/删除则沿用 /ctbr_controller 的全局默认值。
+  # 3 元列表 = world xyz 逐轴独立。
+  formation_bl: 1.0                           # 虚拟中心 pinning 权重 b_i（MATLAB），0 = 不锚定中心。
   formation_kf: [4.0, 4.0, 4.0]               # 相对位置一致性增益 k_f，1/s^2。
   formation_kvf: [2.1, 2.1, 2.1]              # 相对速度一致性增益 k_vf，1/s。
   formation_kbl: [4.0, 4.0, 4.0]              # 虚拟中心位置 pinning 增益 k_l，1/s^2。
@@ -163,7 +174,6 @@ ctbr_controller_cf2: &ctbr_controller_default
 ctbr_controller_cf4:
   # 如需对 CF4 单独调参，直接修改下面字段；不要改动全局或轨迹块。
   mass_kg: 0.0461                             # 飞行器质量，kg（实测真值，不要改）。
-  # 2026-09-16 18:35 飞行实测 k=1.069 -> 1/sqrt(k)=0.967。
   thrust_scale_correction: 0.942               # 推力标定修正系数（无量纲）。
   max_total_thrust_newton: 1.176798           # 物理总推力上限，N。
   max_command_thrust_newton: 0.80             # 控制器使用的总推力上限，N。
@@ -176,6 +186,7 @@ ctbr_controller_cf4:
   integral_gain: [0.03, 0.03, 0.20]           # 位置积分反馈增益，world xyz。 ki
   integral_limit: [0.35, 0.35, 0.8]             # 位置积分限幅，m*s。
   # 编队增益逐机独立：CF4 姿态响应偏弱，可单独调大 kf/kbl 而不影响另外两架。
+  formation_bl: 1.0                           # 虚拟中心 pinning 权重 b_i（MATLAB），0 = 不锚定中心。
   formation_kf: [5.0, 5.0, 5.0]               # 相对位置一致性增益 k_f，1/s^2。
   formation_kvf: [2.1, 2.1, 2.1]              # 相对速度一致性增益 k_vf，1/s。
   formation_kbl: [4.0, 4.0, 4.0]              # 虚拟中心位置 pinning 增益 k_l，1/s^2。
@@ -199,8 +210,6 @@ ctbr_controller_cf4:
 ctbr_controller_cf5:
   # 如需对 CF5 单独调参，直接修改下面字段；不要改动全局或轨迹块。
   mass_kg: 0.0420                             # 飞行器质量，kg（实测真值，不要改）。
-  # 2026-09-16 18:35 飞行实测 k=1.260 -> 1/sqrt(k)=0.891。这是三架中偏差最大的一架，
-  # 也是进八字后高度抬升最明显的来源。
   thrust_scale_correction: 0.921              # 推力标定修正系数（无量纲）。
   max_total_thrust_newton: 1.176798           # 物理总推力上限，N。
   max_command_thrust_newton: 0.80             # 控制器使用的总推力上限，N。
@@ -212,8 +221,7 @@ ctbr_controller_cf5:
   velocity_gain: [0.25, 0.25, 0.35]           # 速度反馈增益，world xyz。 kd
   integral_gain: [0.05, 0.05, 0.20]           # 位置积分反馈增益，world xyz。 ki
   integral_limit: [0.8, 0.8, 0.8]             # 位置积分限幅，m*s。
-  # 编队增益逐机独立：CF5 是三机中标定偏差最大的一架，可单独调大 kil 加快
-  # 稳态偏差收敛，而不影响另外两架。
+  formation_bl: 1.0                           # 虚拟中心 pinning 权重 b_i（MATLAB），0 = 不锚定中心。
   formation_kf: [4.0, 4.0, 4.0]               # 相对位置一致性增益 k_f，1/s^2。
   formation_kvf: [2.1, 2.1, 2.1]              # 相对速度一致性增益 k_vf，1/s。
   formation_kbl: [4.0, 4.0, 4.0]              # 虚拟中心位置 pinning 增益 k_l，1/s^2。
