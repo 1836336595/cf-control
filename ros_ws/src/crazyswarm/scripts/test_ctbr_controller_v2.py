@@ -198,7 +198,8 @@ def test_controller_node_reads_cf_specific_calibration_from_absolute_namespace()
     assert math.isclose(cf2.controller.config.mass, 0.0434)
     assert math.isclose(cf4.controller.config.mass, 0.0460)
     assert np.allclose(cf4.controller.config.position_gain, [0.8, 0.8, 0.5])
-    assert cf2.rate_hz == cf4.rate_hz == 60.0
+    expected_rate = float(roots["ctbr_controller"]["control_rate_hz"])
+    assert cf2.rate_hz == cf4.rate_hz == expected_rate
     assert cf2.trajectory_config.trajectory_mode == "figure_eight_triangle"
     assert cf4.trajectory_config.trajectory_mode == "figure_eight_triangle"
 

@@ -13,7 +13,15 @@
 - `scripts/ctbr_controller.py`：多机 CTBR 控制器、状态机、CSV 日志和安全保护。
 - `scripts/ctbr_trajectory.py`：圆周和三机等边编队连续八字轨迹。
 - `scripts/ctbr_visualization.py`：读取 CSV 并绘制位置、误差、姿态、速度、加速度和 CTBR 输出。
-- `scripts/ctbr_logs/`：控制器生成的 CSV 日志目录。
+- `scripts/test_ctbr_controller_v2.py`：控制律单元测试（参数解析、运动学融合、滤波器、状态机、CSV 列）。
+- `scripts/test_ctbr_trajectory_smoothstep.py`：参考轨迹与阶段切换的单元测试。
+- `scripts/test_vehicle_config.py`：飞机参数块校验测试。
+- `scripts/test_ctbr_visualization.py`：日志读取与绘图数据的单元测试。
+- `scripts/ctbr_logs/`：控制器生成的 CSV 日志目录（`.gitignore` 已排除实飞日志，只保留一份 `sample_flight.csv` 作为列格式样例）。
+- `MATLAB/`：几何 CTBR 控制律与仿真的 MATLAB 参考实现，用于与 Python 实现逐项对照。
+
+> 实飞日志体积很大（单次飞行可达 30 MB 以上），因此不进入版本库。`ctbr_logs/sample_flight.csv`
+> 是降采样后的完整飞行样例（含全部 11 个阶段和 108 列），可用于核对 CSV 列定义或离线跑绘图脚本。
 
 ## 编译
 
@@ -88,6 +96,8 @@ roslaunch crazyswarm ctbr_controller.launch \
 - CTBR 外环：根据轨迹位置、速度、加速度和 jerk 计算期望合力，再生成期望姿态和机体角速度。
 - 每架飞机使用自己的 `ctbr_controller_cf<ID>` 标定和 PID 参数。
 
+多机模式下由多机管理器在同一控制周期内统一推进三架飞机的状态机并分发各自的参考点，每架飞机再独立跟踪自己的目标位置，因此三架飞机共享同一份同步的轨迹时间基准。
+
 控制器不会把 `crazyflies.yaml` 的 `initialPosition` 当作实时状态。`R_WB` 使用 NOKOV 姿态；EKF 与 NOKOV 位置持续失配时，不再使用不可信的 EKF 平移运动学，并进入保持、降落或中止保护流程。
 
 ## CSV 日志和绘图
@@ -119,3 +129,19 @@ python3 ros_ws/src/crazyswarm/scripts/ctbr_visualization.py \
 - 首次调参使用较低轨迹速度，并保留 `target_confirmed:=false` 做空载检查。
 
 本项目仍保留上游 Crazyswarm 的通用 API 和仿真能力。上游文档见 [Crazyswarm documentation](https://crazyswarm.readthedocs.io/en/latest/)，新项目也可参考 [Crazyswarm2](https://imrclab.github.io/crazyswarm2/)。
+
+## 单元测试
+
+测试不依赖 ROS 运行时（导入时替换 ROS 消息类型），可直接运行：
+
+```bash
+cd ros_ws/src/crazyswarm/scripts
+python3 -m pytest test_ctbr_controller_v2.py \
+                  test_ctbr_trajectory_smoothstep.py \
+                  test_vehicle_config.py \
+                  test_ctbr_visualization.py
+```
+
+覆盖范围包括：飞机参数块的逐机解析与缺失校验、NOKOV 姿态与 EKF 运动学的融合与失效回退、
+二阶速度滤波器的收敛/复位、解析角速度与数值微分的一致性、参考轨迹的连续性与阶段切换、
+运动学与姿态的日志列定义，以及绘图脚本的日志读取。
