@@ -13,7 +13,15 @@
 - `scripts/ctbr_controller.py`：状态机、CTBR 控制律、CSV 日志和安全保护。
 - `scripts/ctbr_trajectory.py`：单机圆周参考轨迹。
 - `scripts/ctbr_visualization.py`：读取 CSV 并绘制控制结果。
-- `scripts/ctbr_logs/`：控制器生成的 CSV 日志目录。
+- `scripts/test_ctbr_controller_v2.py`：控制律单元测试（参数解析、运动学融合、滤波器、状态机、CSV 列）。
+- `scripts/test_ctbr_trajectory_smoothstep.py`：参考轨迹与阶段切换的单元测试。
+- `scripts/test_vehicle_config.py`：飞机参数块与选择逻辑测试。
+- `scripts/test_ctbr_visualization.py`：日志读取与绘图数据的单元测试。
+- `scripts/ctbr_logs/`：控制器生成的 CSV 日志目录（`.gitignore` 已排除实飞日志，只保留一份 `sample_flight.csv` 作为列格式样例）。
+- `MATLAB/`：几何 CTBR 控制律与仿真的 MATLAB 参考实现（`v2/` 为较新版本），用于与 Python 实现逐项对照。
+
+> 实飞日志体积很大（单次飞行可达 30 MB 以上），因此不进入版本库。`ctbr_logs/sample_flight.csv`
+> 是降采样后的完整飞行样例（CF4 全流程，含全部 10 个阶段和 91 列），可用于核对 CSV 列定义或离线跑绘图脚本。
 
 ## 编译
 
@@ -125,3 +133,19 @@ python3 ros_ws/src/crazyswarm/scripts/ctbr_visualization.py \
 - 真正起飞时保持单个 `ctbr_enabled: true`，并确认急停方式可用。
 
 本项目保留上游 Crazyswarm 的通用 API 和仿真能力。通用文档见 [Crazyswarm documentation](https://crazyswarm.readthedocs.io/en/latest/)。
+
+## 单元测试
+
+测试不依赖 ROS 运行时（导入时替换 ROS 消息类型），可直接运行：
+
+```bash
+cd ros_ws/src/crazyswarm/scripts
+python3 -m pytest test_ctbr_controller_v2.py \
+                  test_ctbr_trajectory_smoothstep.py \
+                  test_vehicle_config.py \
+                  test_ctbr_visualization.py
+```
+
+覆盖范围包括：飞机参数块的选择与校验、NOKOV 姿态与 EKF 运动学的融合与失效回退、
+二阶速度滤波器的收敛与复位、解析角速度与数值微分的一致性、圆周轨迹的连续性与阶段切换、
+运动学与姿态的日志列定义，以及绘图脚本的日志读取。
