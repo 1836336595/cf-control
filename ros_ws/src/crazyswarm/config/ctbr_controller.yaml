@@ -131,9 +131,9 @@ ctbr_trajectory:
   landing_condition_grace_s: 0.5              # 落地确认允许短暂失稳时间，s。
   landing_max_tilt_deg: 5.0                   # 降落阶段最大倾角，deg。
 
-# 以下三个块分别对应 CF2、CF4、CF5；初始值可按单机测试结果独立调整。
+# 以下三个块分别对应 CF3、CF4、CF5；初始值可按单机测试结果独立调整。
 # 质量、推力和增益是容易因机体、螺旋桨、电机及安装状态而变化的参数。
-ctbr_controller_cf2: &ctbr_controller_default
+ctbr_controller_cf3: &ctbr_controller_default
   mass_kg: 0.0434                             # 飞行器质量，kg（实测真值，不要改）。
   # 推力标定修正：实测悬停 k = 实际推力/指令推力，修正量取 1/sqrt(k)，
   # 因为 C++ 桥接层按 F ∝ raw^2 映射。与电压补偿相乘后写入 thrust_raw_scale。
