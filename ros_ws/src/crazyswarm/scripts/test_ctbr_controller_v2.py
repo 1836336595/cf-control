@@ -170,6 +170,9 @@ def _configure_controller_node_ros(module, roots):
 
 def _controller_parameter_roots():
     roots = yaml.safe_load(CONTROLLER_CONFIG_PATH.read_text())
+    roots.update(yaml.safe_load(
+        (CONTROLLER_CONFIG_PATH.parent / "ctbr_vehicle.yaml").read_text()
+    ))
     roots["ctbr_controller"]["target_confirmed"] = True
     return roots
 
@@ -187,7 +190,7 @@ def test_controller_node_reads_cf_specific_calibration_from_absolute_namespace()
     _configure_controller_node_ros(module, roots)
 
     cf2 = module.CtbrControllerNode(
-        vehicle_config={"id": 2, "uri": "radio://0/80/2M/E7E7E7E702"},
+        vehicle_config={"id": 3, "uri": "radio://0/80/2M/E7E7E7E703"},
         logger=_node_logger(), auto_timer=False, register_shutdown=False,
     )
     cf4 = module.CtbrControllerNode(
@@ -200,8 +203,16 @@ def test_controller_node_reads_cf_specific_calibration_from_absolute_namespace()
     assert np.allclose(cf4.controller.config.position_gain, [0.8, 0.8, 0.5])
     expected_rate = float(roots["ctbr_controller"]["control_rate_hz"])
     assert cf2.rate_hz == cf4.rate_hz == expected_rate
-    assert cf2.trajectory_config.trajectory_mode == "figure_eight_triangle"
-    assert cf4.trajectory_config.trajectory_mode == "figure_eight_triangle"
+    assert cf2.trajectory_config.trajectory_mode == "hover"
+    assert cf4.trajectory_config.trajectory_mode == "hover"
+    assert math.isclose(
+        cf2.takeoff_position_gain_scale,
+        float(roots["ctbr_controller"]["takeoff_position_gain_scale"]),
+    )
+    assert math.isclose(
+        cf4.takeoff_velocity_gain_scale,
+        float(roots["ctbr_controller"]["takeoff_velocity_gain_scale"]),
+    )
 
 
 def test_controller_node_rejects_missing_cf_specific_parameter_block():
@@ -295,6 +306,30 @@ def test_analytic_omega_c_forwards_target_yaw_rate_without_attitude_error():
 
     assert np.allclose(command["computed_body_rate"], [0.0, 0.0, 0.6], atol=1e-10)
     assert np.allclose(command["body_rate_command"], [0.0, 0.0, 0.6], atol=1e-10)
+
+
+def test_transport_force_override_bypasses_single_vehicle_position_pid():
+    """MATLAB transport force must not be changed by the independent PID terms."""
+    module = _controller_module()
+    config = _config(module)
+    controller = module.GeometricCtbrController(config)
+    state = _state()
+    state["position"] = np.array([1.0, -0.5, 0.2])
+    state["filter_derivatives_valid"] = True
+    state["filtered_velocity"] = np.zeros(3)
+    state["filtered_acceleration"] = np.zeros(3)
+    target = _target()
+    target.update({
+        "transport_mode": True,
+        "desired_force_override": np.array([0.0, 0.0, config.mass * config.gravity]),
+        "desired_force_dot_override": np.zeros(3),
+        "transport_attitude_gain": np.array([240.0, 240.0, 120.0]),
+        "transport_rate_gain": np.array([4.0, 4.0, 4.0]),
+    })
+    command = controller.compute(state, target, 0.01)
+    assert np.allclose(command["desired_force"], [0.0, 0.0, config.mass * config.gravity])
+    assert np.allclose(command["position_integral"], np.zeros(3))
+    assert command["transport_mode"] is True
 
 
 def _computed_rotation_at(module, acceleration, jerk, yaw):
@@ -1115,4 +1150,20 @@ def test_filter_columns_are_appended_after_legacy_csv_columns():
         "command_raw_thrust", "command_raw_thrust_age_s", "invalid_reason",
         "ekf_position_error_m", "ekf_position_consistent",
         "ekf_kinematics_held", "ekf_fault_age_s", "ekf_status",
-    ]
+        "payload_state_valid",
+        "payload_position_error_x", "payload_position_error_y", "payload_position_error_z",
+        "payload_velocity_error_x", "payload_velocity_error_y", "payload_velocity_error_z",
+        "payload_attitude_error_x", "payload_attitude_error_y", "payload_attitude_error_z",
+        "link_direction_x", "link_direction_y", "link_direction_z",
+        "desired_link_direction_x", "desired_link_direction_y", "desired_link_direction_z",
+            "link_direction_error_x", "link_direction_error_y", "link_direction_error_z",
+            "desired_tension_n",
+            "payload_position_x", "payload_position_y", "payload_position_z",
+            "payload_raw_velocity_x", "payload_raw_velocity_y", "payload_raw_velocity_z",
+            "payload_raw_acceleration_x", "payload_raw_acceleration_y", "payload_raw_acceleration_z",
+            "payload_velocity_x", "payload_velocity_y", "payload_velocity_z",
+            "payload_acceleration_x", "payload_acceleration_y", "payload_acceleration_z",
+            "payload_body_rate_x", "payload_body_rate_y", "payload_body_rate_z",
+            "payload_filter_derivatives_valid",
+            "payload_target_x", "payload_target_y", "payload_target_z",
+        ]

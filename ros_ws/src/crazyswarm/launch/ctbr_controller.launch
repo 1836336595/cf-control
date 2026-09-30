@@ -7,6 +7,8 @@
   <!-- 与 hover_swarm 使用同一份飞机参数；控制器管理全部 ctbr_enabled=true 的条目。 -->
   <rosparam file="$(find crazyswarm)/launch/crazyflies.yaml" command="load" />
   <rosparam file="$(find crazyswarm)/config/ctbr_controller.yaml" command="load" subst_value="true" />
+  <rosparam file="$(find crazyswarm)/config/ctbr_vehicle.yaml" command="load" />
+  <rosparam file="$(find crazyswarm)/config/slung_payload.yaml" command="load" />
 
   <node pkg="crazyswarm" type="ctbr_controller.py" name="ctbr_controller" output="screen">
   </node>

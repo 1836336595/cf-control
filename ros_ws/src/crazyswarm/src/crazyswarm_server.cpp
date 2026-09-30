@@ -1759,12 +1759,36 @@ public:
     , m_serviceTakeoff()
     , m_serviceLand()
     , m_serviceGoTo()
+    , m_serviceUpdateParams()
+    , m_pubPointCloud()
+    , m_pubPayloadMocapState()
+    , m_payloadRigidBodyName()
+    , m_payloadMocapTopic()
+    , m_payloadMocapStateEstimator(0.2f, 0.1f, 10.0f)
+    , m_payloadBr()
+    , m_groups()
+    , m_subscribeVirtualInteractiveObject()
     , m_lastInteractiveObjectPosition(-10, -10, 1)
     , m_broadcastingNumRepeats(15)
     , m_broadcastingDelayBetweenRepeatsMs(1)
   {
     ros::NodeHandle nh;
     nh.setCallbackQueue(&m_queue);
+
+    ros::NodeHandle privateNh("~");
+    privateNh.param<std::string>("payload_rigid_body", m_payloadRigidBodyName, "load");
+    privateNh.param<std::string>(
+      "payload_mocap_topic", m_payloadMocapTopic, "/load/mocap_state");
+    double derivativeAlpha = 0.2;
+    double maxDt = 0.1;
+    double maxAbsPosition = 10.0;
+    privateNh.param("mocap_state_derivative_alpha", derivativeAlpha, derivativeAlpha);
+    privateNh.param("mocap_state_max_dt", maxDt, maxDt);
+    privateNh.param(
+      "mocap_state_max_abs_position_m", maxAbsPosition, maxAbsPosition);
+    m_payloadMocapStateEstimator.configure(
+      static_cast<float>(derivativeAlpha), static_cast<float>(maxDt),
+      static_cast<float>(maxAbsPosition));
 
     m_serviceEmergency = nh.advertiseService("emergency", &CrazyflieServer::emergency, this);
     m_serviceStartTrajectory = nh.advertiseService("start_trajectory", &CrazyflieServer::startTrajectory, this);
@@ -1775,6 +1799,8 @@ public:
     m_serviceUpdateParams = nh.advertiseService("update_params", &CrazyflieServer::updateParams, this);
 
     m_pubPointCloud = nh.advertise<sensor_msgs::PointCloud>("pointCloud", 1);
+    m_pubPayloadMocapState = nh.advertise<crazyswarm::MocapState>(
+      m_payloadMocapTopic, 10, true);
 
     m_subscribeVirtualInteractiveObject = nh.subscribe("virtual_interactive_object", 1, &CrazyflieServer::virtualInteractiveObjectCallback, this);
   }
@@ -2075,7 +2101,8 @@ public:
           }
         }
 
-        if (useMotionCaptureObjectTracking || !interactiveObject.empty()) {
+        if (useMotionCaptureObjectTracking || !interactiveObject.empty() ||
+            !m_payloadRigidBodyName.empty()) {
           // get mocap rigid bodies
           mocapRigidBodies = mocap->rigidBodies();
           if (interactiveObject == "virtual") {
@@ -2087,6 +2114,37 @@ public:
                     quat));
           }
         }
+
+        // Publish the raw load rigid-body pose on its own MocapState topic.
+        // The NOKOV origin is the top-surface center; geometric-center
+        // conversion belongs to the CTBR payload controller, where the YAML
+        // dimensions are available.  Invalid/lost load states are explicitly
+        // published so the controller can keep all aircraft at zero thrust.
+        crazyswarm::MocapState payloadMsg;
+        payloadMsg.header.stamp = ros::Time::now();
+        payloadMsg.header.frame_id = "world";
+        const auto payloadIt = mocapRigidBodies.find(m_payloadRigidBodyName);
+        if (payloadIt != mocapRigidBodies.end()) {
+          m_payloadMocapStateEstimator.update(
+            payloadIt->second,
+            std::chrono::steady_clock::now(),
+            payloadMsg);
+          const auto& payloadRigidBody = payloadIt->second;
+          tf::Transform payloadTransform;
+          payloadTransform.setOrigin(tf::Vector3(
+            payloadRigidBody.position().x(),
+            payloadRigidBody.position().y(),
+            payloadRigidBody.position().z()));
+          const auto& payloadRotation = payloadRigidBody.rotation();
+          payloadTransform.setRotation(tf::Quaternion(
+            payloadRotation.x(), payloadRotation.y(),
+            payloadRotation.z(), payloadRotation.w()));
+          m_payloadBr.sendTransform(tf::StampedTransform(
+            payloadTransform, ros::Time::now(), "world", m_payloadRigidBodyName));
+        } else {
+          m_payloadMocapStateEstimator.invalidate(payloadMsg);
+        }
+        m_pubPayloadMocapState.publish(payloadMsg);
 
         auto startRunGroups = std::chrono::high_resolution_clock::now();
         std::vector<std::future<void> > handles;
@@ -2344,7 +2402,11 @@ private:
   ros::ServiceServer m_serviceUpdateParams;
 
   ros::Publisher m_pubPointCloud;
-  // tf::TransformBroadcaster m_br;
+  ros::Publisher m_pubPayloadMocapState;
+  std::string m_payloadRigidBodyName;
+  std::string m_payloadMocapTopic;
+  MocapStateEstimator m_payloadMocapStateEstimator;
+  tf::TransformBroadcaster m_payloadBr;
 
   std::vector<CrazyflieGroup*> m_groups;
 

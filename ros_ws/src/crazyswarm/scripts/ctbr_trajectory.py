@@ -42,13 +42,15 @@ def _trajectory_mode(value):
     """规范化并校验任务模式名称。"""
     mode = str(value).strip().lower().replace("-", "_")
     aliases = {
+        "hover": "hover",
+        "static_hover": "hover",
         "circle": "circle",
         "figure_eight_triangle": "figure_eight_triangle",
         "triangle_figure_eight": "figure_eight_triangle",
     }
     if mode not in aliases:
         raise ValueError(
-            "trajectory_mode 必须是 circle 或 figure_eight_triangle"
+            "trajectory_mode 必须是 hover、circle 或 figure_eight_triangle"
         )
     return aliases[mode]
 
@@ -117,11 +119,18 @@ class CircularTrajectoryConfig:
     # 飞行阶段的最低总推力。它防止外环在高度超调时把集体推力压到零；降落确认后
     # 仍由 zero_output 显式释放推力。
     airborne_min_collective_thrust: float
+    # MATLAB-style static hover duration. Kept optional for older callers.
+    hover_duration_s: float = 30.0
+    # Slung-load mode can use a low independent hover before the load handoff.
+    independent_takeoff_height_m: object = None
+    independent_takeoff_duration_s: object = None
+    takeup_duration_s: object = None
     # When set, use this absolute world-frame center instead of the legacy
     # center offset relative to the measured start position.
     circle_center_xy: object = None
     # Per-vehicle phase offset used by multi-vehicle formations.
     orbit_phase_rad: float = 0.0
+    # ``hover`` holds the nominal takeoff position for a fixed interval. In
     # ``circle`` keeps the original single-vehicle/multi-phase circle.  In
     # ``figure_eight_triangle`` the three phase offsets describe vertices of a
     # rigid equilateral triangle whose centroid follows the figure-eight.
@@ -153,7 +162,7 @@ class CircularFlightTrajectory:
 
     def _validate_config(self):
         cfg = self.config
-        _trajectory_mode(cfg.trajectory_mode)
+        mode = _trajectory_mode(cfg.trajectory_mode)
         positive = (
             ("takeoff_height_m", cfg.takeoff_height_m),
             ("takeoff_duration_s", cfg.takeoff_duration_s),
@@ -181,6 +190,7 @@ class CircularFlightTrajectory:
             ("reference_hold_s", cfg.reference_hold_s),
             ("takeoff_settle_s", cfg.takeoff_settle_s),
             ("circle_revolutions", cfg.circle_revolutions),
+            ("hover_duration_s", cfg.hover_duration_s),
             ("final_hover_s", cfg.final_hover_s),
             ("landing_settle_s", cfg.landing_settle_s),
             ("takeoff_min_collective_thrust", cfg.takeoff_min_collective_thrust),
@@ -191,7 +201,7 @@ class CircularFlightTrajectory:
         for name, value in nonnegative:
             if not math.isfinite(float(value)) or float(value) < 0.0:
                 raise ValueError("%s 不能为负数" % name)
-        if cfg.circle_revolutions <= 0.0:
+        if mode in ("circle", "figure_eight_triangle") and cfg.circle_revolutions <= 0.0:
             raise ValueError("circle_revolutions 必须大于 0")
         for name in ("takeoff_max_tilt_rad", "circle_max_tilt_rad", "landing_max_tilt_rad"):
             value = float(getattr(cfg, name))
@@ -203,6 +213,16 @@ class CircularFlightTrajectory:
             _as_vector(cfg.circle_center_xy, "circle_center_xy", size=2)
         if not math.isfinite(float(cfg.orbit_phase_rad)):
             raise ValueError("orbit_phase_rad 必须是有限数")
+        for name in ("independent_takeoff_height_m", "independent_takeoff_duration_s",
+                     "takeup_duration_s"):
+            value = getattr(cfg, name)
+            if value is not None:
+                value = float(value)
+                if not math.isfinite(value) or value <= 0.0:
+                    raise ValueError("%s 必须是正数或 None" % name)
+        if (cfg.independent_takeoff_height_m is not None and
+                float(cfg.independent_takeoff_height_m) > float(cfg.takeoff_height_m)):
+            raise ValueError("independent_takeoff_height_m 不能高于 takeoff_height_m")
 
     def reset(self, start_position=None, start_yaw=0.0, now=0.0,
               orbit_phase_rad=None):
@@ -247,7 +267,7 @@ class CircularFlightTrajectory:
                 _SMOOTHSTEP5_MAX_DERIVATIVE * total_angle / omega_peak
             )
             self.main_duration_s = self.circle_duration_s
-        else:
+        elif self.trajectory_mode == "figure_eight_triangle":
             # 使用单条连续的 Gerono 八字曲线，而不是在原点硬拼两个圆。这样
             # 八字交点处保留非零速度，同时位置、速度和加速度连续。保留原先两
             # 个圆叶总时长，避免切换模式后参考速度突然增大。
@@ -258,6 +278,10 @@ class CircularFlightTrajectory:
             self.main_duration_s = 2.0 * self.figure_eight_lobe_duration_s
             # 保持旧的公开属性可用；在八字模式它表示整段主轨迹时长。
             self.circle_duration_s = self.main_duration_s
+        else:
+            self.figure_eight_lobe_duration_s = None
+            self.circle_duration_s = 0.0
+            self.main_duration_s = float(self.config.hover_duration_s)
         self.phase = "waiting_for_reset"
         self.phase_start_time = float(now)
         self.takeoff_arrival_time = None
@@ -283,7 +307,7 @@ class CircularFlightTrajectory:
                         self.config.circle_radius_m,
                     )
                 )
-            else:
+            elif self.trajectory_mode == "figure_eight_triangle":
                 self._emit(
                     "已锁定起点 [%.3f, %.3f, %.3f] m；保持 %.1f s 后上升 %.3f m；"
                     "等边三角形边长 %.3f m，初始质心 [%.3f, %.3f] m；"
@@ -295,11 +319,25 @@ class CircularFlightTrajectory:
                         self.config.figure_eight_radius_m,
                     )
                 )
+            else:
+                self._emit(
+                    "已锁定起点 [%.3f, %.3f, %.3f] m；保持 %.1f s 后先独立上升至 z=%.3f m，"
+                    "随后定高悬停 %.1f s。" % (
+                        self.start_position[0], self.start_position[1], self.start_position[2],
+                        self.config.reference_hold_s, self.independent_takeoff_position[2],
+                        self.config.hover_duration_s,
+                    )
+                )
 
     def _initialize_geometry(self):
         cfg = self.config
         self.takeoff_position = self.start_position.copy()
         self.takeoff_position[2] += float(cfg.takeoff_height_m)
+        self.independent_takeoff_position = self.takeoff_position.copy()
+        if cfg.independent_takeoff_height_m is not None:
+            self.independent_takeoff_position[2] = (
+                self.start_position[2] + float(cfg.independent_takeoff_height_m)
+            )
         if cfg.circle_center_xy is not None:
             center_xy = _as_vector(cfg.circle_center_xy, "circle_center_xy", size=2)
         elif cfg.circle_center_offset_xy is not None:
@@ -321,7 +359,7 @@ class CircularFlightTrajectory:
                 cfg.circle_radius_m * math.cos(self.circle_start_angle),
                 cfg.circle_radius_m * math.sin(self.circle_start_angle), 0.0,
             ])
-        else:
+        elif self.trajectory_mode == "figure_eight_triangle":
             # Three vehicle phase offsets 0, 2pi/3, 4pi/3 place the vehicles
             # on a circumcircle of side_length / sqrt(3), producing an exact
             # equilateral triangle around the configured initial centroid.
@@ -332,6 +370,9 @@ class CircularFlightTrajectory:
                 circumradius * math.sin(self.active_orbit_phase_rad), 0.0,
             ])
             self.circle_start_position = self.formation_center + self.formation_offset
+        else:
+            self.circle_center = self.takeoff_position.copy()
+            self.circle_start_position = self.takeoff_position.copy()
         # 主轨迹结束后保持最终点的 x/y，只把 z 降回起飞前高度。
         self.landing_target_position = self.circle_start_position.copy()
         self.landing_target_position[2] = self.start_position[2]
@@ -444,10 +485,15 @@ class CircularFlightTrajectory:
 
     def _takeoff_target(self, elapsed, state):
         cfg = self.config
-        position_scale, velocity_scale, acceleration_scale, jerk_scale = _smoothstep5_with_jerk(
-            elapsed, cfg.takeoff_duration_s
+        takeoff_duration = (
+            cfg.takeoff_duration_s
+            if cfg.independent_takeoff_duration_s is None
+            else float(cfg.independent_takeoff_duration_s)
         )
-        displacement = self.takeoff_position - self.start_position
+        position_scale, velocity_scale, acceleration_scale, jerk_scale = _smoothstep5_with_jerk(
+            elapsed, takeoff_duration
+        )
+        displacement = self.independent_takeoff_position - self.start_position
         target_position = self.start_position + position_scale * displacement
         return {
             "position": target_position,
@@ -507,17 +553,31 @@ class CircularFlightTrajectory:
         self.height_correction_position = self.takeoff_position.copy()
         self.circle_entry_start_position = self.height_correction_position.copy()
 
-    def _height_correction_target(self, state):
-        """Command exact z0 + takeoff height without a height-error gate."""
-        return self._static_target(
-            self.height_correction_position,
-            self.start_yaw,
-            "height_correction",
-            max_tilt_rad=self.config.takeoff_max_tilt_rad,
-            min_thrust=(
-                self.config.airborne_min_collective_thrust
-            ),
+    def _height_correction_target(self, elapsed):
+        """Move from the independent hover height to the final aircraft height."""
+        duration = (
+            self.config.takeoff_settle_s
+            if self.config.takeup_duration_s is None
+            else float(self.config.takeup_duration_s)
         )
+        position_scale, velocity_scale, acceleration_scale, jerk_scale = (
+            _smoothstep5_with_jerk(
+                max(0.0, float(elapsed)),
+                duration,
+            )
+        )
+        displacement = self.takeoff_position - self.independent_takeoff_position
+        return {
+            "position": self.independent_takeoff_position + position_scale * displacement,
+            "velocity": velocity_scale * displacement,
+            "acceleration": acceleration_scale * displacement,
+            "jerk": jerk_scale * displacement,
+            "yaw": self.start_yaw,
+            "yaw_rate": 0.0,
+            "flight_phase": "height_correction",
+            "max_tilt_rad": self.config.takeoff_max_tilt_rad,
+            "min_collective_thrust": self.config.airborne_min_collective_thrust,
+        }
 
     def _circle_kinematics(
             self, angle, angular_velocity, angular_acceleration, phase,
@@ -650,6 +710,14 @@ class CircularFlightTrajectory:
         }
 
     def _main_target(self, elapsed):
+        if self.trajectory_mode == "hover":
+            return self._static_target(
+                self.takeoff_position,
+                self.start_yaw,
+                "hover",
+                max_tilt_rad=self.config.takeoff_max_tilt_rad,
+                min_thrust=self.config.airborne_min_collective_thrust,
+            )
         if self.trajectory_mode == "figure_eight_triangle":
             return self._figure_eight_target(elapsed)
         return self._circle_target(elapsed)
@@ -813,14 +881,20 @@ class CircularFlightTrajectory:
             if elapsed >= cfg.reference_hold_s:
                 self._transition(
                     "takeoff", now,
-                    "起飞前保持完成，开始垂直上升至 z=%.3f m。" % self.takeoff_position[2],
+                    "起飞前保持完成，开始独立上升至 z=%.3f m。"
+                    % self.independent_takeoff_position[2],
                 )
                 return self.evaluate(state, now)
             return target
 
         if self.phase == "takeoff":
             target = self._takeoff_target(elapsed, state)
-            if elapsed >= cfg.takeoff_duration_s:
+            takeoff_duration = (
+                cfg.takeoff_duration_s
+                if cfg.independent_takeoff_duration_s is None
+                else float(cfg.independent_takeoff_duration_s)
+            )
+            if elapsed >= takeoff_duration:
                 # Do not use the coarse altitude/vertical-speed tolerances as
                 # a gate.  The next phase keeps sending the exact z target so
                 # the controller can correct height while the task continues.
@@ -828,8 +902,14 @@ class CircularFlightTrajectory:
                 self.takeoff_arrival_time = now
                 self._transition(
                     "height_correction", now,
-                    "起飞参考完成，保持名义起飞点 x/y 并在飞行中继续跟踪 z=%.3f m。"
-                    % self.takeoff_position[2],
+                    "独立起飞完成，开始 MATLAB TAKEUP 收紧（%.2f s）；"
+                    "最终运输高度 z=%.3f m。"
+                    % (
+                        float(self.config.takeup_duration_s)
+                        if self.config.takeup_duration_s is not None
+                        else float(self.config.takeoff_settle_s),
+                        self.takeoff_position[2],
+                    ),
                 )
                 return self.evaluate(state, now)
             return target
@@ -838,8 +918,20 @@ class CircularFlightTrajectory:
             # ``takeoff_settle_s`` remains a fixed correction interval for
             # compatibility with existing launch files; it is not reset by
             # measured altitude or vertical velocity excursions.
-            target = self._height_correction_target(state)
-            if elapsed >= cfg.takeoff_settle_s:
+            target = self._height_correction_target(elapsed)
+            height_correction_duration = (
+                cfg.takeoff_settle_s
+                if cfg.takeup_duration_s is None
+                else float(cfg.takeup_duration_s)
+            )
+            if elapsed >= height_correction_duration:
+                if self.trajectory_mode == "hover":
+                    self._transition(
+                        "hover", now,
+                        "高度校正参考完成，进入 MATLAB 风格定高悬停 %.1f s。"
+                        % self.config.hover_duration_s,
+                    )
+                    return self.evaluate(state, now)
                 entry_message = (
                     "高度校正参考完成，开始平滑进入等边三角形编队起点。"
                     if self.trajectory_mode == "figure_eight_triangle" else
@@ -849,6 +941,24 @@ class CircularFlightTrajectory:
                 self._transition(
                     "circle_entry", now,
                     entry_message,
+                )
+                return self.evaluate(state, now)
+            return target
+
+        if self.phase == "hover":
+            target = self._static_target(
+                self.takeoff_position,
+                self.start_yaw,
+                "hover",
+                max_tilt_rad=cfg.takeoff_max_tilt_rad,
+                min_thrust=cfg.airborne_min_collective_thrust,
+            )
+            if elapsed >= cfg.hover_duration_s:
+                self._transition(
+                    "landing", now,
+                    "定高悬停完成，开始垂直降落至 z=%.3f m，参考时间 %.1f s，最大参考速度 %.2f m/s。"
+                    % (self.landing_target_position[2], self.active_landing_duration_s,
+                       cfg.landing_max_speed_mps),
                 )
                 return self.evaluate(state, now)
             return target
@@ -963,12 +1073,28 @@ class CircularFlightTrajectory:
     @property
     def duration_s(self):
         """按计划计算的完整参考时长，不包含实际门控额外等待。"""
+        if self.trajectory_mode == "hover":
+            entry_duration = 0.0
+            final_hover = 0.0
+        else:
+            entry_duration = float(self.config.entry_duration_s)
+            final_hover = float(self.config.final_hover_s)
+        takeoff_duration = (
+            self.config.takeoff_duration_s
+            if self.config.independent_takeoff_duration_s is None
+            else float(self.config.independent_takeoff_duration_s)
+        )
+        takeup_duration = (
+            self.config.takeoff_settle_s
+            if self.config.takeup_duration_s is None
+            else float(self.config.takeup_duration_s)
+        )
         return (
             float(self.config.reference_hold_s)
-            + float(self.config.takeoff_duration_s)
-            + float(self.config.takeoff_settle_s)
-            + float(self.config.entry_duration_s)
+            + float(takeoff_duration)
+            + float(takeup_duration)
+            + entry_duration
             + float(self.main_duration_s)
-            + float(self.config.final_hover_s)
+            + final_hover
             + float(self.active_landing_duration_s or self.config.landing_duration_s)
         )

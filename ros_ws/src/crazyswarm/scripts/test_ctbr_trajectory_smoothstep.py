@@ -257,6 +257,36 @@ def test_height_correction_tracks_target_altitude_without_waiting_for_gate():
     assert math.isclose(circle_target["acceleration"][2], 0.0, abs_tol=1e-12)
 
 
+def test_slung_takeoff_has_independent_hover_before_takeup_reference():
+    """吊运模式先到独立悬停高度，再用固定 TAKEUP 时间进入最终高度。"""
+    trajectory = CircularFlightTrajectory(_config(
+        takeoff_height_m=1.65,
+        takeoff_duration_s=9.0,
+        takeoff_settle_s=9.0,
+        independent_takeoff_height_m=0.30,
+        independent_takeoff_duration_s=0.10,
+        takeup_duration_s=0.20,
+        trajectory_mode="hover",
+    ))
+    start = np.array([0.0, 0.0, 0.05])
+    trajectory.reset(start, start_yaw=0.0, now=0.0)
+    state = {"position": start.copy(), "velocity": np.zeros(3)}
+
+    trajectory.evaluate(state, trajectory.config.reference_hold_s)
+    takeoff_end = trajectory.config.reference_hold_s + 0.10 + 1e-6
+    target = trajectory.evaluate(state, takeoff_end)
+    assert target["flight_phase"] == "height_correction"
+    assert math.isclose(target["position"][2], start[2] + 0.30, abs_tol=1e-9)
+
+    target = trajectory.evaluate(state, takeoff_end + 0.10)
+    assert target["flight_phase"] == "height_correction"
+    assert start[2] + 0.30 < target["position"][2] < start[2] + 1.65
+
+    target = trajectory.evaluate(state, takeoff_end + 0.20 + 1e-6)
+    assert target["flight_phase"] == "hover"
+    assert math.isclose(target["position"][2], start[2] + 1.65, abs_tol=1e-9)
+
+
 def test_emergency_landing_starts_from_current_position_and_never_releases_thrust_high():
     trajectory = CircularFlightTrajectory(_config(airborne_min_collective_thrust=0.3))
     start = np.array([0.0, 0.0, 0.2])

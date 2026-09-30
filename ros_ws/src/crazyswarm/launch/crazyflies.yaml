@@ -1,7 +1,7 @@
 crazyflies:
 - channel: 80
-  id: 2
-  uri: "radio://0/80/2M/E7E7E7E702"
+  id: 3
+  uri: "radio://0/80/2M/E7E7E7E703"
   ctbr_enabled: true
   # 仅用于 Crazyswarm 的物体跟踪初始猜测/仿真；真实飞行位姿来自 NOKOV。
   initialPosition: [1.5, 1.5, 0.0]
@@ -15,7 +15,7 @@ crazyflies:
   # 仅用于 Crazyswarm 的物体跟踪初始猜测/仿真；真实飞行位姿来自 NOKOV。
   initialPosition: [-1.5, 1.5, 0.0]
   type: default
-  # 三机等间隔编队：CF2=0，CF4=2π/3，CF5=4π/3，避免圆周轨迹重合。
+  # 吊运顺序固定为 CF3=前方、CF4=左下、CF5=右下。
   orbit_phase_rad: 2.0943951023931953
   orbit_yaw_mode: face_partner
 - channel: 80

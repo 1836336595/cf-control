@@ -4,6 +4,7 @@
 
   <rosparam command="load" file="$(find crazyswarm)/launch/crazyflieTypes.yaml" />
   <rosparam command="load" file="$(find crazyswarm)/launch/crazyflies.yaml" />
+  <rosparam command="load" file="$(find crazyswarm)/config/slung_payload.yaml" />
 
   <!--
     无刷 Crazyflie 2.1 (CF21BL) 起飞前必须先 ARM，而 crazyswarm_server 本身
@@ -88,6 +89,9 @@
       enable_logging: False
       enable_generic_logging: True
       enable_logging_pose: False
+      # 负载 NOKOV 刚体原点在上表面中心；仅由服务端发布状态，不参与外部位置广播。
+      payload_rigid_body: "load"
+      payload_mocap_topic: "/load/mocap_state"
     </rosparam>
   </node>
 
