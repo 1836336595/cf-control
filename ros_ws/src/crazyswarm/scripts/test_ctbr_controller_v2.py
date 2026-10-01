@@ -332,6 +332,100 @@ def test_transport_force_override_bypasses_single_vehicle_position_pid():
     assert command["transport_mode"] is True
 
 
+def test_matlab_independent_phase_scales_acceleration_feedback_by_mass():
+    """SLACK/TAKEUP must match crazyflie_slung_independent_controller's A law."""
+    module = _controller_module()
+    config = _config(
+        module,
+        independent_position_gain=np.array([3.0, 3.0, 4.0]),
+        independent_velocity_gain=np.array([3.12, 3.12, 3.60]),
+        independent_integral_gain=np.array([0.8, 0.8, 0.8]),
+        independent_integral_limit=np.array([0.20, 0.20, 0.20]),
+        independent_integral_gate=0.05,
+        independent_max_feedback_acceleration=np.array([6.0, 6.0, 8.0]),
+        independent_max_body_rate=np.array([5.0, 5.0, 3.5]),
+        independent_attitude_gain=np.array([240.0, 240.0, 120.0]),
+    )
+    controller = module.GeometricCtbrController(config)
+    state = _state()
+    state["position"] = np.array([0.0, 0.0, 0.0])
+    target = _target()
+    target.update({
+        "position": np.array([0.10, 0.0, 0.20]),
+        "independent_mode": True,
+    })
+    command = controller.compute(state, target, 0.01)
+    expected = config.mass * np.array([
+        config.independent_position_gain[0] * 0.10,
+        0.0,
+        config.gravity + config.independent_position_gain[2] * 0.20,
+    ])
+    assert np.allclose(command["desired_force"], expected, atol=1.0e-10)
+
+
+def test_independent_real_vehicle_attitude_gains_are_rate_loop_safe():
+    """Real rate loops must not saturate on a small independent-phase error."""
+    vehicle_config = yaml.safe_load(
+        (CONTROLLER_CONFIG_PATH.parent / "ctbr_vehicle.yaml").read_text()
+    )
+    for name in ("ctbr_controller_cf3", "ctbr_controller_cf4", "ctbr_controller_cf5"):
+        gain = np.asarray(vehicle_config[name]["independent_attitude_gain"], dtype=float)
+        limit = np.asarray(
+            vehicle_config[name]["independent_max_body_rate_radps"], dtype=float
+        )
+        # Keep MATLAB's 2:2:1 axis ratio while scaling kR for the real inner loop.
+        assert np.allclose(gain, [12.0, 12.0, 6.0])
+        assert np.allclose(limit, [3.0, 3.0, 2.0])
+        assert np.all(np.abs(gain * 0.1) < limit)
+
+
+def test_independent_takeup_integral_gate_covers_observed_tracking_error():
+    """TAKEUP errors around 0.1-0.17 m must be allowed to remove thrust bias."""
+    vehicle_config = yaml.safe_load(
+        (CONTROLLER_CONFIG_PATH.parent / "ctbr_vehicle.yaml").read_text()
+    )
+    for name in ("ctbr_controller_cf3", "ctbr_controller_cf4", "ctbr_controller_cf5"):
+        assert vehicle_config[name]["independent_integral_gate"] >= 0.20
+
+
+def test_independent_takeoff_preserves_each_vehicle_start_yaw():
+    """A fixed world heading must not spin a vehicle during vertical takeoff.
+
+    The MATLAB simulation starts every vehicle at yaw zero, but a real fleet
+    may be armed with different initial yaws.  The independent geometric PID
+    should use the trajectory's start yaw in that case; otherwise the yaw
+    rate saturates and couples into roll/pitch before the vehicle has lifted.
+    """
+    module = _controller_module()
+    yaw = -0.85
+    config = _config(
+        module,
+        independent_position_gain=np.array([3.0, 3.0, 4.0]),
+        independent_velocity_gain=np.array([3.12, 3.12, 3.60]),
+        independent_integral_gain=np.array([0.8, 0.8, 0.8]),
+        independent_integral_limit=np.array([0.20, 0.20, 0.20]),
+        independent_integral_gate=0.05,
+        independent_max_feedback_acceleration=np.array([6.0, 6.0, 8.0]),
+        independent_max_body_rate=np.array([5.0, 5.0, 3.5]),
+        independent_attitude_gain=np.array([240.0, 240.0, 120.0]),
+        independent_heading=np.array([1.0, 0.0, 0.0]),
+    )
+    rotation = np.array([
+        [math.cos(yaw), -math.sin(yaw), 0.0],
+        [math.sin(yaw), math.cos(yaw), 0.0],
+        [0.0, 0.0, 1.0],
+    ])
+    controller = module.GeometricCtbrController(config)
+    state = _state(rotation=rotation)
+    target = _target(yaw=yaw)
+    target["independent_mode"] = True
+
+    command = controller.compute(state, target, 0.01)
+
+    assert np.allclose(command["attitude_error"], np.zeros(3), atol=1.0e-10)
+    assert np.allclose(command["body_rate_command"], np.zeros(3), atol=1.0e-10)
+
+
 def _computed_rotation_at(module, acceleration, jerk, yaw):
     controller = module.GeometricCtbrController(_config(module))
     command = controller.compute(

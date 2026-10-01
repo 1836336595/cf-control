@@ -257,6 +257,22 @@ def test_height_correction_tracks_target_altitude_without_waiting_for_gate():
     assert math.isclose(circle_target["acceleration"][2], 0.0, abs_tol=1e-12)
 
 
+def test_hover_landing_starts_from_measured_position_without_reference_jump():
+    trajectory = CircularFlightTrajectory(_config(trajectory_mode="hover"))
+    start = np.array([0.0, 0.0, 0.2])
+    trajectory.reset(start, start_yaw=0.0, now=0.0)
+    trajectory.phase = "hover"
+    trajectory.phase_start_time = 0.0
+    measured = np.array([0.18, -0.07, 0.73])
+    state = {"position": measured.copy(), "velocity": np.zeros(3)}
+
+    target = trajectory.evaluate(state, trajectory.config.hover_duration_s)
+
+    assert target["flight_phase"] == "landing"
+    assert np.allclose(target["position"], measured, atol=1e-12)
+    assert np.allclose(target["velocity"], 0.0, atol=1e-12)
+    assert np.allclose(target["acceleration"], 0.0, atol=1e-12)
+
 def test_slung_takeoff_has_independent_hover_before_takeup_reference():
     """吊运模式先到独立悬停高度，再用固定 TAKEUP 时间进入最终高度。"""
     trajectory = CircularFlightTrajectory(_config(

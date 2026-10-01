@@ -1,90 +1,40 @@
-# Crazyswarm CTBR 多机控制
+# Crazyswarm CTBR 与三机吊运控制
 
-本仓库基于 Crazyswarm，增加了面向 Crazyflie 的主机端 CTBR（Collective Thrust and Body Rates）控制流程。当前任务使用 NOKOV 动捕提供外部位置和姿态，使用 Crazyflie 固件 EKF 回传的平移速度和加速度参与控制，可通过一条 Crazyradio 管理多架飞机。
+本仓库在 Crazyswarm 基础上实现了主机端 CTBR（Collective Thrust and Body Rates）控制。控制器从 NOKOV 读取 Crazyflie 的位置和姿态，通过 Crazyswarm server 接收 EKF 运动学状态，并把 CTBR 指令发送回 Crazyflie。多机任务使用同一台 Crazyradio；实际参加任务的飞机由 `crazyflies.yaml` 中的 `ctbr_enabled` 决定。
 
-## 项目结构
+当前代码包含两类任务：
+
+- 普通 CTBR：`hover`、`circle` 和 `figure_eight_triangle` 轨迹。
+- `slung_load`：CF3、CF4、CF5 组成三点吊运系统，负载刚体名称默认为 `load`，控制流程参考 `MATLAB/Multi-UAV-Transportation-Simulation`。
+
+项目使用 ROS Noetic、Python 3、C++ Crazyswarm server 和 NOKOV 动捕。世界坐标采用 z 轴向上；MATLAB 参考代码中的 z 轴向下时，已在 Python 控制器和负载几何中转换。
+
+## 目录和职责
 
 主要文件位于 `ros_ws/src/crazyswarm`：
 
-- `config/ctbr_controller.yaml`：全局调度、安全、轨迹和运输模式参数。
-- `config/ctbr_vehicle.yaml`：每架飞机的质量、推力标定、姿态速率和运输挂点索引。
-- `config/slung_payload.yaml`：MATLAB 吊运负载质量、尺寸、挂点、绳长和负载控制参数。
-- `launch/crazyflies.yaml`：飞机 ID、radio URI 和 `ctbr_enabled` 等身份配置。
-- `launch/hover_swarm.launch`：启动 Crazyswarm server、NOKOV、EKF 日志和无线通信配置。
-- `launch/ctbr_controller.launch`：启动 CTBR 控制器、Path 发布和实时绘图。
-- `scripts/ctbr_controller.py`：多机 CTBR 控制器、状态机、CSV 日志和安全保护。
-- `scripts/slung_load_controller.py`：MATLAB 刚体负载外环、张力分配和绳向控制。
-- `scripts/ctbr_trajectory.py`：圆周和三机等边编队连续八字轨迹。
-- `scripts/ctbr_visualization.py`：读取 CSV 并绘制位置、误差、姿态、速度、加速度和 CTBR 输出。
-- `scripts/test_ctbr_controller_v2.py`：控制律单元测试（参数解析、运动学融合、滤波器、状态机、CSV 列）。
-- `scripts/test_ctbr_trajectory_smoothstep.py`：参考轨迹与阶段切换的单元测试。
-- `scripts/test_vehicle_config.py`：飞机参数块校验测试。
-- `scripts/test_ctbr_visualization.py`：日志读取与绘图数据的单元测试。
-- `scripts/ctbr_logs/`：控制器生成的 CSV 日志目录（`.gitignore` 已排除实飞日志，只保留一份 `sample_flight.csv` 作为列格式样例）。
-- `MATLAB/`：几何 CTBR 控制律与仿真的 MATLAB 参考实现，用于与 Python 实现逐项对照。
+- `config/ctbr_controller.yaml`：全局控制、安全、日志、运输模式和公共轨迹参数。
+- `config/ctbr_vehicle.yaml`：每架飞机独立的质量、推力标定、PID、姿态增益和角速度限制。
+- `config/slung_payload.yaml`：负载质量、尺寸、绳长、挂点、负载控制器和位姿观测器参数。
+- `launch/crazyflies.yaml`：飞机 ID、radio URI、是否参加 CTBR 以及编队相位。
+- `launch/hover_swarm.launch`：启动 Crazyswarm server、NOKOV、外部位姿广播和 EKF 日志。
+- `launch/ctbr_controller.launch`：加载参数并启动 CTBR 控制器和可选实时绘图。
+- `scripts/ctbr_controller.py`：多机同步、状态机、几何 CTBR、吊运接管、安全保护和 CSV 日志。
+- `scripts/slung_load_controller.py`：负载位置/姿态外环、绳方向控制和张力分配。
+- `scripts/ctbr_trajectory.py`：五次平滑参考轨迹、圆周轨迹和三机连续八字轨迹。
+- `scripts/ctbr_visualization.py`：读取单机或合并 CSV，绘制飞机和负载轨迹、误差、姿态、速度、加速度及 CTBR 输出。
+- `scripts/ctbr_logs/`：控制器生成的飞行 CSV；实飞日志默认不提交到版本库。
+- `MATLAB/`：MATLAB 几何 CTBR 和三机吊运参考实现。
 
-> 实飞日志体积很大（单次飞行可达 30 MB 以上），因此不进入版本库。`ctbr_logs/sample_flight.csv`
-> 是降采样后的完整飞行样例（含全部 11 个阶段和 108 列），可用于核对 CSV 列定义或离线跑绘图脚本。
-
-## 编译
+## 编译和启动
 
 ```bash
-cd ros_ws
+cd /home/csy/my_project/crazyswarm/ros_ws
 catkin_make
 source devel/setup.bash
 ```
 
-首次使用或修改消息、C++ 节点后需要重新执行 `catkin_make`。Python 控制器修改后只需重启对应 launch。
-
-## 飞机配置
-
-在 `ros_ws/src/crazyswarm/launch/crazyflies.yaml` 中为每架飞机配置唯一的 `id` 和 radio `uri`：
-
-```yaml
-- channel: 80
-  id: 3
-  uri: "radio://0/80/2M/E7E7E7E703"
-  ctbr_enabled: true
-  orbit_phase_rad: 2.0943951023931953
-  orbit_yaw_mode: face_partner
-```
-
-只有 `ctbr_enabled: true` 的条目参加 CTBR 任务。当前吊运模式固定启用 CF3、CF4、CF5；每个 ID 的参数块位于 `ctbr_vehicle.yaml`。
-
-`initialPosition` 和 `type` 仍是 Crazyswarm 通用配置字段：真实飞行位置和姿态来自 NOKOV，`initialPosition` 不会替代动捕状态；`type` 主要用于 Crazyswarm 的机型/默认参数选择，不是 CTBR PID 参数来源。
-
-## 参数配置
-
-参数文件按职责分开：
-
-1. `ctbr_controller`：控制频率、EKF/NOKOV 有效性检查、电压预检、日志和安全阈值。
-2. `ctbr_trajectory`：轨迹模式、圆心、半径、编队边长、八字半径、速度、高度和起降时间。
-3. `ctbr_vehicle.yaml`：该飞机的质量、推力标定、位置/速度/积分增益、姿态增益和角速度限制。
-4. `slung_payload.yaml`：负载尺寸、质量、挂点和 MATLAB 吊运控制器参数。
-
-当前支持的轨迹模式：
-
-- `circle`：圆周轨迹。
-- `figure_eight_triangle`：多架飞机保持等边三角形编队，整体连续绕八字；通过 `orbit_phase_rad` 分配编队顶点。八字交叉处不中停。
-
-当前吊运配置为：
-
-```yaml
-transport_mode: slung_load
-payload_rigid_body: "load"
-payload_mocap_topic: "/load/mocap_state"
-```
-
-`load` 刚体原点应位于负载上表面中心。控制器依据 `slung_payload.yaml` 的长、宽、高沿负载自身 z 轴向下移动半个高度，得到几何中心。CF3 是负载 +x 棱中点，CF4 是左下挂点，CF5 是右下挂点。
-
-吊运起飞严格按 MATLAB 的阶段推进：先由每架飞机独立起飞到
-`independent_hover_height_m`，再用 `takeup_duration_s` 平滑收紧到绳长；三根实测绳长
-连续满足容差后才进入 `TAUT_RAMP`，随后用 `reference_lift_s` 将负载参考抬到
-`takeoff_height_m`。因此不会在负载仍在地面时直接把 1 m 高度误差交给吊运控制器。
-
-吊运模式的挂点顺序固定为 CF3、CF4、CF5；修改飞机时需要同步修改 `crazyflies.yaml` 和 `ctbr_vehicle.yaml` 的 `payload_attachment_index`。
-
-## 运行
+首次编译或修改消息、C++ server 后重新执行 `catkin_make`。只修改 Python 或 YAML 时，重启对应的 launch 即可。
 
 先启动 Crazyswarm server、NOKOV 和 EKF 日志：
 
@@ -92,76 +42,152 @@ payload_mocap_topic: "/load/mocap_state"
 roslaunch crazyswarm hover_swarm.launch
 ```
 
-再启动 CTBR 控制器。真实飞行必须显式确认：
+另开终端加载工作空间后启动 CTBR：
 
 ```bash
-roslaunch crazyswarm ctbr_controller.launch \
-  target_confirmed:=true
+source /home/csy/my_project/crazyswarm/ros_ws/devel/setup.bash
+roslaunch crazyswarm ctbr_controller.launch target_confirmed:=true
 ```
 
-只检查参数、话题或绘图时，不发送控制输出：
+`target_confirmed:=true` 是真实飞行的人工确认。使用 `false` 时控制器保持零推力，只适合检查参数、话题和绘图启动是否正常。起飞前控制器还会等待全机 NOKOV 状态、EKF 与 NOKOV 位置对齐，并完成一次电池电压预检。
 
-```bash
-roslaunch crazyswarm ctbr_controller.launch \
-  target_confirmed:=false enable_realtime_visualization:=false
+## 飞机配置
+
+在 `ros_ws/src/crazyswarm/launch/crazyflies.yaml` 中配置每架飞机：
+
+```yaml
+crazyflies:
+  - channel: 80
+    id: 3
+    uri: "radio://0/80/2M/E7E7E7E703"
+    ctbr_enabled: true
+    initialPosition: [1.5, 1.5, 0.0]
+    type: default
+    orbit_phase_rad: 0.0
+    orbit_yaw_mode: face_partner
 ```
 
-`target_confirmed` 未设为 `true` 时，控制器拒绝真实推力输出。起飞前控制器会等待启用飞机的 EKF 与 NOKOV 位置连续对齐，并进行一次电池电压预检。EKF 状态持续失效、NOKOV 状态失效或通信超时会触发受控降落或全局中止。
+`id` 和 `uri` 必须唯一，所有飞机可以共用一个 radio/channel。`ctbr_enabled: true` 的条目才会参加 CTBR，且数量必须等于 `ctbr_controller.takeoff_vehicle_count`。
 
-## 数据来源和控制逻辑
+`initialPosition` 只是 Crazyswarm 的初始猜测或仿真参数，真实飞行位置和姿态来自 NOKOV；它不会替代动捕状态。`type` 是 Crazyswarm 通用机型字段，不是 CTBR 的 PID 参数来源。
 
-- NOKOV：位置 `p` 和姿态 `R_WB`。
-- Crazyflie EKF：平移速度和加速度；控制器对速度进行因果二阶低通，并由滤波结果得到加速度。
-- CTBR 外环：根据轨迹位置、速度、加速度和 jerk 计算期望合力，再生成期望姿态和机体角速度。
-- 每架飞机使用 `ctbr_vehicle.yaml` 中自己的标定和 PID 参数。
+吊运模式要求启用且按顺序包含 CF3、CF4、CF5：
 
-多机模式下由多机管理器在同一控制周期内统一推进三架飞机的状态机并分发各自的参考点，每架飞机再独立跟踪自己的目标位置，因此三架飞机共享同一份同步的轨迹时间基准。
+- CF3：负载 +x 棱中点，前方。
+- CF4：负载 -x/+y 挂点，左下方。
+- CF5：负载 -x/-y 挂点，右下方。
 
-控制器不会把 `crazyflies.yaml` 的 `initialPosition` 当作实时状态。`R_WB` 使用 NOKOV 姿态；EKF 与 NOKOV 位置持续失配时，不再使用不可信的 EKF 平移运动学，并进入保持、降落或中止保护流程。
+每架飞机的 `payload_attachment_index` 在 `ctbr_vehicle.yaml` 中与上述顺序对应。
 
-## CSV 日志和绘图
+## 参数配置
 
-控制器日志保存到：
+### 全局控制器和轨迹
+
+`ctbr_controller.yaml` 的 `ctbr_controller` 区域控制频率、状态超时、EKF 对齐、推力上限、安全保护、日志目录以及：
+
+```yaml
+transport_mode: slung_load       # circle/formation 或 slung_load
+payload_rigid_body: "load"
+payload_mocap_topic: "/load/mocap_state"
+```
+
+`ctbr_trajectory` 区域是所有参考轨迹的唯一参数来源。当前支持：
+
+- `hover`：起飞后按 MATLAB 风格定高悬停，结束后降落。
+- `circle`：单机或普通多机圆周轨迹；圆心、半径、圈数和角速度均从 YAML 读取。
+- `figure_eight_triangle`：三机保持等边三角形编队，整体连续绕八字，交叉点不中停。
+
+修改 `trajectory_mode`、`circle_center_xy`、`circle_radius_m`、`formation_side_length_m`、`figure_eight_radius_m` 或时间参数后，控制器会从 YAML 生成新参考轨迹；离线绘图读取 CSV 中实际记录的 `target_*`，因此显示的曲线与本次运行所用参数一致，代码中没有另一套固定轨迹数值。
+
+### 各机参数
+
+`ctbr_vehicle.yaml` 以 `ctbr_controller_cf3`、`ctbr_controller_cf4`、`ctbr_controller_cf5` 等参数块区分飞机。质量、最大推力、推力曲线、普通起飞 PID、运输姿态增益和角速度限制都从对应 ID 的参数块读取。新增飞机时，需要同时添加：
+
+1. `crazyflies.yaml` 中的飞机条目；
+2. `ctbr_vehicle.yaml` 中同名的 `ctbr_controller_cf<ID>` 参数块；
+3. 普通多机模式下相应的 `takeoff_vehicle_count` 和轨迹相位。
+
+### 负载参数和状态估计
+
+`slung_payload.yaml` 的 `rigid_body` 默认为 `load`。NOKOV 刚体原点定义为负载上表面中心，控制器根据 `size_m[2]` 沿负载自身 z 轴向下换算为几何中心；三个 `attachment_points_m` 均为负载上表面挂点，坐标按负载自身坐标系给出。
+
+吊运模式默认 `state_observer_enabled: true`：
+
+- 负载位置和姿态使用 NOKOV；
+- 负载速度、加速度和机体角速度由 `PayloadStateObserver` 根据连续位姿/姿态样本估计，并受 `observer_*` 参数限幅；
+- `MocapState` 中的原始 twist 和 acceleration 只写入 CSV 诊断，不直接进入负载控制器。
+
+飞机本身在普通 CTBR 和吊运飞机外环中仍使用经过位置一致性检查的 Crazyflie EKF 速度/加速度。NOKOV 只负责飞机的实时位置/姿态；EKF 与 NOKOV 位置持续失配或状态超时会触发保持、受控降落或全局中止。
+
+## 吊运流程
+
+`transport_mode: slung_load` 时，终端会显示五个主阶段：
+
+1. 起飞前保持/等待全机就绪；
+2. 三架飞机独立起飞到 `independent_hover_height_m`；
+3. `TAKEUP` 按五次平滑轨迹收紧绳索，并依据实测绳长和绳向确认；
+4. 内部状态 `tension_ramp`（对应 MATLAB `TAUT_RAMP`）建立张力，然后按五次参考轨迹抬升负载并跟踪任务轨迹；
+5. 按 MATLAB 风格先降负载、确认负载接地，再释放吊运控制并完成飞机降落。
+
+等待 EKF、NOKOV 和电池预检属于第 1 阶段。接管前若负载位姿、绳长或绳向不满足条件，控制器会在终端输出原因和各架飞机的绳长计算值；负载状态持续失效会进入受控降落。
+
+## 数据、绘图和 RViz
+
+CSV 保存在：
 
 ```text
 ros_ws/src/crazyswarm/scripts/ctbr_logs/
 ```
 
-多机日志包含 `vehicle_id`，并追加负载误差、绳方向误差和期望张力。启动 launch 时默认开启实时绘图；也可以离线绘制最新日志：
+单机日志命名为 `cf<ID>_ctbr_*.csv`，多机同步日志命名为 `multi_ctbr_*.csv`。多机日志通过 `vehicle_id` 区分飞机，并包含目标、位置误差、姿态误差、EKF 状态、CTBR 输出和负载诊断列。负载列包括：
+
+- `payload_position_*`：换算到几何中心的负载位置；
+- `payload_target_*`：负载参考轨迹；
+- `payload_raw_velocity_*`、`payload_raw_acceleration_*`：动捕消息中的原始诊断值；
+- `payload_velocity_*`、`payload_acceleration_*`、`payload_body_rate_*`：位姿观测器实际提供给吊运控制器的值。
+
+离线绘制指定 CSV：
 
 ```bash
 python3 ros_ws/src/crazyswarm/scripts/ctbr_visualization.py \
-  --log ros_ws/src/crazyswarm/scripts/ctbr_logs/<log>.csv
+  ros_ws/src/crazyswarm/scripts/ctbr_logs/multi_ctbr_<timestamp>.csv \
+  --static --no-show --output /tmp/ctbr.png
 ```
 
-可视化内容包括位置轨迹、位置误差、姿态跟踪、姿态误差、速度、动捕/滤波加速度和 CTBR 输出。RViz 中的 `nav_msgs/Path` 由控制器按飞机 ID 发布，可用于查看各机实际路径。
+不指定 CSV 时，脚本默认读取最新日志；实时绘图由 `ctbr_controller.launch` 中的可选节点启动。只看一架飞机时可加 `--vehicle-id 4`。
+
+控制器发布的 RViz `nav_msgs/Path` 话题为：
+
+- `/cf<ID>/path`：对应飞机的实际 NOKOV 轨迹；
+- `/load/path`：负载几何中心的实际轨迹。
+
+默认坐标系是 `world`，发布周期由 `ctbr_controller.path_publish_interval_s` 设置。
 
 ## 安全检查
 
 真实飞行前确认：
 
-- NOKOV 已识别 CF3、CF4、CF5 和 `load` 四个刚体。
-- `load` 原点位于上表面中心，负载尺寸与 `slung_payload.yaml` 一致。
-- 每个 radio URI 唯一，且使用同一 channel。
-- `ctbr_enabled` 数量与 `takeoff_vehicle_count` 一致。
-- 每个启用 ID 都有完整的 `ctbr_vehicle.yaml` 参数块。
-- 已确认起飞区域、螺旋桨安装、电池电压和急停方式。
-- 首次调参使用较低轨迹速度，并保留 `target_confirmed:=false` 做空载检查。
+- NOKOV 能同时识别所有启用的 CF 和 `load` 刚体；
+- `load` 原点、尺寸、挂点和 `link_lengths_m` 与实物一致；
+- radio URI 唯一，且 `ctbr_enabled` 数量和 `takeoff_vehicle_count` 一致；
+- 每个启用 ID 都有对应的 `ctbr_controller_cf<ID>` 参数块；
+- 电池电压预检、螺旋桨安装、飞行区域和急停方式均已确认；
+- 首次调试先使用 `target_confirmed:=false` 检查状态和话题，再使用较低的轨迹速度实飞。
 
-本项目仍保留上游 Crazyswarm 的通用 API 和仿真能力。上游文档见 [Crazyswarm documentation](https://crazyswarm.readthedocs.io/en/latest/)，新项目也可参考 [Crazyswarm2](https://imrclab.github.io/crazyswarm2/)。
+NOKOV、EKF、CTBR 或负载状态出现持续超时时，控制器优先发送零推力或进入受控降落；不要在飞机已经起飞后直接修改参数文件，修改后应重启相关节点。
 
-## 单元测试
+## 测试
 
-测试不依赖 ROS 运行时（导入时替换 ROS 消息类型），可直接运行：
+控制器和轨迹的 ROS 无关单元测试可在脚本目录运行：
 
 ```bash
 cd ros_ws/src/crazyswarm/scripts
-python3 -m pytest test_ctbr_controller_v2.py \
-                  test_ctbr_trajectory_smoothstep.py \
-                  test_vehicle_config.py \
-                  test_ctbr_visualization.py
+python3 -m pytest \
+  test_ctbr_controller_v2.py \
+  test_ctbr_trajectory_smoothstep.py \
+  test_slung_load_controller.py
 ```
 
-覆盖范围包括：飞机参数块的逐机解析与缺失校验、NOKOV 姿态与 EKF 运动学的融合与失效回退、
-二阶速度滤波器的收敛/复位、解析角速度与数值微分的一致性、参考轨迹的连续性与阶段切换、
-运动学与姿态的日志列定义，以及绘图脚本的日志读取。
+需要完整检查参数、可视化或飞机配置时，再加入对应的 `test_ctbr_visualization.py`、`test_vehicle_config.py`。完整 Crazyswarm 测试还需要仓库的外部依赖和 ROS 环境。
+
+MATLAB 参考实现位于 `MATLAB/Multi-UAV-Transportation-Simulation`；Python 运行时使用 ROS 的 z-up 世界坐标，并对 MATLAB 的 z-down 负载模型进行相应转换。

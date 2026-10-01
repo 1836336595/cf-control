@@ -246,6 +246,7 @@ class CircularFlightTrajectory:
         self.formation_center = None
         self.formation_offset = None
         self.landing_target_position = None
+        self.landing_start_position = None
         self.active_landing_duration_s = None
         phase = (
             float(self.config.orbit_phase_rad)
@@ -503,6 +504,7 @@ class CircularFlightTrajectory:
             "yaw": self.start_yaw,
             "yaw_rate": 0.0,
             "flight_phase": "takeoff",
+            "independent_mode": True,
             "max_tilt_rad": cfg.takeoff_max_tilt_rad,
             "min_collective_thrust": (
                 cfg.airborne_min_collective_thrust if elapsed > 0.0 else 0.0
@@ -575,6 +577,7 @@ class CircularFlightTrajectory:
             "yaw": self.start_yaw,
             "yaw_rate": 0.0,
             "flight_phase": "height_correction",
+            "independent_mode": True,
             "max_tilt_rad": self.config.takeoff_max_tilt_rad,
             "min_collective_thrust": self.config.airborne_min_collective_thrust,
         }
@@ -732,9 +735,14 @@ class CircularFlightTrajectory:
             elapsed, duration
         )
         final_target = self._main_endpoint_target()
-        displacement = self.landing_target_position - final_target["position"]
+        landing_start = (
+            final_target["position"]
+            if self.landing_start_position is None
+            else self.landing_start_position
+        )
+        displacement = self.landing_target_position - landing_start
         target = {
-            "position": final_target["position"] + position_scale * displacement,
+            "position": landing_start + position_scale * displacement,
             "velocity": velocity_scale * displacement,
             "acceleration": acceleration_scale * displacement,
             "jerk": jerk_scale * displacement,
@@ -954,6 +962,7 @@ class CircularFlightTrajectory:
                 min_thrust=cfg.airborne_min_collective_thrust,
             )
             if elapsed >= cfg.hover_duration_s:
+                self.landing_start_position = self._state_value(state, "position").copy()
                 self._transition(
                     "landing", now,
                     "定高悬停完成，开始垂直降落至 z=%.3f m，参考时间 %.1f s，最大参考速度 %.2f m/s。"
@@ -1002,6 +1011,7 @@ class CircularFlightTrajectory:
                 min_thrust=cfg.airborne_min_collective_thrust,
             )
             if elapsed >= cfg.final_hover_s:
+                self.landing_start_position = self._state_value(state, "position").copy()
                 self._transition(
                     "landing", now,
                     "最终点悬停完成，开始垂直降落至 z=%.3f m，参考时间 %.1f s，最大参考速度 %.2f m/s。"

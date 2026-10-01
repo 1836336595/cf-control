@@ -6,22 +6,49 @@ slung_payload:
   rigid_body: "load"
   mocap_topic: "/load/mocap_state"
   size_m: [0.08, 0.06, 0.05]        # [长, 宽, 高]。
-  mass_kg: 0.053
+  mass_kg: 0.054
   density_kg_m3: 0.0                # 0 表示使用 mass_kg，不按密度派生质量。
-  link_length_m: 0.65
+  # 依据 2026-10-01 CSV 的早期稳定运输段拟合，顺序为 [CF3, CF4, CF5]，m。
+  # CSV 未记录负载姿态，因此这是几何拟合值；重新测量绳长时应优先采用实测值。
+  link_lengths_m: [0.694, 0.692, 0.621]
+  # 旧版单值参数仅作为未配置 link_lengths_m 时的兼容回退。
+  link_length_m: 0.694
   mocap_hold_s: 0.20               # 负载状态短暂丢帧时保持上一周期运输输出，s。
   emergency_land_after_s: 0.30     # 负载状态持续失效后进入受控降落，s。
-  velocity_filter_cutoff_hz: 5.0   # 负载 NOKOV 速度二阶因果低通截止频率，Hz。
-  velocity_filter_max_dt: 0.05     # 负载速度样本间隔超过此值时重置滤波器，s。
-  independent_hover_height_m: 0.30 # MATLAB SLACK 阶段每架飞机独立悬停高度，m。
-  independent_takeoff_duration_s: 2.5 # 独立起飞到上述高度的时间，s。
-  takeup_duration_s: 2.5           # MATLAB TAKEUP 收紧到绳长的时间，s。
-  takeup_outward_offset_m: 0.12     # 收紧时相对挂点的水平外张距离，m。
-  takeup_distance_tolerance_m: 0.03 # 绳长确认允许的距离余量，m。
-  takeup_confirm_s: 0.30            # 三根绳同时满足距离条件的确认时间，s。
-  activation_hold_s: 1.0             # 负载状态连续有效后才允许接管，s。
-  tension_ramp_s: 1.5                # MATLAB TAUT_RAMP 张力建立时间，s。
-  reference_lift_s: 3.0              # 张力建立后将负载参考抬到目标高度的时间，s。
+  # 以下四项仅在 state_observer_enabled=false 的兼容路径中使用。
+  velocity_filter_cutoff_hz: 3.0   # 旧版负载速度二阶因果低通截止频率，Hz。
+  velocity_filter_max_dt: 0.05     # 旧版速度样本间隔超过此值时重置滤波器，s。
+  velocity_limit_mps: [1.0, 1.0, 1.0]       # 旧版速度物理限幅，m/s。
+  velocity_jump_limit_mps: [0.8, 0.8, 0.8]  # 旧版速度样本最大跳变，m/s。
+  # 负载状态观测器只读取 NOKOV 位姿和姿态；twist/acceleration 只写入 CSV 诊断。
+  state_observer_enabled: true
+  observer_position_gain: 0.35       # 位置残差修正比例，alpha。
+  observer_velocity_gain: 0.08       # 速度残差修正比例，beta。
+  observer_acceleration_gain: 0.02   # 加速度残差修正比例，gamma。
+  observer_attitude_gain: 0.35       # SO(3) 姿态残差修正比例。
+  observer_angular_rate_gain: 0.08   # 角速度残差修正比例。
+  observer_max_dt: 0.05              # 样本间隔超过此值时重置观测器，s。
+  observer_max_velocity_mps: [1.0, 1.0, 1.0]
+  observer_max_acceleration_mps2: [8.0, 8.0, 8.0]
+  observer_max_body_rate_rps: [8.0, 8.0, 8.0]
+  observer_min_samples: 3             # 至少收到这些个位姿样本后才允许接管。
+  independent_hover_height_m: 0.50 # 实机先在更接近收绳高度处独立悬停，m。
+  independent_takeoff_duration_s: 5.0 # 独立起飞到上述高度的时间，s；延长以降低上升速度。
+  takeup_duration_s: 8.0           # 名义 TAKEUP 构型过渡时间，s；绳子提前绷紧时立即冻结实测构型。
+  takeup_pre_tension_slack_m: 0.0  # 实测绳距作为真实目标，不再额外扣除预张紧余量，m。
+  takeup_outward_offset_m: 0.12     # TAKEUP 水平外张安全余量；平衡绳向失败时也作为回退值，m。
+  takeup_distance_tolerance_m: 0.01 # 绳长确认允许的距离余量，m。
+  takeup_position_tolerance_m: 0.15 # 名义 TAKEUP 目标位置偏差告警阈值，m；不再阻塞接管。
+  takeup_link_angle_tolerance_deg: 10.0 # 实测绳向相对目标绳向的容差，deg。
+  takeup_confirm_s: 0.50            # 几何条件同时满足的确认时间，s。
+  takeup_diagnostic_interval_s: 1.0 # TAKEUP 未接管时终端诊断输出周期，s。
+  activation_hold_s: 0.30            # 绳长确认后负载状态连续有效的接管等待时间，s。
+  tension_ramp_s: 5.0                # MATLAB TAUT_RAMP 张力建立时间，s。
+  reference_lift_s: 12.0             # 张力建立后将负载参考抬到目标高度的时间，s。
+  # TAKEUP 使用外张安全构型；实机若尚未达到静态平衡绳向，开启绳向环会把飞机拉向中心。
+  # 先关闭该修正，保持实测构型；确认姿态/绳向标定一致后可逐步调到 0.1~1.0。
+  transport_link_gain_scale: 0.0
+  landing_approach_fraction: 0.55    # MATLAB 降落前段保持绷紧控制的时长比例。
 
   # MATLAB 挂点顺序 [CF3, CF4, CF5]：+x 棱中点、-x/+y 顶点、-x/-y 顶点。
   # 三个点全部位于负载上表面 z=+h/2；每行是一个 [x, y, z] 挂点。
