@@ -51,6 +51,18 @@ roslaunch crazyswarm ctbr_controller.launch target_confirmed:=true
 
 `target_confirmed:=true` 是真实飞行的人工确认。使用 `false` 时控制器保持零推力，只适合检查参数、话题和绘图启动是否正常。起飞前控制器还会等待全机 NOKOV 状态、EKF 与 NOKOV 位置对齐，并完成一次电池电压预检。
 
+电池遥测现在按 2 Hz 重复发送，丢失第一包后仍有后续样本。每架机只需一个新鲜有效电压样本完成预检，推力缩放随后冻结。EKF/NOKOV 的位置误差须连续 1 秒不超过 0.05 m；速度滤波器重新预热不重置位置对齐计时，但起飞放行时 EKF 速度/加速度仍须有效。两项预检超时均为 10 秒，失败后保持零输出并锁定中止，检查后重启控制器才能重试。
+
+若报电池样本数为 0 或 EKF 状态不更新，先检查相应飞机的话题，例如 CF3：
+
+```bash
+rostopic hz /cf3/battery
+rostopic echo -n 1 /cf3/battery
+rostopic hz /cf3/ekf_kinematics
+```
+
+电池应持续约 2 Hz；EKF 配置周期为 20 ms，即目标 50 Hz，实收会受无线电链路影响。修改 `hover_swarm.launch` 的日志周期后需要重启 server 所在的 launch，再重启控制器；只重启 `ctbr_controller.launch` 不会改变已启动的飞控日志周期。
+
 ## 飞机配置
 
 在 `ros_ws/src/crazyswarm/launch/crazyflies.yaml` 中配置每架飞机：
@@ -117,6 +129,10 @@ payload_mocap_topic: "/load/mocap_state"
 - 负载速度、加速度和机体角速度由 `PayloadStateObserver` 根据连续位姿/姿态样本估计，并受 `observer_*` 参数限幅；
 - `MocapState` 中的原始 twist 和 acceleration 只写入 CSV 诊断，不直接进入负载控制器。
 
+`ramp_position_hold_gain_scale` 默认是 `2.0`。在 `TENSION_RAMP` 中，协同负载力虽然按平滑权重逐步接管，但每架飞机仍使用 TAKEUP 结束时的实测位置作为保持锚点，并叠加独立位置/速度反馈，避免水平绳张力把飞机拉向负载中心。
+
+实机的稳态 `transport_position_hold_gain_scale` 当前为 `0.0`。预抬接管时，`TENSION_RAMP` 使用 `ramp_position_hold_gain_scale=2.0` 保持实测锚点；这个保持项在负载参考抬升阶段按五次平滑权重逐渐消退到稳态配置值，避免张力渐增结束时支撑突然下降。`transport_link_gain_scale` 为 `1.0`，与 Udaan 的绳向控制一致；实机若仍向负载中心靠近，应校准挂点、绳长和坐标变换，而不是永久关闭绳向反馈。
+
 飞机本身在普通 CTBR 和吊运飞机外环中仍使用经过位置一致性检查的 Crazyflie EKF 速度/加速度。NOKOV 只负责飞机的实时位置/姿态；EKF 与 NOKOV 位置持续失配或状态超时会触发保持、受控降落或全局中止。
 
 ## 吊运流程
@@ -125,11 +141,23 @@ payload_mocap_topic: "/load/mocap_state"
 
 1. 起飞前保持/等待全机就绪；
 2. 三架飞机独立起飞到 `independent_hover_height_m`；
-3. `TAKEUP` 按五次平滑轨迹收紧绳索，并依据实测绳长和绳向确认；
+3. `TAKEUP` 用五次平滑轨迹收绳并连续确认实测绳长，再平滑衔接到实测绷紧构型；随后三机参考以 `prelift_speed_mps` 持续共同上移，通过原有独立 PID 建立拉力。负载底面达到 `prelift_clearance_m` 加停止余量后，参考减速并保持最后发出的目标。当前实测绳长、离地间隙和低竖直速度连续满足确认条件后，才切换协同吊运控制；
 4. 内部状态 `tension_ramp`（对应 MATLAB `TAUT_RAMP`）建立张力，然后按五次参考轨迹抬升负载并跟踪任务轨迹；
 5. 按 MATLAB 风格先降负载、确认负载接地，再释放吊运控制并完成飞机降落。
 
 等待 EKF、NOKOV 和电池预检属于第 1 阶段。接管前若负载位姿、绳长或绳向不满足条件，控制器会在终端输出原因和各架飞机的绳长计算值；负载状态持续失效会进入受控降落。
+
+预抬采用原独立 PID 公式，不增加负载重量前馈。`prelift_clearance_m=0.20` 是负载底面间隙目标；飞机参考的上移范围由 `prelift_max_reference_rise_m` 限制，参考与实测飞机高度的最大差值由 `prelift_max_reference_lead_m` 限制。默认参考速度和加速度均为 `0.05`（m/s、m/s²），上移/超前边界分别为 `1.8/1.6 m`，超时为 `60 s`。这些边界限制期望参考，不意味着飞机必须实际上升到该高度。旧 `prelift_duration_s` 已由持续牵引参数替代。
+
+预抬期间悬停/任务轨迹计时保持；接管和负载参考抬升完成后才推进任务。`TENSION_RAMP` 从最后一帧独立 PID 输出开始混合，并逐渐消退预抬积累的参考高度偏差；用于位置保持的锚点仍是实测飞机构型，避免接管瞬间清掉支撑力或把该偏差重复计入保持反馈。
+
+针对绳索收紧后飞机向负载中心靠拢的问题，预抬阶段使用独立 PID 的 XY 增益倍率 `prelift_independent_position_gain_scale` 和 `prelift_independent_velocity_gain_scale`，并允许预抬阶段使用单独的 `prelift_max_tilt_deg`。这些参数只作用于预抬独立控制，普通飞行和协同吊运参数不变。参考达到 `prelift_max_reference_lead_m` 时先进入 `lead_hold` 等待负载继续运动，持续 `prelift_lead_hold_s` 仍无进展才进入受控降落。
+
+预抬阶段的 z 积分独立于普通控制的 `independent_integral_gate=0.20` 总位置误差门控。参考固定在 `lead_hold` 时，I 项仍可以根据竖直误差增加拉力；默认积分限幅为 `8.0`，积分变化率上限为 `0.5/s`，预抬 z 反馈加速度上限为 `12 m/s²`。只在负载状态新鲜、飞机速度反馈有效且竖直误差未越过允许超前量加 `0.05 m` 时积分；加速度或投影推力饱和时停止向饱和方向积累，允许反向消退。总推力仍使用各机原有上限。普通独立飞行及 XY 积分继续采用原门控和限幅。
+
+进入 `lead_hold` 时内部参考速度归零。实测飞机高度上升、超前边界恢复至少 `0.02 m` 余量后，参考从静止重新加速；边界附近的小抖动不会冻结等待计时，负载每增加 `0.02 m` 实测间隙才续期。如果等待后仍没有进展或达到总超时/上移边界，受控降落日志会写出真实原因，不再统一标为 EKF 失效。
+
+`scripts/test_slung_prelift_trajectory.py` 验证原 PID 的持续承载和参考边界；完整三维闭环验证可在装有 Udaan/MuJoCo 的 Python 环境运行 `python ros_ws/src/crazyswarm/scripts/test_slung_prelift_mujoco.py`，覆盖收绳、预抬、接管及进入悬停。
 
 ## 数据、绘图和 RViz
 
@@ -143,6 +171,15 @@ ros_ws/src/crazyswarm/scripts/ctbr_logs/
 
 - `payload_position_*`：换算到几何中心的负载位置；
 - `payload_target_*`：负载参考轨迹；
+- `payload_prelift_active`：TAKEUP 是否正在执行三机同步竖直预抬轨迹；
+- `payload_prelift_stage`：`takeup/aligning/rising/braking/holding/lead_hold/paused/failed/transport`；
+- `payload_prelift_reference_rise_m`、`payload_prelift_reference_lead_m`：参考上移量和该机目标高度超前量；
+- `payload_prelift_failure_reason`：参考边界或超时触发原因；
+- `payload_state_valid`、`payload_state_age_s`：负载位姿样本的实际有效性与接收年龄；导数有效性单独查看 `payload_filter_derivatives_valid`；
+- `emergency_landing_reason`：原始受控降落原因，区分预抬边界、负载状态失效和 EKF 失效；
+- `prelift_vertical_integral_active`、`prelift_vertical_integral_force_n`：预抬 z 积分启用标志和该积分项产生的期望竖直力；
+- `target_velocity_*`、`target_acceleration_*`：实际用于本周期控制的目标速度和加速度；
+- `payload_prelift_ready`：负载离地间隙和竖直速度是否已满足接管确认；
 - `payload_raw_velocity_*`、`payload_raw_acceleration_*`：动捕消息中的原始诊断值；
 - `payload_velocity_*`、`payload_acceleration_*`、`payload_body_rate_*`：位姿观测器实际提供给吊运控制器的值。
 
@@ -189,5 +226,14 @@ python3 -m pytest \
 ```
 
 需要完整检查参数、可视化或飞机配置时，再加入对应的 `test_ctbr_visualization.py`、`test_vehicle_config.py`。完整 Crazyswarm 测试还需要仓库的外部依赖和 ROS 环境。
+
+ROS Noetic 实飞节点通过 `/usr/bin/python3` 运行，Ubuntu 20.04 上为 Python 3.8；
+Udaan/Conda 的 Python 版本可能更高。`test_slung_load_controller.py` 会额外调用节点
+shebang 指定的解释器，检查吊运首次和后续推力计算，避免新版本仿真通过而实飞接管时报 API 兼容错误。
+系统解释器没有 pytest 时，可单独运行该检查：
+
+```bash
+/usr/bin/python3 -c 'from test_slung_load_controller import test_vehicle_force_dot_uses_previous_force_and_respects_rate_limit as check; check()'
+```
 
 MATLAB 参考实现位于 `MATLAB/Multi-UAV-Transportation-Simulation`；Python 运行时使用 ROS 的 z-up 世界坐标，并对 MATLAB 的 z-down 负载模型进行相应转换。

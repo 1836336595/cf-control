@@ -332,6 +332,174 @@ def test_transport_force_override_bypasses_single_vehicle_position_pid():
     assert command["transport_mode"] is True
 
 
+def test_transport_body_rate_filter_smooths_a_step_and_resets_at_handoff():
+    """The optional transport command filter damps a step without filtering thrust."""
+    module = _controller_module()
+    config = _config(module, transport_body_rate_filter_tau_s=0.02)
+    controller = module.GeometricCtbrController(config)
+    state = _state()
+    state["body_rate"] = np.zeros(3)
+    target = _target()
+    target.update(
+        transport_mode=True,
+        transport_blend=1.0,
+        desired_force_override=np.array([0.0, 0.0, 0.8]),
+        desired_force_dot_override=np.zeros(3),
+        transport_attitude_gain=np.array([12.0, 12.0, 6.0]),
+        transport_rate_gain=np.array([1.0, 1.0, 0.5]),
+    )
+    first = controller.compute(state, target, 1 / 70)
+    angle = math.radians(20.0)
+    state["rotation"] = np.array([
+        [math.cos(angle), 0.0, math.sin(angle)],
+        [0.0, 1.0, 0.0],
+        [-math.sin(angle), 0.0, math.cos(angle)],
+    ])
+    second = controller.compute(state, target, 1 / 70)
+    assert abs(second["body_rate_command"][1]) < abs(second["raw_body_rate_command"][1])
+    assert np.allclose(second["desired_force"], [0.0, 0.0, 0.8])
+    target["transport_filter_reset"] = True
+    reset = controller.compute(state, target, 1 / 70)
+    assert np.allclose(reset["body_rate_command"], reset["raw_body_rate_command"])
+
+
+def test_transport_force_filter_keeps_force_and_attitude_direction_consistent():
+    module = _controller_module()
+    config = _config(module, transport_force_filter_tau_s=0.02)
+    controller = module.GeometricCtbrController(config)
+    state = _state()
+    target = _target()
+    target.update(
+        transport_mode=True, transport_blend=1.0,
+        desired_force_override=np.array([0.0, 0.0, 0.8]),
+        desired_force_dot_override=np.zeros(3),
+        transport_attitude_gain=np.array([6.0, 6.0, 3.0]),
+        transport_rate_gain=np.array([2.0, 2.0, 1.0]),
+        transport_filter_reset=True,
+    )
+    first = controller.compute(state, target, 1 / 70)
+    target["transport_filter_reset"] = False
+    target["desired_force_override"] = np.array([0.18, 0.0, 0.8])
+    second = controller.compute(state, target, 1 / 70)
+    assert 0.0 < second["desired_force"][0] < 0.18
+    assert np.isclose(second["collective_thrust"], second["desired_force"][2], atol=1e-12)
+    assert not np.allclose(first["desired_force"], second["desired_force"])
+
+
+def test_tension_ramp_keeps_measured_vehicle_anchor_with_independent_hold_feedback():
+    """Udaan-style ramp hold counters inward cable-force motion during handoff."""
+    module = _controller_module()
+    config = _config(
+        module,
+        independent_position_gain=np.array([3.0, 3.0, 4.0]),
+        independent_velocity_gain=np.array([3.12, 3.12, 3.60]),
+        independent_max_feedback_acceleration=np.array([6.0, 6.0, 8.0]),
+    )
+    state = _state()
+    state["position"] = np.array([0.10, 0.0, 0.0])
+    state["filter_derivatives_valid"] = True
+    state["filtered_velocity"] = np.zeros(3)
+    state["filtered_acceleration"] = np.zeros(3)
+
+    def run(hold_scale):
+        controller = module.GeometricCtbrController(config)
+        target = _target()
+        target.update({
+            "position": np.zeros(3),
+            "transport_mode": True,
+            "transport_blend": 0.5,
+            "desired_force_override": np.array([0.0, 0.0, config.mass * config.gravity]),
+            "desired_force_dot_override": np.zeros(3),
+            "ramp_position_hold_gain_scale": hold_scale,
+        })
+        return controller.compute(state, target, 0.01)["desired_force"]
+
+    without_hold = run(0.0)
+    with_hold = run(2.0)
+    expected_delta_x = 0.5 * config.mass * 2.0 * (-3.0 * 0.10)
+    assert math.isclose(
+        with_hold[0] - without_hold[0], expected_delta_x, rel_tol=0.0, abs_tol=1.0e-10
+    )
+    assert with_hold[0] < without_hold[0]
+
+
+def test_transport_lift_keeps_horizontal_anchor_with_independent_hold_feedback():
+    """The hold remains active after TENSION_RAMP during reference lift."""
+    module = _controller_module()
+    config = _config(
+        module,
+        independent_position_gain=np.array([3.0, 3.0, 4.0]),
+        independent_velocity_gain=np.array([3.12, 3.12, 3.60]),
+        independent_max_feedback_acceleration=np.array([6.0, 6.0, 8.0]),
+    )
+    controller = module.GeometricCtbrController(config)
+    state = _state()
+    state["position"] = np.array([0.10, 0.0, 0.0])
+    state["filter_derivatives_valid"] = True
+    state["filtered_velocity"] = np.zeros(3)
+    state["filtered_acceleration"] = np.zeros(3)
+    target = _target()
+    target.update({
+        "transport_mode": True,
+        "transport_blend": 1.0,
+        "desired_force_override": np.array([0.0, 0.0, config.mass * config.gravity]),
+        "desired_force_dot_override": np.zeros(3),
+        "transport_position_hold_gain_scale": 2.0,
+    })
+    command = controller.compute(state, target, 0.01)
+    expected_delta_x = config.mass * 2.0 * (-3.0 * 0.10)
+    assert math.isclose(
+        command["desired_force"][0], expected_delta_x,
+        rel_tol=0.0, abs_tol=1.0e-10
+    )
+
+
+def test_position_hold_force_derivative_tracks_velocity_and_acceleration_errors():
+    module = _controller_module()
+    config = _config(
+        module,
+        independent_position_gain=np.array([3.0, 3.0, 4.0]),
+        independent_velocity_gain=np.array([3.12, 3.12, 3.60]),
+        independent_max_feedback_acceleration=np.array([6.0, 6.0, 8.0]),
+    )
+    controller = module.GeometricCtbrController(config)
+    state = _state(acceleration=np.array([0.3, 0.0, 0.0]))
+    state["position"] = np.array([0.10, 0.0, 0.0])
+    state["velocity"] = np.array([0.20, 0.0, 0.0])
+    target = _target()
+    target.update({
+        "transport_mode": True,
+        "transport_blend": 1.0,
+        "desired_force_override": np.array([0.0, 0.0, config.mass * config.gravity]),
+        "desired_force_dot_override": np.zeros(3),
+        "transport_position_hold_gain_scale": 0.5,
+    })
+
+    command = controller.compute(state, target, 0.01)
+    expected = config.mass * 0.5 * (-3.0 * 0.20 - 3.12 * 0.30)
+    assert math.isclose(
+        command["desired_force_dot"][0], expected,
+        rel_tol=0.0, abs_tol=1.0e-10
+    )
+
+
+def test_position_hold_force_derivative_includes_the_gain_fade():
+    module = _controller_module()
+    config = _config(module, independent_position_gain=np.array([3.0, 3.0, 4.0]))
+    state = _state()
+    state["position"] = np.array([0.10, 0.0, 0.0])
+    target = _target()
+    target.update({
+        "transport_mode": True, "transport_blend": 1.0,
+        "desired_force_override": np.array([0.0, 0.0, config.mass * config.gravity]),
+        "desired_force_dot_override": np.zeros(3),
+        "transport_position_hold_gain_scale": 1.0,
+        "transport_position_hold_gain_scale_dot": -0.5,
+    })
+    command = module.GeometricCtbrController(config).compute(state, target, 0.01)
+    assert math.isclose(command["desired_force_dot"][0], 0.00651, abs_tol=1e-10)
+
+
 def test_matlab_independent_phase_scales_acceleration_feedback_by_mass():
     """SLACK/TAKEUP must match crazyflie_slung_independent_controller's A law."""
     module = _controller_module()
@@ -361,6 +529,304 @@ def test_matlab_independent_phase_scales_acceleration_feedback_by_mass():
         config.gravity + config.independent_position_gain[2] * 0.20,
     ])
     assert np.allclose(command["desired_force"], expected, atol=1.0e-10)
+
+
+def test_independent_feedback_scale_can_strengthen_prelift_xy_pid():
+    module = _controller_module()
+    config = _config(
+        module,
+        independent_position_gain=np.array([3.0, 3.0, 4.0]),
+        independent_velocity_gain=np.array([3.12, 3.12, 3.60]),
+    )
+    state = _state()
+    state["position"] = np.array([0.20, -0.10, 0.0])
+    target = _target()
+    target.update({
+        "independent_mode": True,
+        "position": np.zeros(3),
+        "independent_position_gain_scale": np.array([3.0, 3.0, 1.0]),
+        "independent_velocity_gain_scale": np.array([1.5, 1.5, 1.0]),
+    })
+    command = module.GeometricCtbrController(config).compute(state, target, 0.01)
+    assert np.isclose(command["desired_force"][0], -config.mass * 3.0 * 3.0 * 0.20)
+    assert np.isclose(command["desired_force"][1], -config.mass * 3.0 * 3.0 * -0.10)
+
+
+def _prelift_integral_target():
+    target = _target()
+    target.update({
+        "position": np.array([0.0, 0.0, 1.6]),
+        "independent_mode": True,
+        "prelift_vertical_integral_active": True,
+        "prelift_vertical_integral_limit": 8.0,
+        "prelift_vertical_integral_gate_m": 1.65,
+        "prelift_vertical_integral_rate_limit": 0.5,
+        "prelift_vertical_feedback_limit_mps2": 12.0,
+    })
+    return target
+
+
+def _prelift_integral_controller(module):
+    return module.GeometricCtbrController(_config(
+        module, independent_position_gain=np.array([3.0, 3.0, 4.0]),
+        independent_velocity_gain=np.array([3.12, 3.12, 3.6]),
+        independent_integral_gain=np.full(3, 0.8),
+        independent_integral_limit=np.full(3, 0.2), independent_integral_gate=0.2,
+        independent_max_feedback_acceleration=np.array([6.0, 6.0, 8.0]),
+    ))
+
+
+def test_fixed_prelift_reference_keeps_increasing_thrust_with_large_z_error():
+    module = _controller_module()
+    controller = _prelift_integral_controller(module)
+    target = _prelift_integral_target()
+    state = _state()
+    initial = controller.compute(state, target, 0.01)
+    for _ in range(1000):
+        command = controller.compute(state, target, 0.01)
+    assert command["collective_thrust"] > initial["collective_thrust"] + 0.10
+    assert np.allclose(command["position_integral"][:2], 0.0)
+    assert command["position_integral"][2] < -0.2
+    assert command["collective_thrust"] <= controller.config.max_command_thrust
+
+
+def test_prelift_integral_stops_growing_at_acceleration_saturation():
+    module = _controller_module()
+    controller = _prelift_integral_controller(module)
+    target = _prelift_integral_target()
+    controller.position_integral[2] = -7.0
+    initial = controller.position_integral.copy()
+    for _ in range(100):
+        command = controller.compute(_state(), target, 0.01)
+    assert np.allclose(controller.position_integral, initial)
+    assert command["collective_thrust"] <= controller.config.mass * (controller.config.gravity + 12.0)
+
+
+def test_prelift_integral_stops_growing_when_projected_thrust_is_saturated():
+    module = _controller_module()
+    controller = _prelift_integral_controller(module)
+    controller.config.max_command_thrust = 0.70
+    target = _prelift_integral_target()
+    command = controller.compute(_state(), target, 0.01)
+    assert np.allclose(command["position_integral"], 0.0)
+
+
+def test_prelift_integral_holds_when_velocity_feedback_is_invalid():
+    module = _controller_module()
+    controller = _prelift_integral_controller(module)
+    controller.compute(_state(derivatives_valid=False), _prelift_integral_target(), 0.01)
+    assert np.allclose(controller.position_integral, 0.0)
+
+
+def test_prelift_integral_can_unwind_and_preserves_base_controller_parameters():
+    module = _controller_module()
+    controller = _prelift_integral_controller(module)
+    limit = controller.config.independent_integral_limit.copy()
+    acceleration_limit = controller.config.independent_max_feedback_acceleration.copy()
+    controller.position_integral[2] = -7.0
+    state = _state()
+    state["position"] = np.array([0.0, 0.0, 0.1])
+    target = _prelift_integral_target()
+    target["position"] = np.zeros(3)
+    for _ in range(100):
+        controller.compute(state, target, 0.01)
+    assert -7.0 < controller.position_integral[2] < -6.9
+    assert np.array_equal(controller.config.independent_integral_limit, limit)
+    assert np.array_equal(controller.config.independent_max_feedback_acceleration, acceleration_limit)
+
+
+def test_standard_independent_mode_still_uses_its_small_error_integral_gate():
+    module = _controller_module()
+    controller = _prelift_integral_controller(module)
+    target = _target()
+    target.update(position=np.array([0.0, 0.0, 1.6]), independent_mode=True)
+    for _ in range(100):
+        controller.compute(_state(), target, 0.01)
+    assert np.allclose(controller.position_integral, 0.0)
+
+
+def test_prelift_handoff_retains_last_independent_force_at_blend_zero():
+    module = _controller_module()
+    controller = module.GeometricCtbrController(_config(module))
+    state = _state()
+    target = _target()
+    target.update({
+        "transport_mode": True,
+        "transport_blend": 0.0,
+        "handoff_force": np.array([0.0, 0.0, 0.65]),
+        "desired_force_override": np.array([0.0, 0.0, 0.65]),
+        "desired_force_dot_override": np.zeros(3),
+    })
+    command = controller.compute(state, target, 0.01)
+    assert np.allclose(command["desired_force"], [0.0, 0.0, 0.65])
+
+
+def _slung_manager(module, directory, parameter_overrides=None):
+    """Instantiate real mission/controller objects; replace only ROS transport."""
+    roots = _controller_parameter_roots()
+    roots.update(yaml.safe_load((CONTROLLER_CONFIG_PATH.parent / "slung_payload.yaml").read_text()))
+    for root, values in (parameter_overrides or {}).items():
+        roots[root].update(values)
+    roots["ctbr_controller"].update(transport_mode="slung_load", log_directory=str(directory))
+    roots["crazyflies"] = [
+        {"id": i, "channel": 80, "uri": "radio://0/80/2M/E7E7E7E7%02X" % i,
+         "ctbr_enabled": True, "initialPosition": [0.0, 0.0, 0.0],
+         "orbit_phase_rad": (i - 3) * 2.0 * math.pi / 3.0}
+        for i in (3, 4, 5)
+    ]
+    _configure_controller_node_ros(module, roots)
+    module.rospy.Timer = lambda *_args: None
+    module.rospy.Duration = lambda duration: duration
+    module.rospy.Time.now = lambda: types.SimpleNamespace(to_sec=lambda: 100.0)
+    manager = module.MultiCtbrControllerNode()
+    payload = dict(_state(), valid=True, body_rate=np.zeros(3),
+                   position=np.array([0.0, 0.0, 0.025]), received_time=0.0)
+    manager.latest_payload_state = payload
+    manager.last_valid_payload_geometry = payload
+    positions = module.takeup_vehicle_targets(
+        payload["position"], np.eye(3), manager.slung_controller.config.attachment_points_m,
+        manager.slung_controller.config.link_lengths_m, 0.12,
+    ).T
+    for vehicle, position in zip(manager.vehicles, positions):
+        vehicle.latest_state = dict(_state(), position=position, valid=True,
+                                    body_rate=np.zeros(3), received_time=0.0,
+                                    mocap_sample_time_s=100.0)
+        vehicle.trajectory = module.CircularFlightTrajectory(vehicle.trajectory_config)
+        vehicle.trajectory.reset(position, 0.0, 0.0)
+        vehicle.trajectory.phase = "height_correction"
+        vehicle.trajectory.phase_start_time = 0.0
+    return manager, positions
+
+
+def test_real_takeup_waits_for_taut_cables_and_then_keeps_pulling(tmp_path):
+    module = _controller_module()
+    manager, anchors = _slung_manager(module, tmp_path)
+    try:
+        # First wait with one slack cable, even after the nominal TAKEUP time.
+        manager.vehicles[0].latest_state["position"] = anchors[0] - [0.0, 0.0, 0.2]
+        for now in np.arange(0.0, 9.0, 0.02):
+            manager.latest_payload_state["received_time"] = now
+            for vehicle in manager.vehicles:
+                vehicle.latest_state["received_time"] = now
+            manager._hold_payload_mission_clock(now)
+            manager._payload_takeup_overrides(now)
+        assert manager.payload_prelift_reference is None
+        manager.vehicles[0].latest_state["position"] = anchors[0].copy()
+        for now in np.arange(9.0, 40.0, 0.02):
+            manager.latest_payload_state["received_time"] = now
+            for vehicle in manager.vehicles:
+                vehicle.latest_state["received_time"] = now
+            manager._hold_payload_mission_clock(now)
+            overrides = manager._payload_takeup_overrides(now)
+        assert manager.payload_prelift_reference is not None
+        for i, vehicle in enumerate(manager.vehicles):
+            assert overrides[id(vehicle)]["position"][2] > anchors[i, 2] + 0.50
+            assert vehicle.trajectory.phase == "height_correction"
+        assert not manager._payload_takeup_ready(now)
+    finally:
+        manager.logger.close()
+
+
+def test_transport_overrides_keep_prelift_bias_and_force_at_handoff(tmp_path):
+    module = _controller_module()
+    manager, anchors = _slung_manager(module, tmp_path)
+    try:
+        manager.payload_transport_active = True
+        manager.payload_transport_start_time = 0.0
+        manager.payload_transport_start_position = manager.latest_payload_state["position"].copy()
+        manager.payload_transport_vehicle_start_positions = anchors.copy()
+        manager.payload_handoff_reference_positions = anchors + [0.0, 0.0, 1.0]
+        manager.payload_handoff_forces = np.tile([0.0, 0.0, 0.65], (3, 1))
+        overrides = manager._transport_overrides(0.0)
+        assert len(overrides) == 3
+        for i, vehicle in enumerate(manager.vehicles):
+            target = overrides[id(vehicle)]
+            assert target["independent_mode"] is False
+            assert np.allclose(target["position"], anchors[i] + [0.0, 0.0, 1.0])
+            assert np.allclose(target["handoff_force"], [0.0, 0.0, 0.65])
+            assert np.allclose(target["position_hold_position"], anchors[i])
+    finally:
+        manager.logger.close()
+
+
+def test_handoff_rechecks_cables_even_after_takeup_was_latched(tmp_path):
+    module = _controller_module()
+    manager, anchors = _slung_manager(module, tmp_path)
+    try:
+        raised = anchors + [0.0, 0.0, 0.22]
+        manager.latest_payload_state["position"] += [0.0, 0.0, 0.22]
+        manager.latest_payload_state["received_time"] = 2.2
+        for vehicle, position in zip(manager.vehicles, raised):
+            vehicle.latest_state["position"] = position.copy()
+        manager.payload_takeup_start_time = 0.0
+        manager.payload_takeup_target_positions = raised.copy()
+        manager.payload_takeup_taut_latched = True
+        manager.payload_prelift_confirm_s = manager.payload_takeup_confirm_s = 0.0
+        manager.payload_prelift_reference = module.SlungPreliftTrajectory()
+        manager.payload_prelift_reference.start(raised, raised, 0.0)
+        for now in np.arange(0.0, 2.21, 0.02):
+            manager.payload_prelift_reference.update(raised, clearance_m=0.22, now=now)
+        assert manager._payload_takeup_ready(2.2)
+        manager.vehicles[0].latest_state["position"] -= [0.0, 0.0, 0.2]
+        assert not manager._payload_takeup_ready(2.2)
+        assert not manager.payload_prelift_ready
+    finally:
+        manager.logger.close()
+
+
+def test_prelift_limit_routes_all_vehicles_into_controlled_landing(tmp_path):
+    module = _controller_module()
+    manager, anchors = _slung_manager(module, tmp_path)
+    try:
+        manager.payload_prelift_parameters["max_lead_m"] = 0.10
+        for now in np.arange(0.0, 40.0, 0.02):
+            manager.latest_payload_state["received_time"] = now
+            for vehicle in manager.vehicles:
+                vehicle.latest_state["received_time"] = now
+            manager._hold_payload_mission_clock(now)
+            overrides = manager._payload_takeup_overrides(now)
+            if manager.payload_last_takeup_reference["failed"]:
+                break
+        assert manager.payload_last_takeup_reference["reason"] == "max_lead"
+        assert overrides == {}
+        assert all(vehicle.trajectory.phase == "emergency_landing"
+                   for vehicle in manager.vehicles)
+        assert all(not vehicle._target_for(vehicle.latest_state, now).get("zero_output", False)
+                   for vehicle in manager.vehicles)
+    finally:
+        manager.logger.close()
+
+
+def test_takeup_csv_reports_actual_payload_health_and_landing_reason(tmp_path):
+    module = _controller_module()
+    manager, anchors = _slung_manager(module, tmp_path)
+    try:
+        vehicle = manager.vehicles[0]
+        payload = dict(manager.latest_payload_state, received_time=0.99)
+        vehicle.set_payload_diagnostics(payload)
+        state = dict(vehicle.latest_state, filtered_velocity=np.zeros(3),
+                     filtered_acceleration=np.zeros(3))
+        target = _target()
+        target.update(position=anchors[0], flight_phase="takeup", independent_mode=True)
+        command = vehicle.controller.compute(state, target, 0.01)
+        vehicle._write_log(1.0, state, target, command)
+        vehicle.trajectory.begin_emergency_landing(
+            1.01, anchors[0], 0.0, "payload_load: 预抬参考达到边界：max_lead"
+        )
+        vehicle.set_payload_diagnostics(dict(payload, received_time=-1.0))
+        target = vehicle._target_for(state, 1.01)
+        command = vehicle.controller.compute(state, target, 0.01)
+        vehicle._write_log(1.01, state, target, command)
+        manager.logger.flush()
+        with open(manager.logger.path, newline="") as stream:
+            import csv
+            rows = list(csv.DictReader(stream))
+        assert rows[0]["payload_state_valid"] == "1"
+        assert math.isclose(float(rows[0]["payload_state_age_s"]), 0.01)
+        assert rows[1]["payload_state_valid"] == "0"
+        assert rows[1]["emergency_landing_reason"].endswith("max_lead")
+    finally:
+        manager.logger.close()
 
 
 def test_independent_real_vehicle_attitude_gains_are_rate_loop_safe():
@@ -1260,4 +1726,23 @@ def test_filter_columns_are_appended_after_legacy_csv_columns():
             "payload_body_rate_x", "payload_body_rate_y", "payload_body_rate_z",
             "payload_filter_derivatives_valid",
             "payload_target_x", "payload_target_y", "payload_target_z",
+            "payload_desired_force_x", "payload_desired_force_y", "payload_desired_force_z",
+            "payload_desired_moment_x", "payload_desired_moment_y", "payload_desired_moment_z",
+            "raw_desired_link_direction_x", "raw_desired_link_direction_y",
+            "raw_desired_link_direction_z",
+            "desired_tension_signed_n", "payload_yaw_enabled", "transport_blend",
+            "transport_blend_dot", "transport_link_gain_scale",
+            "ramp_position_hold_gain_scale", "transport_position_hold_gain_scale",
+            "desired_force_dot_x", "desired_force_dot_y", "desired_force_dot_z",
+            "payload_ground_clearance_m", "payload_prelift_clearance_target_m",
+            "payload_prelift_ready", "payload_prelift_active",
+            "payload_prelift_stage", "payload_prelift_reference_rise_m",
+            "payload_prelift_reference_lead_m", "payload_prelift_failure_reason",
+            "target_velocity_x", "target_velocity_y", "target_velocity_z",
+            "target_acceleration_x", "target_acceleration_y", "target_acceleration_z",
+            "payload_state_age_s", "emergency_landing_reason",
+            "prelift_vertical_integral_active", "prelift_vertical_integral_force_n",
+            "transport_support_trim_n", "payload_minimum_vehicle_distance_m",
+            "payload_predicted_vehicle_distance_m", "payload_safety_reason",
+            "transport_max_tilt_rad",
         ]

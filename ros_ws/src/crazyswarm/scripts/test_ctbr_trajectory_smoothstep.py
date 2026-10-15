@@ -327,6 +327,20 @@ def test_emergency_landing_starts_from_current_position_and_never_releases_thrus
     assert target["zero_output"] is True
 
 
+def test_payload_limit_landing_does_not_report_an_ekf_failure():
+    trajectory = CircularFlightTrajectory(_config())
+    trajectory.reset(np.zeros(3), start_yaw=0.0, now=0.0)
+    trajectory.pop_events()
+    trajectory.begin_emergency_landing(
+        now=1.0, position=np.array([0.0, 0.0, 0.7]), yaw=0.0,
+        reason="payload_load: 预抬参考达到边界：max_lead",
+    )
+    event = trajectory.pop_events()[0]
+    assert "max_lead" in event
+    assert "EKF" not in event
+    assert trajectory.emergency_landing_reason.endswith("max_lead")
+
+
 def test_airborne_minimum_thrust_remains_active_after_takeoff_overshoot():
     trajectory = CircularFlightTrajectory(_config(airborne_min_collective_thrust=0.3))
     start = np.array([0.0, 0.0, 0.2])

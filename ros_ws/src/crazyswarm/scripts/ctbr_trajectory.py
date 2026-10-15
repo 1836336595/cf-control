@@ -294,6 +294,7 @@ class CircularFlightTrajectory:
         self.abort_position = None
         self.emergency_landing_start_position = None
         self.emergency_landing_yaw = None
+        self.emergency_landing_reason = ""
         self._events = []
         if self.initialized:
             self._initialize_geometry()
@@ -451,6 +452,7 @@ class CircularFlightTrajectory:
         position = _as_vector(position, "emergency_landing_position")
         self.emergency_landing_start_position = position.copy()
         self.emergency_landing_yaw = float(yaw)
+        self.emergency_landing_reason = str(reason)
         self.landing_target_position = position.copy()
         self.landing_target_position[2] = self.start_position[2]
         self.active_landing_duration_s = max(
@@ -460,7 +462,7 @@ class CircularFlightTrajectory:
         )
         self._transition(
             "emergency_landing", now,
-            "EKF 运动学持续失效：%s；从当前位置开始受控降落。" % reason,
+            "受控降落，原因：%s；从当前位置开始下降。" % self.emergency_landing_reason,
         )
 
     def _static_target(

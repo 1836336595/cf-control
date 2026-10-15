@@ -3,7 +3,10 @@
 
 import math
 from pathlib import Path
+import shlex
+import subprocess
 import sys
+from unittest import SkipTest
 import yaml
 
 import numpy as np
@@ -17,6 +20,7 @@ from slung_load_controller import (  # noqa: E402
     attachment_points_ros_z_up,
     mocap_top_surface_to_center,
     ordered_vehicle_ids,
+    payload_ground_clearance,
     SlungLoadController,
     PayloadStateObserver,
     SecondOrderVelocityFilter,
@@ -50,6 +54,27 @@ def test_load_center_shift_follows_body_z_axis_after_yaw_rotation():
         np.array([0.0, 0.0, 1.0]), rotation, height_m=0.08
     )
     assert np.allclose(center, [0.0, 0.0, 0.96])
+
+
+def test_payload_ground_clearance_uses_lowest_rotated_box_point():
+    size = np.array([0.08, 0.06, 0.05])
+    assert math.isclose(
+        payload_ground_clearance([0.0, 0.0, 0.125], np.eye(3), size),
+        0.10,
+        abs_tol=1e-12,
+    )
+
+    pitch = math.pi / 2.0
+    rotation = np.array([
+        [math.cos(pitch), 0.0, math.sin(pitch)],
+        [0.0, 1.0, 0.0],
+        [-math.sin(pitch), 0.0, math.cos(pitch)],
+    ])
+    assert math.isclose(
+        payload_ground_clearance([0.0, 0.0, 0.14], rotation, size),
+        0.10,
+        abs_tol=1e-12,
+    )
 
 
 def test_matlab_attachment_order_maps_cf3_cf4_cf5_in_ros_z_up():
@@ -93,6 +118,163 @@ def test_invalid_payload_state_does_not_produce_transport_command():
         dt=0.01,
     )
     assert result is None
+
+
+def test_unilateral_cables_never_receive_compressive_tension_commands():
+    config = SlungLoadConfig(
+        payload_mass_kg=0.054,
+        gravity_mps2=9.80665,
+        payload_size_m=np.array([0.08, 0.06, 0.05]),
+        attachment_points_m=attachment_points_ros_z_up([0.08, 0.06, 0.05]),
+        link_length_m=0.65,
+        position_gain=np.array([3.0, 3.0, 3.75]),
+        velocity_gain=np.array([3.12, 3.12, 3.12]),
+        integral_gain=np.array([1.6, 1.6, 1.6]),
+        integral_limit=np.array([0.5, 0.5, 0.5]),
+        c1=0.5,
+        force_norm_epsilon=1.0e-9,
+        tension_pinv_tolerance=1.0e-9,
+        link_kq=55.0,
+        link_komega=20.0,
+        link_integral_gain=0.0,
+        link_integral_limit=np.array([0.3, 0.3, 0.3]),
+    )
+    controller = SlungLoadController(config)
+    controller._internal_bias = lambda *_args: np.array(
+        [0.0, 0.0, -5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    )
+    yaw = 0.2
+    payload_state = {
+        "valid": True,
+        "position": np.zeros(3),
+        "velocity": np.zeros(3),
+        "acceleration": np.zeros(3),
+        "rotation": np.array([
+            [math.cos(yaw), -math.sin(yaw), 0.0],
+            [math.sin(yaw), math.cos(yaw), 0.0],
+            [0.0, 0.0, 1.0],
+        ]),
+        "body_rate": np.zeros(3),
+    }
+    vehicle_states = [
+        {
+            "position": config.attachment_points_m[:, index] + [0.0, 0.0, 0.65],
+            "velocity": np.zeros(3),
+            "mass": 0.043,
+        }
+        for index in range(3)
+    ]
+    target = {
+        "position": np.zeros(3),
+        "velocity": np.zeros(3),
+        "acceleration": np.zeros(3),
+        "rotation": np.eye(3),
+        "body_rate": np.zeros(3),
+        "body_rate_dot": np.zeros(3),
+        "payload_attitude_gain": np.array([0.0, 0.0, 0.1]),
+        "payload_rate_gain": np.zeros(3),
+        "payload_yaw_enabled": False,
+    }
+
+    result = controller.compute(payload_state, vehicle_states, target, 0.01)
+    first = result["vehicles"][0]
+    assert result["desired_moment"][2] == 0.0
+    assert first["desired_tension_signed"] < 0.0
+    assert first["desired_tension"] == 0.0
+    assert np.allclose(first["desired_link_direction"], first["link_direction"])
+    assert not np.allclose(
+        first["raw_desired_link_direction"], first["desired_link_direction"]
+    )
+
+
+def test_vehicle_force_dot_uses_previous_force_and_respects_rate_limit():
+    config = SlungLoadConfig(
+        payload_mass_kg=0.054,
+        gravity_mps2=9.80665,
+        payload_size_m=np.array([0.08, 0.06, 0.05]),
+        attachment_points_m=attachment_points_ros_z_up([0.08, 0.06, 0.05]),
+        link_length_m=0.65,
+        position_gain=np.array([3.0, 3.0, 3.75]),
+        velocity_gain=np.array([3.12, 3.12, 3.12]),
+        integral_gain=np.array([1.6, 1.6, 1.6]),
+        integral_limit=np.array([0.5, 0.5, 0.5]),
+        c1=0.5,
+        force_norm_epsilon=1.0e-9,
+        tension_pinv_tolerance=1.0e-9,
+        link_kq=55.0,
+        link_komega=20.0,
+        link_integral_gain=0.0,
+        link_integral_limit=np.array([0.3, 0.3, 0.3]),
+        force_dot_limit_nps=1.0,
+    )
+    controller = SlungLoadController(config)
+    payload = {
+        "valid": True, "position": np.zeros(3), "velocity": np.zeros(3),
+        "acceleration": np.zeros(3), "rotation": np.eye(3),
+        "body_rate": np.zeros(3),
+    }
+    vehicles = [
+        {"position": config.attachment_points_m[:, i] + [0.0, 0.0, 0.65],
+         "velocity": np.zeros(3), "mass": 0.043}
+        for i in range(3)
+    ]
+    target = {
+        "position": np.zeros(3), "velocity": np.zeros(3),
+        "acceleration": np.zeros(3), "rotation": np.eye(3),
+        "body_rate": np.zeros(3), "body_rate_dot": np.zeros(3),
+        "payload_attitude_gain": np.zeros(3), "payload_rate_gain": np.zeros(3),
+        "payload_yaw_enabled": False,
+    }
+    first = controller.compute(payload, vehicles, target, 0.01)
+    payload["position"] = np.array([0.20, 0.0, 0.0])
+    second = controller.compute(payload, vehicles, target, 0.01)
+    for output in second["vehicles"]:
+        assert np.any(np.abs(output["force_dot"]) > 0.0)
+        assert np.max(np.abs(output["force_dot"])) <= 1.0 + 1.0e-12
+    assert all(np.allclose(output["force_dot"], 0.0)
+               for output in first["vehicles"])
+
+
+def test_transport_force_updates_with_ros_node_interpreter():
+    """Exercise first and subsequent transport ticks with the deployed Python."""
+    node = SCRIPT_DIR / "ctbr_controller.py"
+    interpreter = shlex.split(node.read_text(encoding="utf-8").splitlines()[0][2:])
+    if not Path(interpreter[0]).is_file():
+        raise SkipTest("ROS node interpreter is unavailable on this platform")
+    result = subprocess.run(
+        interpreter + [
+            "-c",
+            "from test_slung_load_controller import "
+            "test_vehicle_force_dot_uses_previous_force_and_respects_rate_limit as check; "
+            "check()",
+        ],
+        cwd=str(SCRIPT_DIR), capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_link_force_correction_is_bounded_in_magnitude_and_rate():
+    config = SlungLoadConfig(
+        payload_mass_kg=0.054, gravity_mps2=9.80665,
+        payload_size_m=np.array([0.08, 0.06, 0.05]),
+        attachment_points_m=attachment_points_ros_z_up([0.08, 0.06, 0.05]),
+        link_length_m=0.65, position_gain=np.ones(3), velocity_gain=np.ones(3),
+        integral_gain=np.ones(3), integral_limit=np.ones(3), c1=0.5,
+        force_norm_epsilon=1e-9, tension_pinv_tolerance=1e-9,
+        link_kq=55.0, link_komega=20.0, link_integral_gain=0.0,
+        link_integral_limit=np.ones(3), link_force_correction_limit_n=0.10,
+        link_force_correction_rate_limit_nps=1.0,
+    )
+    controller = SlungLoadController(config)
+    first, previous = controller._limit_link_force(
+        np.array([1.0, 0.0, 0.0]), None, 0.01
+    )
+    second, _ = controller._limit_link_force(
+        np.array([-1.0, 0.0, 0.0]), previous, 0.01
+    )
+    assert np.isclose(np.linalg.norm(first), 0.10)
+    assert np.linalg.norm(second - previous) <= 0.01 + 1e-12
+    assert np.linalg.norm(second) <= 0.10 + 1e-12
 
 
 def test_payload_velocity_filter_derives_acceleration_from_filtered_velocity():
@@ -286,11 +468,17 @@ def test_real_payload_takeoff_hover_height_is_above_low_slack_stage():
     with config_path.open(encoding="utf-8") as stream:
         payload = yaml.safe_load(stream)["slung_payload"]
     assert math.isclose(payload["independent_hover_height_m"], 0.50, abs_tol=1e-12)
+    assert math.isclose(payload["prelift_clearance_m"], 0.20, abs_tol=1e-12)
+    assert math.isclose(payload["prelift_confirm_s"], 0.50, abs_tol=1e-12)
     assert payload["independent_hover_height_m"] < payload["link_length_m"]
     link_lengths = np.asarray(payload["link_lengths_m"], dtype=float)
     assert link_lengths.shape == (3,)
     assert np.all(np.isfinite(link_lengths))
     assert np.all(link_lengths > 0.0)
+    assert payload["transport_link_gain_scale"] == 0.4
+    assert payload["transport_link_steady_gain_scale"] == 0.4
+    assert payload["transport_position_hold_gain_scale"] == 0.5
+    assert payload["yaw_channel_enabled"] is True
 
 
 def test_equilibrium_takeup_targets_follow_matlab_allocation_directions():

@@ -1,0 +1,41 @@
+{
+  "success": false,
+  "failure": "sustained_rate_saturation",
+  "control_rate_hz": 70.0,
+  "physics_timestep_s": 0.002,
+  "pose_sample_rate_hz": 100.0,
+  "pose_delay_s": 0.02,
+  "command_delay_s": 0.01,
+  "rate_loop_bandwidth": [
+    35.0,
+    35.0,
+    20.0
+  ],
+  "initial_tilt_deg": 0.0,
+  "handoff_time_s": 28.97142857142857,
+  "final_time_s": 50.98571428571429,
+  "phases": [
+    "takeup",
+    "tension_ramp",
+    "height_correction",
+    "hover"
+  ],
+  "minimum_clearance_m": 0.3328493556829486,
+  "maximum_prelift_xy_error_m": 0.19570876555636757,
+  "maximum_body_rate_rps": 2.596397344232012,
+  "maximum_tilt_deg": 11.91152731332263,
+  "minimum_vehicle_distance_m": 0.44316200228048597,
+  "mocap_rate_alpha": 0.2,
+  "target_payload_height_m": 0.6,
+  "post_handoff_s": 22.0,
+  "payload_safety_reason": "",
+  "rate_saturation_fraction": 0.22762645914396887,
+  "final_payload_target_m": [
+    -0.09769484778035083,
+    0.0019101652517288792,
+    0.6
+  ],
+  "final_payload_position_error_m": 0.010839458769014248,
+  "final_payload_height_m": 0.6099376483396528,
+  "controller_csv": "ctbr_logs/final_replay/multi_ctbr_20261014_231925.csv"
+}

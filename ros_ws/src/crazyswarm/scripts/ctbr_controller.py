@@ -47,6 +47,8 @@ from vehicle_config import (
 import rospy
 
 from crazyswarm.msg import CTBR, GenericLogData, MocapState
+from slung_prelift_trajectory import SlungPreliftTrajectory, handoff_references
+from slung_transport_guard import SlungTransportGuard, SlungSupportTrim
 from ctbr_trajectory import (
     CircularFlightTrajectory,
     CircularTrajectoryConfig,
@@ -61,9 +63,9 @@ from slung_load_controller import (
     link_lengths_vector,
     mocap_top_surface_to_center,
     ordered_vehicle_ids,
+    payload_ground_clearance,
     smoothstep5_profile,
     takeup_distance_ready,
-    takeup_tracking_ready,
     takeup_target_distance,
     takeup_vehicle_targets,
     translate_vehicle_references,
@@ -541,6 +543,10 @@ class ControllerConfig:
     omega_c_method: str = "analytic"
     omega_c_force_norm_epsilon: float = 1e-8
     omega_c_heading_projection_epsilon: float = 1e-6
+    # Optional first-order filter for the external transport rate setpoint.
+    # Zero preserves the historical unfiltered command path.
+    transport_body_rate_filter_tau_s: float = 0.0
+    transport_force_filter_tau_s: float = 0.0
     # MATLAB crazyflie_slung_independent_controller parameters.  They are
     # acceleration gains, so the independent force law multiplies the whole
     # feedback acceleration by ``mass``.
@@ -578,6 +584,8 @@ class GeometricCtbrController:
         self.attitude_integral = np.zeros(3)
         self.previous_computed_rotation = None
         self.previous_heading = None
+        self.previous_transport_body_rate_command = None
+        self.previous_transport_force = None
 
     def compute(self, state, target, dt):
         """计算一个 CTBR 命令。
@@ -612,6 +620,9 @@ class GeometricCtbrController:
 
         independent_mode = bool(target.get("independent_mode", False))
         transport_mode = bool(target.get("transport_mode", False))
+        prelift_vertical_integral = independent_mode and bool(
+            target.get("prelift_vertical_integral_active", False)
+        )
         transport_blend = float(np.clip(target.get("transport_blend", 1.0), 0.0, 1.0))
         if transport_mode:
             # MATLAB slung-load mode supplies a complete per-vehicle force.
@@ -619,6 +630,7 @@ class GeometricCtbrController:
             position_integral_rate = np.zeros(3)
             saturated_integral_rate = np.zeros(3)
         elif independent_mode:
+            saved_vertical_integral = float(self.position_integral[2])
             independent_integral_gate = float(
                 getattr(self.config, "independent_integral_gate", 0.05)
             )
@@ -640,6 +652,11 @@ class GeometricCtbrController:
             else:
                 # Match MATLAB's anti-windup gate during the large SLACK/TAKEUP move.
                 position_integral_rate = np.zeros(3)
+            if prelift_vertical_integral:
+                # The large z reference bias must not disable the prelift I term.
+                # XY keeps the original MATLAB error gate and integral limits.
+                self.position_integral[2] = saved_vertical_integral
+                position_integral_rate[2] = 0.0
             saturated_integral_rate = position_integral_rate.copy()
         else:
             # C1 形式积分同时吸收位置静差与速度静差；逐轴限幅避免低电、饱和或丢帧时
@@ -666,10 +683,10 @@ class GeometricCtbrController:
 
         target_acceleration = np.asarray(
             target.get("acceleration", np.zeros(3)), dtype=float
-        ).reshape(3)
+        ).reshape(3).copy()
         target_jerk = np.asarray(
             target.get("jerk", np.zeros(3)), dtype=float
-        ).reshape(3)
+        ).reshape(3).copy()
         current_acceleration = np.asarray(
             state.get(
                 "control_acceleration",
@@ -695,13 +712,19 @@ class GeometricCtbrController:
             if getattr(self.config, "independent_position_gain", None) is not None
             else self.config.position_gain,
             dtype=float,
-        ).reshape(3)
+        ).reshape(3).copy()
+        independent_position_gain *= np.asarray(
+            target.get("independent_position_gain_scale", 1.0), dtype=float
+        )
         independent_velocity_gain = np.asarray(
             getattr(self.config, "independent_velocity_gain", None)
             if getattr(self.config, "independent_velocity_gain", None) is not None
             else self.config.velocity_gain,
             dtype=float,
-        ).reshape(3)
+        ).reshape(3).copy()
+        independent_velocity_gain *= np.asarray(
+            target.get("independent_velocity_gain_scale", 1.0), dtype=float
+        )
         independent_integral_gain = np.asarray(
             getattr(self.config, "independent_integral_gain", None)
             if getattr(self.config, "independent_integral_gain", None) is not None
@@ -709,25 +732,61 @@ class GeometricCtbrController:
             dtype=float,
         ).reshape(3)
         if independent_mode:
+            max_feedback = getattr(self.config, "independent_max_feedback_acceleration", None)
+            max_feedback = (np.full(3, np.inf) if max_feedback is None
+                            else np.asarray(max_feedback, dtype=float).reshape(3).copy())
+            if prelift_vertical_integral:
+                max_feedback[2] = float(target["prelift_vertical_feedback_limit_mps2"])
+                if derivatives_ready and abs(position_error[2]) <= float(
+                        target["prelift_vertical_integral_gate_m"]):
+                    integral_rate_z = float(np.clip(
+                        velocity_error[2] + 0.5 * position_error[2],
+                        -float(target["prelift_vertical_integral_rate_limit"]),
+                        float(target["prelift_vertical_integral_rate_limit"]),
+                    ))
+                    candidate = self.position_integral.copy()
+                    limit = float(target["prelift_vertical_integral_limit"])
+                    candidate[2] = np.clip(candidate[2] + dt * integral_rate_z, -limit, limit)
+                    candidate_feedback = (
+                        -independent_position_gain * position_error
+                        -independent_velocity_gain * velocity_error
+                        -independent_integral_gain * candidate
+                    )
+                    delta_feedback_z = -independent_integral_gain[2] * (
+                        candidate[2] - self.position_integral[2]
+                    )
+                    candidate_force = self.config.mass * (
+                        candidate_feedback + target_acceleration
+                        + np.array([0.0, 0.0, self.config.gravity])
+                    )
+                    thrust_axis_z = float(state["rotation"][2, 2])
+                    projected_force = float(candidate_force @ state["rotation"][:, 2])
+                    delta_thrust = self.config.mass * delta_feedback_z * thrust_axis_z
+                    winds_up = (
+                        (candidate_feedback[2] >= max_feedback[2] and delta_feedback_z > 0.0)
+                        or (candidate_feedback[2] <= -max_feedback[2] and delta_feedback_z < 0.0)
+                        or (projected_force >= self.config.max_command_thrust and delta_thrust > 0.0)
+                        or (projected_force <= 0.0 and delta_thrust < 0.0)
+                    )
+                    if not winds_up:
+                        self.position_integral[2] = candidate[2]
             feedback_acceleration = (
                 -independent_position_gain * position_error
                 -independent_velocity_gain * velocity_error
                 -independent_integral_gain * self.position_integral
             )
-            max_feedback = getattr(
-                self.config, "independent_max_feedback_acceleration", None
+            feedback_acceleration = clamp_vector(
+                feedback_acceleration, -max_feedback, max_feedback
             )
-            if max_feedback is not None:
-                max_feedback = np.asarray(max_feedback, dtype=float).reshape(3)
-                feedback_acceleration = clamp_vector(
-                    feedback_acceleration, -max_feedback, max_feedback
-                )
             raw_desired_force = self.config.mass * (
                 feedback_acceleration + target_acceleration +
                 np.array([0.0, 0.0, self.config.gravity])
             )
             transport_blend = 0.0
         # ROS world 系按 z 向上处理：F = m(g e3 + a_d) - Kp ep - Kv ev - Ki ei。
+        hold_acceleration = np.zeros(3)
+        hold_acceleration_dot = np.zeros(3)
+        blend_force_delta = np.zeros(3)
         force_override = target.get("desired_force_override")
         if independent_mode:
             pass
@@ -741,10 +800,69 @@ class GeometricCtbrController:
                 - velocity_gain * velocity_error
                 - self.config.integral_gain * self.position_integral
             )
+            if "handoff_force" in target:
+                # Reuse the PID output that was supporting the prelifted load.
+                independent_force = np.asarray(target["handoff_force"], dtype=float).reshape(3)
             raw_desired_force = (
                 (1.0 - transport_blend) * independent_force
                 + transport_blend * transport_force
             )
+            blend_force_delta = transport_force - independent_force
+            # Match Udaan's TENSION_RAMP handoff: the cooperative force is
+            # blended in, but an independent position-hold term remains active
+            # so the aircraft stay at their measured TAKEUP anchors.  Without
+            # this term, horizontal cable forces can pull all three aircraft
+            # toward the payload center while tension is being established.
+            # During the ramp use the Udaan handoff gain.  After the ramp,
+            # keep the same independent hold around the translated TAKEUP
+            # anchor while the payload reference is lifted; otherwise a cable
+            # direction/model error can pull CF4/CF5 inward during hover.
+            if transport_blend < 1.0:
+                hold_scale = float(target.get(
+                    "ramp_position_hold_gain_scale", 0.0
+                ))
+            else:
+                hold_scale = float(target.get(
+                    "transport_position_hold_gain_scale", 0.0
+                ))
+            if (transport_blend > 0.0 and math.isfinite(hold_scale) and
+                    hold_scale > 0.0):
+                hold_position_error = state["position"] - np.asarray(
+                    target.get("position_hold_position", target["position"]), dtype=float
+                )
+                hold_velocity_error = measured_velocity - np.asarray(
+                    target.get("position_hold_velocity", target["velocity"]), dtype=float
+                ) if derivatives_ready else np.zeros(3)
+                hold_acceleration = hold_scale * (
+                    -independent_position_gain * hold_position_error
+                    -independent_velocity_gain * hold_velocity_error
+                )
+                hold_acceleration_dot = hold_scale * (
+                    -independent_position_gain * hold_velocity_error
+                    -independent_velocity_gain * (current_acceleration - np.asarray(
+                        target.get("position_hold_acceleration", target_acceleration)
+                    ))
+                )
+                hold_scale_dot = (float(target.get(
+                    "transport_position_hold_gain_scale_dot", 0.0
+                )) if transport_blend >= 1.0 else 0.0)
+                hold_acceleration_dot += hold_scale_dot * (
+                    -independent_position_gain * hold_position_error
+                    -independent_velocity_gain * hold_velocity_error
+                )
+                max_feedback = getattr(
+                    self.config, "independent_max_feedback_acceleration", None
+                )
+                if max_feedback is not None:
+                    max_feedback = np.asarray(max_feedback, dtype=float).reshape(3)
+                    unsaturated = np.abs(hold_acceleration) < max_feedback
+                    hold_acceleration = clamp_vector(hold_acceleration, -max_feedback, max_feedback)
+                    hold_acceleration_dot = np.where(
+                        unsaturated, hold_acceleration_dot, 0.0
+                    )
+                raw_desired_force += (
+                    transport_blend * self.config.mass * hold_acceleration
+                )
         else:
             transport_blend = 0.0
             raw_desired_force = (
@@ -768,6 +886,8 @@ class GeometricCtbrController:
                 - velocity_gain * (current_acceleration - target_acceleration)
                 - self.config.integral_gain * saturated_integral_rate
             )
+            if "handoff_force" in target:
+                independent_force_dot = np.zeros(3)
             raw_desired_force_dot = (
                 (1.0 - transport_blend) * independent_force_dot
                 + transport_blend * transport_force_dot
@@ -778,6 +898,15 @@ class GeometricCtbrController:
                 - position_gain * velocity_error
                 - velocity_gain * (current_acceleration - target_acceleration)
                 - self.config.integral_gain * saturated_integral_rate
+            )
+        transport_blend_dot = float(target.get("transport_blend_dot", 0.0))
+        if math.isfinite(transport_blend_dot):
+            raw_desired_force_dot += (
+                transport_blend_dot * blend_force_delta
+                + self.config.mass * (
+                    transport_blend * hold_acceleration_dot
+                    + transport_blend_dot * hold_acceleration
+                )
             )
 
         # 先限制竖直推力，再依照最大倾角限制水平合力。水平力上限依赖当前可用的
@@ -790,6 +919,27 @@ class GeometricCtbrController:
             self.config.max_command_thrust,
             max_tilt_rad,
         )
+        force_filter_tau = float(getattr(self.config, "transport_force_filter_tau_s", 0.0))
+        if transport_mode and force_filter_tau > 0.0:
+            force_filter_reset = bool(target.get("transport_filter_reset", False))
+            filter_was_reset = force_filter_reset or self.previous_transport_force is None
+            if filter_was_reset:
+                self.previous_transport_force = desired_force.copy()
+            else:
+                previous_filtered_force = self.previous_transport_force.copy()
+                alpha = float(np.clip(dt / (force_filter_tau + dt), 0.0, 1.0))
+                self.previous_transport_force += alpha * (
+                    desired_force - self.previous_transport_force
+                )
+            desired_force = self.previous_transport_force.copy()
+            # Keep force direction, thrust projection and Omega_c consistent.
+            # The force filter is intentionally separate from collective thrust.
+            desired_force_dot = (
+                np.zeros(3) if filter_was_reset else
+                (desired_force - previous_filtered_force) / dt
+            )
+        elif not transport_mode:
+            self.previous_transport_force = None
 
         force_norm = float(np.linalg.norm(desired_force))
         if force_norm < float(self.config.omega_c_force_norm_epsilon):
@@ -909,6 +1059,11 @@ class GeometricCtbrController:
                     - self.config.attitude_gain * attitude_error
                     - self.config.attitude_integral_gain * self.attitude_integral
                 )
+                if "handoff_force" in target:
+                    gain = (self.config.independent_attitude_gain
+                            if self.config.independent_attitude_gain is not None
+                            else self.config.attitude_gain)
+                    independent_body_rate_command = -np.asarray(gain) * attitude_error
                 body_rate_command = (
                     (1.0 - transport_blend) * independent_body_rate_command
                     + transport_blend * transport_body_rate_command
@@ -937,6 +1092,22 @@ class GeometricCtbrController:
             body_rate_limit = np.asarray(
                 self.config.independent_max_body_rate, dtype=float
             ).reshape(3)
+        raw_body_rate_command = np.asarray(body_rate_command, dtype=float).copy()
+        filter_tau = float(getattr(self.config, "transport_body_rate_filter_tau_s", 0.0))
+        filter_reset = bool(target.get("transport_filter_reset", False))
+        if transport_mode and filter_tau > 0.0:
+            if filter_reset or self.previous_transport_body_rate_command is None:
+                self.previous_transport_body_rate_command = raw_body_rate_command.copy()
+            else:
+                alpha = float(np.clip(dt / (filter_tau + dt), 0.0, 1.0))
+                self.previous_transport_body_rate_command += alpha * (
+                    raw_body_rate_command - self.previous_transport_body_rate_command
+                )
+            body_rate_command = self.previous_transport_body_rate_command.copy()
+        else:
+            body_rate_command = raw_body_rate_command
+            if not transport_mode:
+                self.previous_transport_body_rate_command = None
         body_rate_command = clamp_vector(
             body_rate_command, -body_rate_limit, body_rate_limit
         )
@@ -952,15 +1123,23 @@ class GeometricCtbrController:
             "position_error": position_error,
             "velocity_error": velocity_error,
             "desired_force": desired_force,
+            "raw_desired_force": raw_desired_force,
+            "desired_force_dot": desired_force_dot,
             "computed_rotation": computed_rotation,
             "computed_body_rate": computed_body_rate,
             "omega_c_method": omega_c_method,
             "attitude_error": attitude_error,
             "body_rate_command": body_rate_command,
+            "raw_body_rate_command": raw_body_rate_command,
             "collective_thrust": collective_thrust,
             # 诊断用：记录本周期积分器状态，便于区分推力标定误差和积分器被重置。
             "position_integral": self.position_integral.copy(),
             "transport_mode": transport_mode,
+            "prelift_vertical_integral_active": prelift_vertical_integral and derivatives_ready,
+            "prelift_vertical_integral_force_n": (
+                -self.config.mass * independent_integral_gain[2] * self.position_integral[2]
+                if prelift_vertical_integral else 0.0
+            ),
         }
 
 
@@ -1037,6 +1216,26 @@ class FlightCsvLogger:
         "payload_body_rate_x", "payload_body_rate_y", "payload_body_rate_z",
         "payload_filter_derivatives_valid",
         "payload_target_x", "payload_target_y", "payload_target_z",
+        "payload_desired_force_x", "payload_desired_force_y", "payload_desired_force_z",
+        "payload_desired_moment_x", "payload_desired_moment_y", "payload_desired_moment_z",
+        "raw_desired_link_direction_x", "raw_desired_link_direction_y",
+        "raw_desired_link_direction_z",
+        "desired_tension_signed_n", "payload_yaw_enabled", "transport_blend",
+        "transport_blend_dot",
+        "transport_link_gain_scale", "ramp_position_hold_gain_scale",
+        "transport_position_hold_gain_scale",
+        "desired_force_dot_x", "desired_force_dot_y", "desired_force_dot_z",
+        "payload_ground_clearance_m", "payload_prelift_clearance_target_m",
+        "payload_prelift_ready", "payload_prelift_active",
+        "payload_prelift_stage", "payload_prelift_reference_rise_m",
+        "payload_prelift_reference_lead_m", "payload_prelift_failure_reason",
+        "target_velocity_x", "target_velocity_y", "target_velocity_z",
+        "target_acceleration_x", "target_acceleration_y", "target_acceleration_z",
+        "payload_state_age_s", "emergency_landing_reason",
+        "prelift_vertical_integral_active", "prelift_vertical_integral_force_n",
+        "transport_support_trim_n", "payload_minimum_vehicle_distance_m",
+        "payload_predicted_vehicle_distance_m", "payload_safety_reason",
+        "transport_max_tilt_rad",
     ]
 
     def __init__(self, directory, prefix):
@@ -1535,6 +1734,12 @@ class CtbrControllerNode:
             omega_c_method=omega_c_method,
             omega_c_force_norm_epsilon=omega_c_force_norm_epsilon,
             omega_c_heading_projection_epsilon=omega_c_heading_projection_epsilon,
+            transport_body_rate_filter_tau_s=float(self.params.vehicle_param(
+                "transport_body_rate_filter_tau_s", 0.0
+            )),
+            transport_force_filter_tau_s=float(self.params.vehicle_param(
+                "transport_force_filter_tau_s", 0.0
+            )),
         ))
 
         # 每次启动创建一份独立 CSV，避免覆盖上一次实飞；状态和电池回调共享同一把锁。
@@ -1616,7 +1821,7 @@ class CtbrControllerNode:
         )
         # hover_swarm.launch 配置 GenericLogData 的 values 顺序为
         # [pm.vbat(V), pm.vbatMV(mV), pm.state, pm.batteryLevel]；电池日志只在
-        # 起飞前提供一次样本，控制器完成预检后不再依赖后续电池消息。
+        # 低频重复提供样本，控制器完成预检后不再依赖后续电池消息。
         # 未启用固件日志时该订阅者保持空闲，控制器仍可运行，只会在 CSV 中写 NaN。
         self.battery_subscriber = rospy.Subscriber(
             self.prefix + "/battery", GenericLogData, self._battery_callback, queue_size=1
@@ -1840,7 +2045,7 @@ class CtbrControllerNode:
     def _preflight_voltage_target(self, state, now):
         """在实际控制前冻结电压补偿系数，失败时不允许进入起飞状态机。
 
-        电池日志只产生一次样本；控制器保留该样本并在预检阶段使用它。成功后
+        电池日志低频重复发送；控制器在预检阶段使用新鲜样本。成功后
         ``thrust_raw_scale`` 在本次节点生命周期内保持不变，不再依赖飞行中电池日志。
         """
         if not self.require_preflight_voltage:
@@ -1969,7 +2174,11 @@ class CtbrControllerNode:
             rospy.logerr("EKF 起飞前对齐失败：%s；保持零 CTBR 推力", reason)
 
     def _ekf_preflight_ready(self, state, now):
-        """Require a continuously aligned EKF before the fleet may take off."""
+        """Require continuous position alignment and ready kinematics at release.
+
+        Velocity-filter warmup does not invalidate a finite, fresh position.
+        Takeoff still requires fresh, valid filtered EKF derivatives.
+        """
         if not self._ekf_kinematics_enabled:
             return True
         if self.ekf_alignment_failed:
@@ -1978,27 +2187,35 @@ class CtbrControllerNode:
             self.ekf_alignment_started_time = float(now)
 
         control_state = self._build_ekf_control_state(state, now)
+        position_age = float(control_state["ekf_state_age_s"])
         aligned = (
-            control_state["ekf_state_valid"] and
+            math.isfinite(position_age) and
+            -self.ekf_timestamp_future_tolerance_s <= position_age <= self.ekf_state_timeout and
             control_state["ekf_position_error_m"] <=
             self.ekf_alignment_position_delta_m
         )
         if aligned:
             if self.ekf_alignment_since is None:
                 self.ekf_alignment_since = float(now)
-            if now - self.ekf_alignment_since >= self.ekf_alignment_hold_s:
+            if (now - self.ekf_alignment_since >= self.ekf_alignment_hold_s
+                    and control_state["ekf_state_valid"]):
                 return True
         else:
             self.ekf_alignment_since = None
 
         if now - self.ekf_alignment_started_time >= self.ekf_alignment_timeout_s:
             self._fail_ekf_alignment(
-                "%.1f s 内未连续 %.1f s 对齐到 %.3f m（状态=%s，当前差=%.3f m）" % (
+                "CF%d: %.1f s 内未完成位置连续 %.1f s 对齐到 %.3f m 和 EKF 导数就绪"
+                "（状态=%s，当前差=%.3f m，位置连续=%.3f s，导数就绪=%d）" % (
+                    self.vehicle_id,
                     self.ekf_alignment_timeout_s,
                     self.ekf_alignment_hold_s,
                     self.ekf_alignment_position_delta_m,
                     control_state.get("ekf_status", "unknown"),
                     control_state.get("ekf_position_error_m", math.inf),
+                    (0.0 if self.ekf_alignment_since is None else
+                     max(0.0, now - self.ekf_alignment_since)),
+                    int(control_state["ekf_state_valid"]),
                 )
             )
         return False
@@ -2227,7 +2444,7 @@ class CtbrControllerNode:
                 now,
                 state["position"],
                 rotation_to_rpy(state["rotation"])[2],
-                control_state.get("ekf_status", "unknown"),
+                "EKF 运动学持续失效：" + control_state.get("ekf_status", "unknown"),
             )
             target = self._target_for(state, now)
         # 普通阶段的参考位置、速度和加速度连续衔接。保留位置积分可维持每架飞机的
@@ -2247,6 +2464,7 @@ class CtbrControllerNode:
             self._publish_zero()
         else:
             self._publish_command(command)
+        self.last_control_command = command
         self._write_log(now, state, target, command, control_state=control_state)
 
     def _publish_path(self, state):
@@ -2344,6 +2562,17 @@ class CtbrControllerNode:
         row.update(self._battery_log_fields(now))
         row.update(self._preflight_voltage_log_fields())
         payload = self.payload_diagnostics
+        payload_age = (math.inf if payload is None
+                       else now - float(payload.get("received_time", -math.inf)))
+        row["payload_state_age_s"] = payload_age
+        row["payload_state_valid"] = int(
+            payload is not None and payload.get("valid", False)
+            and math.isfinite(payload_age) and payload_age <= self.state_timeout
+        )
+        row["emergency_landing_reason"] = (
+            getattr(self.trajectory, "emergency_landing_reason", "")
+            if self.trajectory is not None else ""
+        )
         if payload is not None:
             for name, key in (
                     ("payload_position", "position"),
@@ -2426,18 +2655,60 @@ class CtbrControllerNode:
         self._with_xyz(row, "body_rate", state["body_rate"])
         self._with_xyz(row, "target", target["position"])
         self._with_xyz(row, "target_jerk", target.get("jerk", np.zeros(3)))
+        self._with_xyz(row, "target_velocity", target.get("velocity", np.zeros(3)))
+        self._with_xyz(row, "target_acceleration", target.get("acceleration", np.zeros(3)))
         self._with_xyz(row, "position_error", command["position_error"])
         self._with_xyz(row, "velocity_error", command["velocity_error"])
         self._with_xyz(row, "desired_force", command["desired_force"])
-        row["payload_state_valid"] = int(bool(target.get("payload_state_valid", False)))
+        self._with_xyz(
+            row, "desired_force_dot", command.get("desired_force_dot", np.zeros(3))
+        )
+        row["prelift_vertical_integral_active"] = int(bool(
+            command.get("prelift_vertical_integral_active", False)
+        ))
+        row["prelift_vertical_integral_force_n"] = float(
+            command.get("prelift_vertical_integral_force_n", 0.0)
+        )
+        for field in ("transport_support_trim_n", "payload_minimum_vehicle_distance_m",
+                      "payload_predicted_vehicle_distance_m", "transport_max_tilt_rad"):
+            row[field] = float(target.get(field, math.nan))
+        row["payload_safety_reason"] = target.get("payload_safety_reason", "")
+        row["payload_ground_clearance_m"] = float(
+            target.get("payload_ground_clearance_m", math.nan)
+        )
+        row["payload_prelift_clearance_target_m"] = float(
+            target.get("payload_prelift_clearance_target_m", math.nan)
+        )
+        row["payload_prelift_ready"] = int(bool(
+            target.get("payload_prelift_ready", False)
+        ))
+        row["payload_prelift_active"] = int(bool(
+            target.get("payload_prelift_active", False)
+        ))
+        row["payload_prelift_stage"] = target.get("payload_prelift_stage", "")
+        row["payload_prelift_failure_reason"] = target.get("payload_prelift_failure_reason", "")
+        for field in ("payload_prelift_reference_rise_m", "payload_prelift_reference_lead_m"):
+            row[field] = float(target.get(field, math.nan))
         for prefix in (
                 "payload_position_error", "payload_velocity_error",
                 "payload_attitude_error", "link_direction",
-                "desired_link_direction", "link_direction_error"):
+                "desired_link_direction", "raw_desired_link_direction",
+                "link_direction_error",
+                "payload_desired_force", "payload_desired_moment"):
             if prefix in target:
                 self._with_xyz(row, prefix, target[prefix])
         if "desired_tension" in target:
             row["desired_tension_n"] = float(target["desired_tension"])
+        if "desired_tension_signed" in target:
+            row["desired_tension_signed_n"] = float(target["desired_tension_signed"])
+        if "payload_yaw_enabled" in target:
+            row["payload_yaw_enabled"] = int(bool(target["payload_yaw_enabled"]))
+        for field in (
+                "transport_blend", "transport_blend_dot", "transport_link_gain_scale",
+                "ramp_position_hold_gain_scale",
+                "transport_position_hold_gain_scale"):
+            if field in target:
+                row[field] = float(target[field])
         if "payload_target_position" in target:
             self._with_xyz(row, "payload_target", target["payload_target_position"])
         self._with_xyz(
@@ -2611,6 +2882,7 @@ class MultiCtbrControllerNode:
         self.payload_activation_hold_s = 1.0
         self.payload_tension_ramp_s = 2.0
         self.payload_reference_lift_s = 4.0
+        self.payload_target_height_m = math.nan
         self.payload_takeup_outward_offset_m = 0.12
         self.payload_takeup_pre_tension_slack_m = 0.05
         self.payload_takeup_distance_tolerance_m = 0.03
@@ -2618,6 +2890,10 @@ class MultiCtbrControllerNode:
         self.payload_takeup_position_tolerance_m = 0.03
         self.payload_takeup_link_angle_tolerance_rad = math.radians(10.0)
         self.payload_transport_link_gain_scale = 0.0
+        self.payload_transport_steady_link_gain_scale = 1.0
+        self.payload_ramp_position_hold_gain_scale = 2.0
+        self.payload_transport_position_hold_gain_scale = 0.0
+        self.payload_yaw_enabled = True
         self.payload_velocity_limit_mps = np.ones(3)
         self.payload_velocity_jump_limit_mps = np.ones(3)
         self.payload_landing_approach_fraction = 0.55
@@ -2636,6 +2912,25 @@ class MultiCtbrControllerNode:
         self.payload_takeup_start_positions = None
         self.payload_takeup_target_positions = None
         self.payload_takeup_ready_since = None
+        self.payload_prelift_ready_since = None
+        self.payload_prelift_clearance_m = 0.10
+        self.payload_prelift_parameters = {}
+        self.payload_prelift_integral_parameters = {}
+        self.payload_prelift_reference = None
+        self.payload_last_takeup_reference = None
+        self.payload_geometry_ready_since = None
+        self.payload_mission_hold_time = None
+        self.payload_handoff_reference_positions = None
+        self.payload_handoff_forces = None
+        self.payload_transport_guard = SlungTransportGuard()
+        self.payload_support_trim = SlungSupportTrim()
+        self.payload_safety_reason = ""
+        self.payload_minimum_vehicle_distance_m = math.nan
+        self.payload_predicted_vehicle_distance_m = math.nan
+        self.payload_prelift_confirm_s = 0.50
+        self.payload_prelift_vertical_velocity_tolerance_mps = 0.05
+        self.payload_ground_clearance_m = math.nan
+        self.payload_prelift_ready = False
         self.payload_takeup_taut_latched = False
         self.payload_takeup_diagnostic_interval_s = 1.0
         self.payload_takeup_diagnostic_last_time = None
@@ -2692,6 +2987,13 @@ class MultiCtbrControllerNode:
                     ),
                     outward_bias_fraction=float(payload.get("outward_bias_fraction", 0.0)),
                     outward_bias_max_n=float(payload.get("outward_bias_max_n", 0.0)),
+                    force_dot_limit_nps=float(payload.get("force_dot_limit_nps", 20.0)),
+                    link_force_correction_limit_n=float(payload.get(
+                        "link_force_correction_limit_n", 0.12
+                    )),
+                    link_force_correction_rate_limit_nps=float(payload.get(
+                        "link_force_correction_rate_limit_nps", 5.0
+                    )),
                 )
                 self.slung_controller = SlungLoadController(load_cfg)
                 self.payload_height_m = float(size[2])
@@ -2770,6 +3072,10 @@ class MultiCtbrControllerNode:
                 self.payload_reference_lift_s = float(
                     payload.get("reference_lift_s", 4.0)
                 )
+                target_height = payload.get("target_payload_height_m", None)
+                self.payload_target_height_m = (
+                    math.nan if target_height is None else float(target_height)
+                )
                 self.payload_takeup_outward_offset_m = float(
                     payload.get("takeup_outward_offset_m", 0.12)
                 )
@@ -2791,8 +3097,74 @@ class MultiCtbrControllerNode:
                 self.payload_takeup_link_angle_tolerance_rad = math.radians(float(
                     payload.get("takeup_link_angle_tolerance_deg", 10.0)
                 ))
+                self.payload_prelift_clearance_m = float(
+                    payload.get("prelift_clearance_m", 0.10)
+                )
+                self.payload_prelift_parameters = {
+                    "clearance_m": self.payload_prelift_clearance_m,
+                    "clearance_margin_m": float(payload.get("prelift_clearance_margin_m", 0.02)),
+                    "speed_mps": float(payload.get("prelift_speed_mps", 0.05)),
+                    "acceleration_mps2": float(payload.get("prelift_acceleration_mps2", 0.05)),
+                    "max_rise_m": float(payload.get("prelift_max_reference_rise_m", 1.8)),
+                    "max_lead_m": float(payload.get("prelift_max_reference_lead_m", 1.6)),
+                    "timeout_s": float(payload.get("prelift_timeout_s", 60.0)),
+                    "alignment_duration_s": float(payload.get("prelift_alignment_duration_s", 2.0)),
+                    "lead_hold_s": float(payload.get("prelift_lead_hold_s", 10.0)),
+                    "position_gain_scale": payload.get(
+                        "prelift_independent_position_gain_scale", [3.0, 3.0, 1.0]
+                    ),
+                    "velocity_gain_scale": payload.get(
+                        "prelift_independent_velocity_gain_scale", [1.5, 1.5, 1.0]
+                    ),
+                    "max_tilt_rad": math.radians(float(
+                        payload.get("prelift_max_tilt_deg", 12.0)
+                    )),
+                }
+                SlungPreliftTrajectory(**self.payload_prelift_parameters)
+                self.payload_prelift_integral_parameters = {
+                    "prelift_vertical_integral_limit": float(payload.get(
+                        "prelift_vertical_integral_limit", 8.0)),
+                    "prelift_vertical_integral_rate_limit": float(payload.get(
+                        "prelift_vertical_integral_rate_limit", 0.5)),
+                    "prelift_vertical_feedback_limit_mps2": float(payload.get(
+                        "prelift_vertical_feedback_limit_mps2", 12.0)),
+                    "prelift_vertical_integral_gate_m": (
+                        self.payload_prelift_parameters["max_lead_m"] + 0.05),
+                }
+                if any(not math.isfinite(v) or v <= 0.0
+                       for v in self.payload_prelift_integral_parameters.values()):
+                    raise ValueError("预抬竖直积分/加速度限幅必须为正的有限数")
+                self.payload_prelift_confirm_s = float(
+                    payload.get("prelift_confirm_s", 0.50)
+                )
+                self.payload_prelift_vertical_velocity_tolerance_mps = float(
+                    payload.get("prelift_vertical_velocity_tolerance_mps", 0.05)
+                )
                 self.payload_transport_link_gain_scale = float(
                     payload.get("transport_link_gain_scale", 0.0)
+                )
+                self.payload_transport_steady_link_gain_scale = float(
+                    payload.get("transport_link_steady_gain_scale", 1.0)
+                )
+                self.payload_ramp_position_hold_gain_scale = float(
+                    payload.get("ramp_position_hold_gain_scale", 2.0)
+                )
+                self.payload_transport_position_hold_gain_scale = float(
+                    payload.get("transport_position_hold_gain_scale", 0.0)
+                )
+                self.payload_transport_guard = SlungTransportGuard(
+                    min_distance_m=float(payload.get("minimum_vehicle_distance_m", 0.30)),
+                    prediction_s=float(payload.get("separation_prediction_s", 0.35)),
+                    height_error_m=float(payload.get("transport_height_error_limit_m", 0.08)),
+                    confirm_s=float(payload.get("transport_fault_confirm_s", 0.20)),
+                )
+                self.payload_support_trim = SlungSupportTrim(
+                    limit_n=float(payload.get("transport_support_trim_limit_n", 0.25)),
+                    integral_gain=float(payload.get("transport_support_integral_gain_npm_s", 0.20)),
+                    rate_limit_nps=float(payload.get("transport_support_trim_rate_nps", 0.03)),
+                )
+                self.payload_yaw_enabled = bool(
+                    payload.get("yaw_channel_enabled", True)
                 )
                 self.payload_landing_approach_fraction = float(
                     payload.get("landing_approach_fraction", 0.55)
@@ -2805,6 +3177,9 @@ class MultiCtbrControllerNode:
                         self.payload_tension_ramp_s <= 0.0 or
                         self.payload_reference_lift_s <= 0.0):
                     raise ValueError("负载接管/张力/抬升时间参数无效")
+                if (math.isfinite(self.payload_target_height_m)
+                        and self.payload_target_height_m <= 0.0):
+                    raise ValueError("target_payload_height_m 必须为正的有限数")
                 if (self.payload_takeup_outward_offset_m < 0.0 or
                         self.payload_takeup_outward_offset_m >= float(np.min(load_cfg.link_lengths_m)) or
                         self.payload_takeup_pre_tension_slack_m < 0.0 or
@@ -2816,8 +3191,22 @@ class MultiCtbrControllerNode:
                         self.payload_takeup_position_tolerance_m <= 0.0 or
                         not math.isfinite(self.payload_takeup_link_angle_tolerance_rad) or
                         self.payload_takeup_link_angle_tolerance_rad <= 0.0 or
+                        not math.isfinite(self.payload_prelift_clearance_m) or
+                        self.payload_prelift_clearance_m < 0.0 or
+                        not math.isfinite(self.payload_prelift_confirm_s) or
+                        self.payload_prelift_confirm_s < 0.0 or
+                        not math.isfinite(
+                            self.payload_prelift_vertical_velocity_tolerance_mps
+                        ) or
+                        self.payload_prelift_vertical_velocity_tolerance_mps <= 0.0 or
                         not math.isfinite(self.payload_transport_link_gain_scale) or
                         not 0.0 <= self.payload_transport_link_gain_scale <= 1.0 or
+                        not math.isfinite(self.payload_transport_steady_link_gain_scale) or
+                        not 0.0 <= self.payload_transport_steady_link_gain_scale <= 1.0 or
+                        not math.isfinite(self.payload_ramp_position_hold_gain_scale) or
+                        self.payload_ramp_position_hold_gain_scale < 0.0 or
+                        not math.isfinite(self.payload_transport_position_hold_gain_scale) or
+                        self.payload_transport_position_hold_gain_scale < 0.0 or
                         not 0.0 < self.payload_landing_approach_fraction <= 1.0):
                     raise ValueError("负载 TAKEUP 几何参数无效")
                 self.payload_takeup_target_distance_m = takeup_target_distance(
@@ -3076,7 +3465,7 @@ class MultiCtbrControllerNode:
         )
 
     def _payload_takeup_positions(self):
-        """Return MATLAB TAKEUP positions at the pre-tension cable distance."""
+        """Return TAKEUP positions at the current load height and cable distance."""
         with self.payload_lock:
             geometry = self.last_valid_payload_geometry
         if geometry is None or self.slung_controller is None:
@@ -3095,8 +3484,13 @@ class MultiCtbrControllerNode:
                 error,
             )
             equilibrium_links = None
+        takeup_payload_position = np.asarray(
+            geometry["position"], dtype=float
+        ).copy()
+        # TAKEUP first establishes cable geometry at the current load height.
+        # The separate pre-lift segment raises all three aircraft afterwards.
         return takeup_vehicle_targets(
-            geometry["position"], geometry["rotation"],
+            takeup_payload_position, geometry["rotation"],
             self.slung_controller.config.attachment_points_m,
             self.payload_takeup_target_distance_m,
             self.payload_takeup_outward_offset_m,
@@ -3104,100 +3498,136 @@ class MultiCtbrControllerNode:
         ).T
 
     def _payload_takeup_overrides(self, now):
-        """Smooth each vehicle from its independent hover point to TAKEUP."""
+        """Confirm measured taut cables, then keep pulling until measured clearance."""
         if self.transport_mode != "slung_load" or self.slung_controller is None:
             return {}
-        targets = self._payload_takeup_positions()
-        if targets is None:
-            # Keep the aircraft at their latest measured positions until the
-            # load pose is available again; never fall through to the final
-            # transport-height target and create a vertical step.
-            overrides = {}
-            for vehicle in self.vehicles:
-                with vehicle.lock:
-                    state = vehicle.latest_state
-                if state is None:
-                    continue
-                base_target = vehicle._target_for(state, now)
-                target = dict(base_target)
-                target.update({
-                    "position": np.asarray(state["position"], dtype=float).copy(),
-                    "velocity": np.zeros(3),
-                    "acceleration": np.zeros(3),
-                    "position_gain_scale": self.takeoff_position_gain_scale,
-                    "velocity_gain_scale": self.takeoff_velocity_gain_scale,
-                    "independent_mode": True,
-                    "takeup_active": True,
-                })
-                overrides[id(vehicle)] = target
-            return overrides
-        if self.payload_takeup_start_positions is None:
-            start_positions = []
-            for vehicle in self.vehicles:
-                with vehicle.lock:
-                    state = vehicle.latest_state
-                if state is None:
-                    return {}
-                start_positions.append(np.asarray(state["position"], dtype=float).copy())
-            self.payload_takeup_start_positions = np.asarray(start_positions, dtype=float)
-            self.payload_takeup_target_positions = targets.copy()
-            self.payload_takeup_start_time = float(now)
-        # Once the measured cable lengths are taut, the nominal endpoint is no
-        # longer a valid independent-flight target.  Freeze the measured
-        # aircraft geometry while the payload validity/activation hold is
-        # confirmed; the handoff then reuses these same positions as its
-        # transport anchors.
-        if self.payload_takeup_taut_latched:
-            overrides = {}
-            for vehicle in self.vehicles:
-                with vehicle.lock:
-                    state = vehicle.latest_state
-                if state is None:
-                    continue
-                base_target = vehicle._target_for(state, now)
-                target = dict(base_target)
-                target.update({
-                    "position": np.asarray(state["position"], dtype=float).copy(),
-                    "velocity": np.zeros(3),
-                    "acceleration": np.zeros(3),
-                    "position_gain_scale": self.takeoff_position_gain_scale,
-                    "velocity_gain_scale": self.takeoff_velocity_gain_scale,
-                    "independent_mode": True,
-                    "takeup_active": True,
-                    "flight_phase": "takeup",
-                })
-                overrides[id(vehicle)] = target
-            return overrides
-        duration = max(
-            float(self.vehicles[0].trajectory_config.takeup_duration_s)
-            if self.vehicles[0].trajectory_config.takeup_duration_s is not None
-            else float(self.vehicles[0].trajectory_config.takeoff_settle_s),
-            1.0e-6,
-        )
-        profile = smoothstep5_profile(float(now) - self.payload_takeup_start_time, duration)
-        overrides = {}
-        for index, vehicle in enumerate(self.vehicles):
+        states = []
+        for vehicle in self.vehicles:
             with vehicle.lock:
                 state = vehicle.latest_state
             if state is None:
-                continue
-            base_target = vehicle._target_for(state, now)
-            displacement = self.payload_takeup_target_positions[index] - (
-                self.payload_takeup_start_positions[index]
+                return {}
+            states.append(state)
+        measured = np.asarray([state["position"] for state in states], dtype=float)
+        targets = (self._payload_takeup_positions()
+                   if self.payload_takeup_start_positions is None else None)
+        if self.payload_takeup_start_positions is None:
+            if targets is None:
+                return {}
+            self.payload_takeup_start_positions = measured.copy()
+            self.payload_takeup_target_positions = targets.copy()
+            self.payload_takeup_start_time = float(now)
+            self.payload_mission_hold_time = float(now)
+        duration = max(float(self.vehicles[0].trajectory_config.takeup_duration_s
+                             or self.vehicles[0].trajectory_config.takeoff_settle_s), 1e-6)
+        elapsed = float(now) - self.payload_takeup_start_time
+        with self.payload_lock:
+            payload_state = self.latest_payload_state
+        payload_ready = self._payload_ready(now)
+        clearance = (payload_ground_clearance(
+            payload_state["position"], payload_state["rotation"],
+            self.slung_controller.config.payload_size_m,
+        ) if payload_ready else math.nan)
+        self.payload_ground_clearance_m = clearance
+        if self.payload_prelift_reference is not None:
+            reference = self.payload_prelift_reference.update(measured, clearance, now)
+        else:
+            profile = smoothstep5_profile(elapsed, duration)
+            displacement = self.payload_takeup_target_positions - self.payload_takeup_start_positions
+            reference = dict(
+                positions=self.payload_takeup_start_positions + profile[0] * displacement,
+                velocities=profile[1] * displacement, accelerations=profile[2] * displacement,
+                stage="takeup", active=False, failed=False, reason="", rise_m=0.0,
             )
-            target = dict(base_target)
+            if not payload_ready and self.payload_last_takeup_reference is not None:
+                reference = dict(self.payload_last_takeup_reference,
+                                 velocities=np.zeros((3, 3)), accelerations=np.zeros((3, 3)))
+            if payload_ready and elapsed >= duration:
+                distances = cable_distances(
+                    payload_state["position"], payload_state["rotation"],
+                    self.slung_controller.config.attachment_points_m, measured,
+                )
+                taut = takeup_distance_ready(
+                    distances, self.slung_controller.config.link_lengths_m,
+                    self.payload_takeup_target_distance_m, self.payload_takeup_distance_tolerance_m,
+                )
+                if taut:
+                    if self.payload_geometry_ready_since is None:
+                        self.payload_geometry_ready_since = float(now)
+                    if now - self.payload_geometry_ready_since >= self.payload_takeup_confirm_s:
+                        self.payload_takeup_taut_latched = True
+                        self.payload_prelift_reference = SlungPreliftTrajectory(
+                            **self.payload_prelift_parameters
+                        )
+                        self.payload_prelift_reference.start(measured, reference["positions"], now)
+                        reference = self.payload_prelift_reference.snapshot()
+                else:
+                    self.payload_geometry_ready_since = None
+            if elapsed > duration + self.payload_prelift_parameters["timeout_s"]:
+                reference.update(failed=True, reason="takeup_timeout", stage="failed")
+        self.payload_last_takeup_reference = reference
+        if reference["failed"]:
+            self._begin_payload_emergency_landing(now, "预抬参考达到边界：" + reference["reason"])
+            return {}
+        overrides = {}
+        for index, (vehicle, state) in enumerate(zip(self.vehicles, states)):
+            target = dict(vehicle._target_for(state, now))
             target.update({
-                "position": self.payload_takeup_start_positions[index] + profile[0] * displacement,
-                "velocity": profile[1] * displacement,
-                "acceleration": profile[2] * displacement,
-                "position_gain_scale": self.takeoff_position_gain_scale,
-                "velocity_gain_scale": self.takeoff_velocity_gain_scale,
-                "independent_mode": True,
-                "takeup_active": True,
-                "flight_phase": "takeup",
+                "position": reference["positions"][index].copy(),
+                "velocity": reference["velocities"][index].copy(),
+                "acceleration": reference["accelerations"][index].copy(),
+                "jerk": np.zeros(3),
+                "independent_mode": True, "transport_mode": False,
+                "takeup_active": True, "flight_phase": "takeup",
+                "payload_prelift_active": reference["active"],
+                "payload_prelift_stage": reference["stage"],
+                "payload_prelift_reference_rise_m": reference["rise_m"],
+                "payload_prelift_reference_lead_m": float(
+                    reference["positions"][index, 2] - measured[index, 2]
+                ),
+                "prelift_vertical_integral_active": (
+                    payload_ready and reference["stage"] in (
+                        "rising", "braking", "holding", "lead_hold"
+                    )
+                ),
+                "independent_position_gain_scale": (
+                    self.payload_prelift_reference.position_gain_scale
+                    if self.payload_prelift_reference is not None
+                    else np.ones(3)
+                ),
+                "independent_velocity_gain_scale": (
+                    self.payload_prelift_reference.velocity_gain_scale
+                    if self.payload_prelift_reference is not None
+                    else np.ones(3)
+                ),
+                "max_tilt_rad": (
+                    self.payload_prelift_reference.max_tilt_rad
+                    if self.payload_prelift_reference is not None
+                    else vehicle.controller.config.max_tilt_rad
+                ),
             })
+            target.update(self.payload_prelift_integral_parameters)
             overrides[id(vehicle)] = target
         return overrides
+
+    def _hold_payload_mission_clock(self, now):
+        """Defer the task's hover/path time until prelift and reference lift finish."""
+        if self.transport_mode != "slung_load" or self.payload_mission_hold_time is None:
+            return
+        release = (self.payload_transport_active and now >= self.payload_transport_start_time
+                   + self.payload_tension_ramp_s + self.payload_reference_lift_s)
+        dt = max(0.0, float(now) - self.payload_mission_hold_time)
+        for vehicle in self.vehicles:
+            trajectory = vehicle.trajectory
+            if trajectory is None or trajectory.phase not in ("height_correction", "hover"):
+                continue
+            if release and trajectory.phase == "height_correction":
+                duration = (trajectory.config.takeup_duration_s
+                            or trajectory.config.takeoff_settle_s)
+                trajectory.phase_start_time = now - duration
+            else:
+                trajectory.phase_start_time += dt
+        self.payload_mission_hold_time = None if release else float(now)
 
     def _log_payload_takeup_status(self, now, reason, distances=None):
         """Explain why TAKEUP is not yet allowed to enter TAUT_RAMP."""
@@ -3264,143 +3694,60 @@ class MultiCtbrControllerNode:
         )
 
     def _payload_takeup_ready(self, now):
-        """Require measured cable lengths; nominal alignment is diagnostic only.
-
-        Once a cable is taut, the aircraft cannot necessarily reach the nominal
-        static-equilibrium target generated from the load pose.  The handoff
-        stores the measured aircraft positions as the transport anchors, so
-        requiring that nominal target here would keep the mission in TAKEUP.
-        """
+        """Confirm current cable geometry, held clearance and settled load velocity."""
         if self.transport_mode != "slung_load" or self.slung_controller is None:
             return True
-        with self.payload_lock:
-            geometry = self.last_valid_payload_geometry
-        if geometry is None:
-            self.payload_takeup_ready_since = None
-            self._log_payload_takeup_status(now, "尚未收到有效负载几何")
+        self.payload_prelift_ready = False
+        if not self._payload_ready(now):
+            self.payload_prelift_ready_since = self.payload_takeup_ready_since = None
+            self._log_payload_takeup_status(now, "等待新鲜有效负载状态")
             return False
-        p0 = np.asarray(geometry["position"], dtype=float)
-        rotation = np.asarray(geometry["rotation"], dtype=float)
-        link_lengths = self.slung_controller.config.link_lengths_m
-        vehicle_positions = []
-        for index, vehicle in enumerate(self.vehicles):
+        with self.payload_lock:
+            payload = dict(self.latest_payload_state)
+        positions = []
+        for vehicle in self.vehicles:
             with vehicle.lock:
                 state = vehicle.latest_state
             if state is None:
-                self.payload_takeup_ready_since = None
-                missing = ",".join(
-                    "CF%d" % item.vehicle_id
-                    for item in self.vehicles
-                    if item.latest_state is None
-                )
-                self._log_payload_takeup_status(
-                    now, "未收到飞机状态：%s" % (missing or "未知")
-                )
+                self.payload_prelift_ready_since = self.payload_takeup_ready_since = None
                 return False
-            vehicle_positions.append(np.asarray(state["position"], dtype=float))
+            positions.append(np.asarray(state["position"], dtype=float))
         distances = cable_distances(
-            p0, rotation, self.slung_controller.config.attachment_points_m,
-            vehicle_positions,
+            payload["position"], payload["rotation"],
+            self.slung_controller.config.attachment_points_m, positions,
         )
-        takeup_start = self.payload_takeup_start_time
-        if takeup_start is None:
-            self.payload_takeup_ready_since = None
-            self._log_payload_takeup_status(now, "TAKEUP 尚未建立起始位置")
-            return False
-        if self.payload_takeup_target_positions is None:
-            self.payload_takeup_ready_since = None
-            self._log_payload_takeup_status(now, "TAKEUP 尚未建立目标位置")
-            return False
         ready = takeup_distance_ready(
-            distances,
-            link_lengths,
-            self.payload_takeup_target_distance_m,
-            self.payload_takeup_distance_tolerance_m,
+            distances, self.slung_controller.config.link_lengths_m,
+            self.payload_takeup_target_distance_m, self.payload_takeup_distance_tolerance_m,
         )
-        if ready:
-            # Keep the measured taut geometry latched.  A single noisy NOKOV
-            # pose must not release the freeze and send the aircraft back to
-            # the nominal TAKEUP path while the cables are already loaded.
-            self.payload_takeup_taut_latched = True
-        elif not self.payload_takeup_taut_latched:
-            self.payload_takeup_ready_since = None
-            reasons = []
-            target_distances = link_lengths_vector(
-                self.payload_takeup_target_distance_m,
-                "target_distance_m",
-            )
-            for vehicle, distance, length, target in zip(
-                    self.vehicles,
-                    distances,
-                    link_lengths,
-                    target_distances,
-            ):
-                error = float(distance - target)
-                if error < -self.payload_takeup_distance_tolerance_m:
-                    reasons.append(
-                        "CF%d 绳长不足 %.3f m（还差 %.3f m）" % (
-                            vehicle.vehicle_id,
-                            float(distance),
-                            float(-error),
-                        )
-                    )
-                elif error > self.payload_takeup_distance_tolerance_m:
-                    reasons.append(
-                        "CF%d 绳长超出目标 %.3f m（配置上限 %.3f m）" % (
-                            vehicle.vehicle_id,
-                            float(distance),
-                            float(length),
-                        )
-                    )
+        clearance = payload_ground_clearance(
+            payload["position"], payload["rotation"], self.slung_controller.config.payload_size_m,
+        )
+        self.payload_ground_clearance_m = clearance
+        settled = (math.isfinite(float(payload["velocity"][2]))
+                   and abs(float(payload["velocity"][2]))
+                   <= self.payload_prelift_vertical_velocity_tolerance_mps)
+        holding = (self.payload_prelift_reference is not None
+                   and self.payload_prelift_reference.stage == "holding")
+        if not (ready and holding and clearance >= self.payload_prelift_clearance_m and settled):
+            self.payload_prelift_ready_since = self.payload_takeup_ready_since = None
+            stage = (self.payload_prelift_reference.stage
+                     if self.payload_prelift_reference is not None else "takeup")
             self._log_payload_takeup_status(
-                now,
-                "；".join(reasons) if reasons else "绳长未满足确认条件；"
-                "可能存在飞机动捕原点与实际挂钩点偏移",
-                distances,
+                now, "阶段=%s，间隙 %.3f/%.3f m，vz=%.3f m/s，当前绳长有效=%d" % (
+                    stage, clearance, self.payload_prelift_clearance_m,
+                    payload["velocity"][2], int(ready),
+                ), distances,
             )
             return False
-        position_errors = np.linalg.norm(
-            np.asarray(vehicle_positions, dtype=float) -
-            self.payload_takeup_target_positions,
-            axis=1,
-        )
-        if np.max(position_errors) > self.payload_takeup_position_tolerance_m:
-            rospy.logwarn_throttle(
-                2.0,
-                "TAKEUP 名义飞机目标仍有位置偏差（最大 %.3f m，告警阈值 %.3f m）；"
-                "绳长/绳向满足后仍允许连续接管",
-                float(np.max(position_errors)),
-                self.payload_takeup_position_tolerance_m,
-            )
-        nominal_alignment_ready = takeup_tracking_ready(
-            np.asarray(vehicle_positions, dtype=float),
-            self.payload_takeup_target_positions,
-            p0,
-            rotation,
-            self.slung_controller.config.attachment_points_m,
-            None,
-            self.payload_takeup_link_angle_tolerance_rad,
-        )
-        if not nominal_alignment_ready:
-            rospy.logwarn_throttle(
-                2.0,
-                "TAKEUP 实测绳长已满足，但名义平衡绳向不可达；"
-                "将使用当前飞机位置作为 TAUT_RAMP 起始锚点",
-            )
+        if self.payload_prelift_ready_since is None:
+            self.payload_prelift_ready_since = float(now)
+        self.payload_prelift_ready = now - self.payload_prelift_ready_since >= self.payload_prelift_confirm_s
+        if not self.payload_prelift_ready:
+            return False
         if self.payload_takeup_ready_since is None:
             self.payload_takeup_ready_since = float(now)
-        confirmation_elapsed = now - self.payload_takeup_ready_since
-        if confirmation_elapsed < self.payload_takeup_confirm_s:
-            self._log_payload_takeup_status(
-                now,
-                "绳长已满足，正在等待 TAKEUP 确认 %.2f/%.2f s" % (
-                    confirmation_elapsed,
-                    self.payload_takeup_confirm_s,
-                ),
-                distances,
-            )
-            return False
-        return True
+        return now - self.payload_takeup_ready_since >= self.payload_takeup_confirm_s
 
     def _payload_reference_profile(self, now, desired_position):
         """Build MATLAB-style frozen-ground, tension-ramp, then lift reference."""
@@ -3419,8 +3766,14 @@ class MultiCtbrControllerNode:
         ramp_s = float(self.payload_tension_ramp_s)
         lift_s = float(self.payload_reference_lift_s)
         if elapsed < ramp_s:
-            blend = float(smoothstep5_profile(elapsed, ramp_s)[0])
-            return self.payload_transport_start_position.copy(), np.zeros(3), np.zeros(3), blend
+            profile = smoothstep5_profile(elapsed, ramp_s)
+            return (
+                self.payload_transport_start_position.copy(),
+                np.zeros(3),
+                np.zeros(3),
+                float(profile[0]),
+                float(profile[1]),
+            )
         profile = smoothstep5_profile(elapsed - ramp_s, lift_s)
         displacement = np.asarray(desired_position, dtype=float) - self.payload_transport_start_position
         return (
@@ -3428,6 +3781,7 @@ class MultiCtbrControllerNode:
             profile[1] * displacement,
             profile[2] * displacement,
             1.0,
+            0.0,
         )
 
     def _transport_overrides(self, now):
@@ -3492,6 +3846,7 @@ class MultiCtbrControllerNode:
                 profile[1] * displacement,
                 profile[2] * displacement,
                 1.0,
+                0.0,
             )
         else:
             desired_payload_position = np.mean(
@@ -3501,12 +3856,20 @@ class MultiCtbrControllerNode:
             desired_payload_position[2] -= float(np.mean(
                 self.slung_controller.config.link_lengths_m
             ))
+            if math.isfinite(self.payload_target_height_m):
+                desired_payload_position[2] = self.payload_target_height_m
             payload_reference = self._payload_reference_profile(
                 now, desired_payload_position
             )
         if payload_reference is None:
             return {}
-        payload_target_position, payload_target_velocity, payload_target_acceleration, transport_blend = payload_reference
+        (
+            payload_target_position,
+            payload_target_velocity,
+            payload_target_acceleration,
+            transport_blend,
+            transport_blend_dot,
+        ) = payload_reference
         if self.payload_transport_vehicle_start_positions is None:
             # TAKEUP has already produced the exact per-vehicle handoff
             # anchors.  Keep those anchors and translate them with the load's
@@ -3526,6 +3889,43 @@ class MultiCtbrControllerNode:
                 payload_target_acceleration,
             )
         )
+        physical_positions = vehicle_reference_positions.copy()
+        transport_hold_scale = self.payload_transport_position_hold_gain_scale
+        transport_hold_scale_dot = 0.0
+        if not landing and self.payload_handoff_reference_positions is not None:
+            lift_profile = smoothstep5_profile(
+                max(0.0, now - self.payload_transport_start_time - self.payload_tension_ramp_s),
+                self.payload_reference_lift_s,
+            )
+            lift_progress = float(lift_profile[0])
+            # Keep the measured anchors through reference lift, then fade to
+            # the configured steady transport hold without a force step.
+            hold_delta = self.payload_ramp_position_hold_gain_scale - transport_hold_scale
+            transport_hold_scale += (1.0 - lift_progress) * hold_delta
+            transport_hold_scale_dot = -float(lift_profile[1]) * hold_delta
+        if self.payload_handoff_reference_positions is not None:
+            blend_ddot = (float(smoothstep5_profile(
+                float(now) - self.payload_transport_start_time, self.payload_tension_ramp_s
+            )[2]) if transport_blend < 1.0 else 0.0)
+            vehicle_reference_positions, bias_velocities, bias_accelerations = handoff_references(
+                physical_positions,
+                self.payload_handoff_reference_positions
+                + (payload_target_position - self.payload_transport_start_position),
+                transport_blend, transport_blend_dot, blend_ddot,
+            )
+            vehicle_reference_velocities += bias_velocities
+            vehicle_reference_accelerations += bias_accelerations
+        link_gain_scale = transport_blend * self.payload_transport_link_gain_scale
+        if (not landing and transport_blend >= 1.0
+                and self.payload_transport_steady_link_gain_scale < 1.0):
+            steady_profile = smoothstep5_profile(
+                max(0.0, now - self.payload_transport_start_time - self.payload_tension_ramp_s),
+                self.payload_reference_lift_s,
+            )
+            link_gain_scale *= (
+                1.0 - (1.0 - self.payload_transport_steady_link_gain_scale)
+                * float(steady_profile[0])
+            )
         target = {
             "position": payload_target_position,
             "velocity": payload_target_velocity,
@@ -3535,29 +3935,84 @@ class MultiCtbrControllerNode:
             "body_rate_dot": np.zeros(3),
             "payload_attitude_gain": self.payload_attitude_gain,
             "payload_rate_gain": self.payload_rate_gain,
-            "payload_yaw_enabled": True,
-            "link_gain_scale": (
-                transport_blend * self.payload_transport_link_gain_scale
+            "payload_yaw_enabled": self.payload_yaw_enabled,
+            "link_gain_scale": link_gain_scale,
+            # During TENSION_RAMP the target position is the measured TAKEUP
+            # anchor.  Keep an independent hold term while the load force is
+            # blended in, as in Udaan's ramp_position_hold_commands().
+            "ramp_position_hold_gain_scale": self.payload_ramp_position_hold_gain_scale,
+            "transport_position_hold_gain_scale": (
+                transport_hold_scale
             ),
+            "transport_blend_dot": transport_blend_dot,
         }
         result = self.slung_controller.compute(
-            payload_state, vehicle_states, target, now - self.last_tick
+            payload_state, vehicle_states, target,
+            getattr(self, "payload_control_dt", now - self.last_tick),
         )
         if result is None:
             return {}
+        trim_dot = np.zeros(3)
+        if not self.payload_support_trim.initialized and self.payload_handoff_forces is not None:
+            self.payload_support_trim.initialize(
+                self.payload_handoff_forces[:, 2],
+                [output["force"][2] for output in result["vehicles"]],
+            )
+        if self.payload_support_trim.initialized:
+            saturated = [
+                bool(getattr(vehicle, "last_control_command", None) is not None and
+                     vehicle.last_control_command["collective_thrust"] >=
+                     vehicle.controller.config.max_command_thrust - 0.01)
+                for vehicle in self.vehicles
+            ]
+            trim, trim_dot = self.payload_support_trim.update(
+                float(payload_target_position[2] - payload_state["position"][2]),
+                getattr(self, "payload_control_dt", 1.0 / self.rate_hz), saturated,
+            )
+        else:
+            trim = np.zeros(3)
+        if landing:
+            # Fade the residual as the load settles onto the ground; it must
+            # never act as a thrust floor during landing/release.
+            landing_scale = 1.0 - float(profile[0])
+            trim_dot = landing_scale * trim_dot - float(profile[1]) * trim
+            trim = landing_scale * trim
         overrides = {}
         for index, vehicle in enumerate(self.vehicles):
             output = result["vehicles"][index]
             vehicle_cfg = vehicle.vehicle_config
             parameter_root = vehicle.params.vehicle_root
+            prelift_tilt = self.payload_prelift_parameters.get(
+                "max_tilt_rad", vehicle.controller.config.max_tilt_rad)
+            tilt_progress = float(smoothstep5_profile(
+                max(0.0, now - self.payload_transport_start_time - self.payload_tension_ramp_s),
+                self.payload_reference_lift_s,
+            )[0])
+            transport_tilt = (vehicle.controller.config.max_tilt_rad if landing else
+                              (1.0 - tilt_progress) * max(prelift_tilt, vehicle.controller.config.max_tilt_rad)
+                              + tilt_progress * vehicle.controller.config.max_tilt_rad)
+            force = output["force"].copy()
+            force[2] += trim[index]
+            force_dot = output["force_dot"].copy()
+            force_dot[2] += trim_dot[index]
             overrides[id(vehicle)] = {
                 "transport_mode": True,
+                "independent_mode": False,
                 "transport_blend": transport_blend,
+                "transport_blend_dot": transport_blend_dot,
+                "transport_filter_reset": bool(transport_blend <= 1.0e-9),
                 "position": vehicle_reference_positions[index].copy(),
                 "velocity": vehicle_reference_velocities[index].copy(),
                 "acceleration": vehicle_reference_accelerations[index].copy(),
-                "desired_force_override": output["force"],
-                "desired_force_dot_override": output["force_dot"],
+                "position_hold_position": physical_positions[index].copy(),
+                "position_hold_velocity": payload_target_velocity.copy(),
+                "position_hold_acceleration": payload_target_acceleration.copy(),
+                "transport_position_hold_gain_scale_dot": transport_hold_scale_dot,
+                "desired_force_override": force,
+                "desired_force_dot_override": force_dot,
+                "transport_support_trim_n": trim[index],
+                "max_tilt_rad": transport_tilt,
+                "transport_max_tilt_rad": transport_tilt,
                 "transport_attitude_gain": rospy.get_param(
                     parameter_root + "/transport_attitude_gain",
                     [240.0, 240.0, 120.0],
@@ -3572,8 +4027,21 @@ class MultiCtbrControllerNode:
                 "payload_target_position": payload_target_position,
                 "link_direction": output["link_direction"],
                 "desired_link_direction": output["desired_link_direction"],
+                "raw_desired_link_direction": output["raw_desired_link_direction"],
                 "link_direction_error": output["link_direction_error"],
                 "desired_tension": output["desired_tension"],
+                "desired_tension_signed": output["desired_tension_signed"],
+                "payload_yaw_enabled": self.payload_yaw_enabled,
+                "payload_desired_force": result["desired_force"],
+                "payload_desired_moment": result["desired_moment"],
+                "transport_link_gain_scale": self.payload_transport_link_gain_scale,
+                "ramp_position_hold_gain_scale": (
+                    self.payload_ramp_position_hold_gain_scale
+                ),
+                "transport_position_hold_gain_scale": (
+                    transport_hold_scale
+                ),
+                "transport_blend": transport_blend,
                 "payload_position": payload_state["position"],
                 "payload_raw_velocity": payload_state.get(
                     "raw_velocity", payload_state["velocity"]
@@ -3585,6 +4053,8 @@ class MultiCtbrControllerNode:
                     "derivatives_valid", False
                 ),
             }
+            if self.payload_handoff_forces is not None:
+                overrides[id(vehicle)]["handoff_force"] = self.payload_handoff_forces[index].copy()
             if transport_blend < 1.0:
                 overrides[id(vehicle)]["flight_phase"] = "tension_ramp"
         return overrides
@@ -3661,6 +4131,75 @@ class MultiCtbrControllerNode:
                 "payload_load: " + str(reason),
             )
 
+    def _check_payload_physical_safety(self, now):
+        """Check measured geometry before publishing another cooperative tick."""
+        if self.transport_mode != "slung_load":
+            return False
+        with self.payload_lock:
+            payload = None if self.latest_payload_state is None else dict(self.latest_payload_state)
+        if payload is not None and self._payload_ready(now):
+            self.payload_ground_clearance_m = payload_ground_clearance(
+                payload["position"], payload["rotation"], self.slung_controller.config.payload_size_m,
+            )
+            if self.payload_transport_active:
+                self.payload_prelift_ready = bool(
+                    self.payload_ground_clearance_m >= self.payload_prelift_clearance_m
+                    and abs(float(payload.get("velocity", np.zeros(3))[2]))
+                    <= self.payload_prelift_vertical_velocity_tolerance_mps
+                )
+        else:
+            self.payload_ground_clearance_m = math.nan
+            self.payload_prelift_ready = False
+        # Check after the TAKEUP motion has begun, including independent
+        # prelift, so a close formation never reaches the handoff gate.
+        if not (self.payload_transport_active or self.payload_takeup_start_time is not None):
+            return False
+        positions, velocities, phases = [], [], []
+        for vehicle in self.vehicles:
+            with vehicle.lock:
+                state = vehicle.latest_state
+            if state is None or not vehicle._state_ready(now):
+                return False  # Existing state-loss handling owns this path.
+            positions.append(state["position"])
+            control = vehicle._build_ekf_control_state(state, now)
+            velocities.append(control.get("control_velocity", np.zeros(3)))
+            phases.append(vehicle.trajectory.phase if vehicle.trajectory is not None else "")
+        if any(phase in ("emergency_landing", "landed") for phase in phases):
+            return False
+        height_error = None
+        rate_saturated = False
+        if self.payload_transport_active and self._payload_ready(now) and not any(
+                phase in ("landing", "landing_settle") for phase in phases):
+            # During the ramp, the frozen payload height is the actual target.
+            # During lift, read the previous complete reference (one tick old).
+            previous = next(iter(self.last_transport_overrides.values()), {})
+            target_position = previous.get("payload_target_position", self.payload_transport_start_position)
+            if target_position is not None:
+                height_error = float(target_position[2] - payload["position"][2])
+            rate_saturated = any(
+                getattr(vehicle, "last_control_command", None) is not None and np.any(
+                    np.abs(vehicle.last_control_command["body_rate_command"][:2]) >=
+                    0.98 * vehicle.controller.config.max_body_rate[:2])
+                for vehicle in self.vehicles
+            )
+        result = self.payload_transport_guard.check(
+            now, positions, velocities, height_error, rate_saturated,
+        )
+        self.payload_minimum_vehicle_distance_m = result["minimum_distance_m"]
+        self.payload_predicted_vehicle_distance_m = result["predicted_distance_m"]
+        if not result["reason"]:
+            return False
+        self.payload_safety_reason = result["reason"]
+        self._begin_payload_emergency_landing(
+            now, "%s: distance=%.3f m predicted=%.3f m height_error=%s" % (
+                result["reason"], result["minimum_distance_m"],
+                result["predicted_distance_m"], height_error),
+        )
+        clearance = self.payload_ground_clearance_m
+        self._reset_payload_handoff()
+        self.payload_ground_clearance_m = clearance
+        return True
+
     def _reset_payload_handoff(self):
         self.payload_transport_active = False
         self.payload_ready_since = None
@@ -3671,6 +4210,17 @@ class MultiCtbrControllerNode:
         self.payload_takeup_start_positions = None
         self.payload_takeup_target_positions = None
         self.payload_takeup_ready_since = None
+        self.payload_prelift_ready_since = None
+        self.payload_ground_clearance_m = math.nan
+        self.payload_prelift_ready = False
+        self.payload_prelift_reference = None
+        self.payload_last_takeup_reference = None
+        self.payload_geometry_ready_since = None
+        self.payload_mission_hold_time = None
+        self.payload_handoff_reference_positions = None
+        self.payload_handoff_forces = None
+        self.payload_support_trim.reset()
+        self.payload_transport_guard.reset()
         self.payload_takeup_taut_latched = False
         self.payload_takeup_diagnostic_last_time = None
         self.payload_landing_start_time = None
@@ -3705,6 +4255,8 @@ class MultiCtbrControllerNode:
 
     def _timer_callback(self, _event):
         now = time.monotonic()
+        self.payload_control_dt = float(np.clip(now - self.last_tick, 0.001, 0.05))
+        self.last_tick = now
 
         if self.global_abort_reason:
             for vehicle in self.vehicles:
@@ -3749,6 +4301,7 @@ class MultiCtbrControllerNode:
             ]
             self._set_abort("NOKOV 状态失效：%s" % ",".join(invalid_ids))
 
+        self._hold_payload_mission_clock(now)
         transport_phase_active = self._transport_phase_active(now)
         if (transport_phase_active and self.payload_transport_active and
                 self._payload_landing_release_ready(now)):
@@ -3761,6 +4314,14 @@ class MultiCtbrControllerNode:
             self._reset_payload_handoff()
         elif not self.payload_transport_active:
             takeup_overrides = self._payload_takeup_overrides(now)
+            if self._payload_ready(now):
+                self.payload_fault_since = None
+            else:
+                if self.payload_fault_since is None:
+                    self.payload_fault_since = now
+                if now - self.payload_fault_since > self.payload_emergency_land_after_s:
+                    self._begin_payload_emergency_landing(now, "预抬期间负载状态持续失效")
+                    takeup_overrides = {}
             takeup_ready = self._payload_takeup_ready(now)
             if self._payload_ready(now) and takeup_ready:
                 if self.payload_ready_since is None:
@@ -3778,6 +4339,13 @@ class MultiCtbrControllerNode:
                         current_vehicle_positions.append(
                             np.asarray(state["position"], dtype=float).copy()
                         )
+                    self.payload_handoff_reference_positions = (
+                        self.payload_last_takeup_reference["positions"].copy()
+                    )
+                    self.payload_handoff_forces = np.asarray([
+                        vehicle.last_control_command["desired_force"].copy()
+                        for vehicle in self.vehicles
+                    ])
                     self.payload_transport_active = True
                     self.payload_transport_start_time = now
                     self.payload_transport_start_position = np.asarray(
@@ -3841,6 +4409,9 @@ class MultiCtbrControllerNode:
                 )
                 self.last_transport_overrides = {}
                 self.payload_fault_since = None
+        if self._check_payload_physical_safety(now):
+            transport_overrides = {}
+            takeup_overrides = {}
         for vehicle in self.vehicles:
             with self.payload_lock:
                 payload_diagnostics = (
@@ -3852,6 +4423,25 @@ class MultiCtbrControllerNode:
             target_override = transport_overrides.get(id(vehicle))
             if target_override is None:
                 target_override = takeup_overrides.get(id(vehicle))
+            if self.transport_mode == "slung_load":
+                target_override = dict(target_override or {})
+                target_override.update({
+                    "payload_ground_clearance_m": self.payload_ground_clearance_m,
+                    "payload_prelift_clearance_target_m": self.payload_prelift_clearance_m,
+                    "payload_prelift_ready": self.payload_prelift_ready,
+                    "payload_minimum_vehicle_distance_m": self.payload_minimum_vehicle_distance_m,
+                    "payload_predicted_vehicle_distance_m": self.payload_predicted_vehicle_distance_m,
+                    "payload_safety_reason": self.payload_safety_reason,
+                })
+            if self.transport_mode == "slung_load" and self.payload_last_takeup_reference is not None:
+                target_override = dict(target_override or {})
+                target_override["payload_prelift_failure_reason"] = (
+                    self.payload_last_takeup_reference["reason"]
+                )
+                target_override["payload_prelift_stage"] = (
+                    self.payload_last_takeup_reference["stage"]
+                    if not self.payload_transport_active else "transport"
+                )
             vehicle._timer_callback(
                 None,
                 now=now,

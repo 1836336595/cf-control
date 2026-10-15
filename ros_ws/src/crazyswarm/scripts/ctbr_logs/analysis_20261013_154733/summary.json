@@ -1,0 +1,48 @@
+{
+  "source": "/home/csy/my_project/crazyswarm/ros_ws/src/crazyswarm/scripts/ctbr_logs/multi_ctbr_20261013_154733.csv",
+  "prelift_start_s": 16.148588036999968,
+  "prelift_stop_s": 16.648588036999968,
+  "payload_clearance_range_m": [
+    0.008602049712217546,
+    0.01000762905548207
+  ],
+  "vehicle_weight_N": 1.27290317,
+  "model_system_weight_N": 1.8024622699999997,
+  "peak_total_command_world_z_N": 2.0260757061655346,
+  "time_with_total_command_above_model_weight_s_approx": 0.15714285714285714,
+  "late_total_command_world_z_N": 1.3601062070151575,
+  "target_acceleration_reconstructed_range_mps2": [
+    -4.607991285260841,
+    4.607986548081511
+  ],
+  "target_velocity_reconstructed_peak_mps": 0.7487857987485271,
+  "vehicles": {
+    "CF3": {
+      "target_z_before_vertical_rise_m": 0.668537105937361,
+      "final_target_z_m": 0.8685371059373608,
+      "late_measured_z_mean_m": 0.6973381371102421,
+      "peak_command_thrust_N": 0.6830512734206163,
+      "late_command_thrust_mean_N": 0.4628757233161019,
+      "peak_raw_command": 49350.0,
+      "last_integral_z": -0.2
+    },
+    "CF4": {
+      "target_z_before_vertical_rise_m": 0.6103920564940865,
+      "final_target_z_m": 0.8103920564940863,
+      "late_measured_z_mean_m": 0.6878355518507387,
+      "peak_command_thrust_N": 0.6848046420823605,
+      "late_command_thrust_mean_N": 0.4614942339971253,
+      "peak_raw_command": 49347.0,
+      "last_integral_z": -0.2
+    },
+    "CF5": {
+      "target_z_before_vertical_rise_m": 0.5850925761707775,
+      "final_target_z_m": 0.7850925761707777,
+      "late_measured_z_mean_m": 0.6973964350635995,
+      "peak_command_thrust_N": 0.6589856427751277,
+      "late_command_thrust_mean_N": 0.43860903327432926,
+      "peak_raw_command": 49344.0,
+      "last_integral_z": -0.2
+    }
+  }
+}

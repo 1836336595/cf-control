@@ -7,10 +7,15 @@ slung_payload:
   mocap_topic: "/load/mocap_state"
   size_m: [0.08, 0.06, 0.05]        # [长, 宽, 高]。
   mass_kg: 0.054
+  # 负载几何中心的绝对目标高度，m。预抬阶段先满足 prelift_clearance_m，
+  # 接管后的 reference_lift 使用此目标，不再沿用普通轨迹的 1.0 m。
+  target_payload_height_m: 0.60
+  # 离线实机控制器回放在接管后继续观察的时间；不改变真实控制器时钟。
+  post_handoff_s: 60.0
   density_kg_m3: 0.0                # 0 表示使用 mass_kg，不按密度派生质量。
   # 依据 2026-10-01 CSV 的早期稳定运输段拟合，顺序为 [CF3, CF4, CF5]，m。
   # CSV 未记录负载姿态，因此这是几何拟合值；重新测量绳长时应优先采用实测值。
-  link_lengths_m: [0.694, 0.692, 0.621]
+  link_lengths_m: [0.709, 0.699, 0.674]
   # 旧版单值参数仅作为未配置 link_lengths_m 时的兼容回退。
   link_length_m: 0.694
   mocap_hold_s: 0.20               # 负载状态短暂丢帧时保持上一周期运输输出，s。
@@ -23,10 +28,10 @@ slung_payload:
   # 负载状态观测器只读取 NOKOV 位姿和姿态；twist/acceleration 只写入 CSV 诊断。
   state_observer_enabled: true
   observer_position_gain: 0.35       # 位置残差修正比例，alpha。
-  observer_velocity_gain: 0.08       # 速度残差修正比例，beta。
+  observer_velocity_gain: 0.20       # 与稳定 Udaan 仿真一致，速度残差修正比例，beta。
   observer_acceleration_gain: 0.02   # 加速度残差修正比例，gamma。
   observer_attitude_gain: 0.35       # SO(3) 姿态残差修正比例。
-  observer_angular_rate_gain: 0.08   # 角速度残差修正比例。
+  observer_angular_rate_gain: 0.30   # 与稳定 Udaan 仿真一致，角速度残差修正比例。
   observer_max_dt: 0.05              # 样本间隔超过此值时重置观测器，s。
   observer_max_velocity_mps: [1.0, 1.0, 1.0]
   observer_max_acceleration_mps2: [8.0, 8.0, 8.0]
@@ -34,20 +39,54 @@ slung_payload:
   observer_min_samples: 3             # 至少收到这些个位姿样本后才允许接管。
   independent_hover_height_m: 0.50 # 实机先在更接近收绳高度处独立悬停，m。
   independent_takeoff_duration_s: 5.0 # 独立起飞到上述高度的时间，s；延长以降低上升速度。
-  takeup_duration_s: 8.0           # 名义 TAKEUP 构型过渡时间，s；绳子提前绷紧时立即冻结实测构型。
+  takeup_duration_s: 8.0           # 独立几何控制下收绳到当前负载几何目标的时间，s。
   takeup_pre_tension_slack_m: 0.0  # 实测绳距作为真实目标，不再额外扣除预张紧余量，m。
   takeup_outward_offset_m: 0.12     # TAKEUP 水平外张安全余量；平衡绳向失败时也作为回退值，m。
-  takeup_distance_tolerance_m: 0.01 # 绳长确认允许的距离余量，m。
+  takeup_distance_tolerance_m: 0.015 # 绳长确认允许的距离余量，m。
   takeup_position_tolerance_m: 0.15 # 名义 TAKEUP 目标位置偏差告警阈值，m；不再阻塞接管。
   takeup_link_angle_tolerance_deg: 10.0 # 实测绳向相对目标绳向的容差，deg。
   takeup_confirm_s: 0.50            # 几何条件同时满足的确认时间，s。
+  prelift_clearance_m: 0.20         # TAKEUP 独立几何控制阶段需先将负载底面抬离地面此高度，m。
+  # 负载间隙是实测门槛；飞机参考须允许继续上移，才能通过现有 PID 建立持续拉力。
+  prelift_speed_mps: 0.05           # 绳长连续确认后，三机参考共同上移的最大速度，m/s。
+  prelift_acceleration_mps2: 0.05   # 上移参考启动/停止时的加速度上限，m/s²。
+  prelift_clearance_margin_m: 0.02  # 在间隙门槛上增加停止/接管余量，避免切换时低于 0.20 m。
+  prelift_alignment_duration_s: 2.0 # 构型衔接的最短时间，s；偏差较大时按速度/加速度限幅自动延长。
+  prelift_max_reference_rise_m: 1.8 # 相对预抬实测构型允许的最大参考上移量，m；达到则受控降落。
+  prelift_max_reference_lead_m: 1.6 # 参考 z 相对任何一架实测 z 的最大超前量，m；达到则受控降落。
+  prelift_timeout_s: 60.0           # 等待收绳/执行预抬的超时边界，s；超过则受控降落。
+  prelift_lead_hold_s: 10.0         # 达到超前边界后保持参考、等待负载继续起升的时间，s。
+  # 固定参考时仍由现有 PID 的 I 项增加拉力；独立起飞及 XY 积分仍用原门控/限幅。
+  prelift_vertical_integral_limit: 8.0           # 预抬 z 积分状态限幅；推力/加速度饱和时停止积累。
+  prelift_vertical_integral_rate_limit: 0.5      # z 积分每秒最大变化量，限制拉力增长速度。
+  prelift_vertical_feedback_limit_mps2: 12.0    # 预抬 z 反馈加速度上限；总推力仍不超过各机 1.0 N。
+  prelift_independent_position_gain_scale: [4.0, 4.0, 1.0] # 预抬期间加强 XY PID，防止绳张力把飞机拉向负载中心。
+  prelift_independent_velocity_gain_scale: [2.0, 2.0, 1.0]
+  prelift_max_tilt_deg: 12.0        # 仅预抬 XY 抗绳向内拉，普通/协同阶段仍使用各自倾角限制。
+  prelift_confirm_s: 0.50           # 离地间隙和低竖直速度连续满足的确认时间，s。
+  prelift_vertical_velocity_tolerance_mps: 0.05 # 允许切换协同控制的负载竖直速度，m/s。
   takeup_diagnostic_interval_s: 1.0 # TAKEUP 未接管时终端诊断输出周期，s。
   activation_hold_s: 0.30            # 绳长确认后负载状态连续有效的接管等待时间，s。
   tension_ramp_s: 5.0                # MATLAB TAUT_RAMP 张力建立时间，s。
-  reference_lift_s: 12.0             # 张力建立后将负载参考抬到目标高度的时间，s。
-  # TAKEUP 使用外张安全构型；实机若尚未达到静态平衡绳向，开启绳向环会把飞机拉向中心。
-  # 先关闭该修正，保持实测构型；确认姿态/绳向标定一致后可逐步调到 0.1~1.0。
-  transport_link_gain_scale: 0.0
+  # Udaan 同款张力渐增位置保持：协同力逐步接管时仍保持 TAKEUP 实测锚点，
+  # 防止水平绳张力把三架飞机拉向负载中心。
+  ramp_position_hold_gain_scale: 2.0
+  reference_lift_s: 12.0             # 与稳定 Udaan 仿真一致，张力建立后抬升参考的时间，s。
+  # 稳定 Udaan 仿真使用完整绳向反馈；按张力渐增比例接管绳向环。
+  transport_link_gain_scale: 0.4
+  # 参考抬升结束后逐渐降低绳方向修正，减少长期姿态环激励；实机默认保持 1.0。
+  transport_link_steady_gain_scale: 0.4
+  # 稳态运输保持增益；预抬接管的保持项在 reference_lift_s 内平滑消退到此值。
+  transport_position_hold_gain_scale: 0.5
+  # 接管和运输的实测构型保护；达到实际间距边界立即受控降落。
+  minimum_vehicle_distance_m: 0.30
+  separation_prediction_s: 0.35
+  transport_height_error_limit_m: 0.08
+  transport_fault_confirm_s: 2.20  # 预测靠近/掉高/持续横向速率饱和的确认时间。
+  # 保留预抬输出相对协同模型的竖直差额，用有界 I 项慢调，不重复叠加负载重量。
+  transport_support_trim_limit_n: 0.25
+  transport_support_integral_gain_npm_s: 0.20
+  transport_support_trim_rate_nps: 0.03
   landing_approach_fraction: 0.55    # MATLAB 降落前段保持绷紧控制的时长比例。
 
   # MATLAB 挂点顺序 [CF3, CF4, CF5]：+x 棱中点、-x/+y 顶点、-x/-y 顶点。
@@ -65,7 +104,7 @@ slung_payload:
   c1: 0.50
 
   # 负载姿态环：MATLAB 按负载惯量和目标带宽自动生成 kR/kOmega。
-  attitude_bandwidth_hz: [6.0, 6.0, 0.45]
+  attitude_bandwidth_hz: [2.0, 2.0, 0.45]
   attitude_damping_ratio: 0.90
   yaw_channel_enabled: true
 
@@ -76,5 +115,9 @@ slung_payload:
   link_komega: 20.0
   link_integral_gain: 0.0
   link_integral_limit: [0.30, 0.30, 0.30]
-  outward_bias_fraction: 0.20
-  outward_bias_max_n: 0.12
+  outward_bias_fraction: 0.25
+  outward_bias_max_n: 0.15
+  # 每架无人机期望力的导数限幅，供 Omega_c 前馈使用，N/s。
+  force_dot_limit_nps: 20.0
+  link_force_correction_limit_n: 0.40
+  link_force_correction_rate_limit_nps: 20.0

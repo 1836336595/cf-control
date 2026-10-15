@@ -1,0 +1,54 @@
+{
+  "source": "multi_ctbr_20261013_214314.csv",
+  "vehicles": {
+    "CF3": {
+      "hold_start_s": 66.60578649399758,
+      "hold_end_s": 76.59147802699954,
+      "hold_mean_thrust_N": 0.7135399280477299,
+      "hold_mean_clearance_m": 0.008162187752944059,
+      "hold_integral_z_range": [
+        -0.19221604824977523,
+        -0.19221604824977523
+      ],
+      "hold_mocap_sample_age_max_s": 0.028096437454223633,
+      "replay_thrust_start_N": 0.7128235253494684,
+      "replay_thrust_after10s_N": 0.8858478624522962
+    },
+    "CF4": {
+      "hold_start_s": 66.60578649399758,
+      "hold_end_s": 76.59147802699954,
+      "hold_mean_thrust_N": 0.710331493948963,
+      "hold_mean_clearance_m": 0.008162187752944059,
+      "hold_integral_z_range": [
+        -0.2,
+        -0.2
+      ],
+      "hold_mocap_sample_age_max_s": 0.03397512435913086,
+      "replay_thrust_start_N": 0.7141354773928672,
+      "replay_thrust_after10s_N": 0.8893989778985842
+    },
+    "CF5": {
+      "hold_start_s": 66.60578649399758,
+      "hold_end_s": 76.59147802699954,
+      "hold_mean_thrust_N": 0.6902721245721487,
+      "hold_mean_clearance_m": 0.008162187752944059,
+      "hold_integral_z_range": [
+        -0.2,
+        -0.2
+      ],
+      "hold_mocap_sample_age_max_s": 0.035028696060180664,
+      "replay_thrust_start_N": 0.6946791472408567,
+      "replay_thrust_after10s_N": 0.8637014121999661
+    }
+  },
+  "failure": {
+    "control_time_s": "76.60579737599983",
+    "ros_time_s": "1791899071.1052556",
+    "payload_prelift_failure_reason": "max_lead",
+    "state_valid": "1",
+    "ekf_state_valid": "1",
+    "ekf_status": "fresh",
+    "ekf_fault_age_s": "0.0",
+    "payload_filter_derivatives_valid": "1"
+  }
+}

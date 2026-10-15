@@ -22,8 +22,8 @@ ctbr_controller:
   ekf_state_timeout: 0.15                    # EKF 日志主机接收后最大年龄，s。
   ekf_max_position_delta_m: 0.30             # EKF 与 NOKOV 位置差超限时判定运动学失配，m。
   ekf_alignment_position_delta_m: 0.05       # 起飞前要求 EKF/NOKOV 连续对齐的最大位置差，m。
-  ekf_alignment_hold_s: 1.0                  # 起飞前 EKF 对齐需连续保持的时间，s。
-  ekf_alignment_timeout_s: 5.0               # 预检期间等待 EKF 对齐的最长时间，s。
+  ekf_alignment_hold_s: 1.0                  # 新鲜 EKF/NOKOV 位置连续对齐时间，s；释放时导数也必须有效。
+  ekf_alignment_timeout_s: 10.0              # 等待 EKF 对齐和速度滤波预热的最长时间，s。
   ekf_kinematics_hold_s: 0.10                # EKF 短暂异常时保持最后有效速度/加速度的上限，s。
   ekf_fault_emergency_land_s: 0.35           # EKF 异常持续超过此时间后进入受控紧急降落，s。
   ekf_timestamp_future_tolerance_s: 0.020    # EKF 回调相对控制 tick 微小超前的时间容差，s。
@@ -33,9 +33,9 @@ ctbr_controller:
 
   # 电压预检的共同准入条件；电压-raw 推力标定在每架飞机块中。
   require_preflight_voltage: true             # 是否必须完成起飞前电压预检。
-  preflight_voltage_samples: 1                # 电池日志为一次性采样，预检只需一个样本。
-  preflight_voltage_timeout_s: 5.0            # 预检最长等待时间，s。
-  preflight_battery_max_age_s: 0.3            # 最后一条电压样本最大年龄，s。
+  preflight_voltage_samples: 1                # 电池按 2 Hz 重复采样；预检只需一个新鲜有效样本。
+  preflight_voltage_timeout_s: 10.0           # 预检最长等待时间，s。
+  preflight_battery_max_age_s: 1.0            # 匹配 0.5 s 电池采样周期并容纳少量调度延迟，s。
   preflight_min_voltage_v: 3.8                # 允许起飞的最低电压，V。
 
   gravity_mps2: 9.80665                       # 世界坐标重力常数，m/s^2。

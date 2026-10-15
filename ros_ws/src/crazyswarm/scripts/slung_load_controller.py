@@ -364,6 +364,20 @@ def mocap_top_surface_to_center(position, rotation, height_m):
     return position + rotation @ np.array([0.0, 0.0, -0.5 * height_m])
 
 
+def payload_ground_clearance(position, rotation, size, ground_z=0.0):
+    """Return the oriented box's lowest vertical point above the ground plane."""
+    position = _as_vector(position, "payload position")
+    rotation = _project_so3(rotation)
+    size = _as_vector(size, "payload size")
+    if np.any(size <= 0.0):
+        raise ValueError("payload size must be positive")
+    ground_z = float(ground_z)
+    if not math.isfinite(ground_z):
+        raise ValueError("ground_z must be finite")
+    projected_half_height = 0.5 * float(np.abs(rotation[2, :]) @ size)
+    return float(position[2] - projected_half_height - ground_z)
+
+
 def attachment_points_ros_z_up(size_m):
     """Return MATLAB's [CF3, CF4, CF5] attachment points in ROS z-up.
 
@@ -639,6 +653,10 @@ class SlungLoadConfig:
     link_integral_limit: np.ndarray
     outward_bias_fraction: float = 0.20
     outward_bias_max_n: float = 0.12
+    # Limit for the finite-difference derivative of each vehicle force.
+    force_dot_limit_nps: float = 20.0
+    link_force_correction_limit_n: float = 0.12
+    link_force_correction_rate_limit_nps: float = 5.0
     link_lengths_m: object = None
 
     def __post_init__(self):
@@ -657,6 +675,8 @@ class SlungLoadController:
         self.link_integrals = np.zeros((3, 3))
         self.previous_link_units = None
         self.previous_payload_rotation = None
+        self.previous_vehicle_forces = None
+        self.previous_perpendicular_forces = None
         self._validate()
 
     def _validate(self):
@@ -672,12 +692,19 @@ class SlungLoadController:
             raise ValueError("link length and force epsilon must be positive")
         if cfg.tension_pinv_tolerance <= 0.0:
             raise ValueError("tension pseudoinverse tolerance must be positive")
+        if (not np.isfinite(cfg.link_force_correction_limit_n)
+                or cfg.link_force_correction_limit_n <= 0.0
+                or not np.isfinite(cfg.link_force_correction_rate_limit_nps)
+                or cfg.link_force_correction_rate_limit_nps <= 0.0):
+            raise ValueError("link force correction limits must be positive and finite")
 
     def reset(self):
         self.position_integral[:] = 0.0
         self.link_integrals[:] = 0.0
         self.previous_link_units = None
         self.previous_payload_rotation = None
+        self.previous_vehicle_forces = None
+        self.previous_perpendicular_forces = None
 
     @staticmethod
     def _state_vector(state, name, fallback=None):
@@ -686,6 +713,23 @@ class SlungLoadController:
         if fallback is not None:
             return _as_vector(fallback, name)
         raise KeyError(name)
+
+    def _limit_link_force(self, force, previous, dt):
+        """Limit cable-direction lateral force magnitude and per-tick change."""
+        force = _as_vector(force, "link correction force")
+        limit = float(self.config.link_force_correction_limit_n)
+        magnitude = float(np.linalg.norm(force))
+        if magnitude > limit:
+            force = force * (limit / max(magnitude, 1.0e-12))
+        if previous is None:
+            return force.copy(), force.copy()
+        previous = _as_vector(previous, "previous link correction force")
+        maximum_step = float(self.config.link_force_correction_rate_limit_nps) * float(dt)
+        delta = force - previous
+        delta_norm = float(np.linalg.norm(delta))
+        if delta_norm > maximum_step:
+            force = previous + delta * (maximum_step / max(delta_norm, 1.0e-12))
+        return force.copy(), force.copy()
 
     def _allocation_matrix(self):
         rho = np.asarray(self.config.attachment_points_m, dtype=float)
@@ -861,6 +905,9 @@ class SlungLoadController:
         if self.previous_link_units is None:
             self.previous_link_units = link_units.copy()
         outputs = []
+        previous_perpendicular_forces = getattr(self, "previous_perpendicular_forces", None)
+        if previous_perpendicular_forces is None:
+            previous_perpendicular_forces = [None, None, None]
         # Establish link-direction correction continuously with TAUT_RAMP.
         # Full-strength correction at handoff can pull an aircraft inward when
         # its measured cable direction still differs from static allocation.
@@ -876,8 +923,16 @@ class SlungLoadController:
                 - r0 @ _hat(rho) @ omega0_dot_cmd
             )
             mu_id = mu_desired[:, index]
-            mu_i = q * float(q @ mu_id)
-            qid = _normalize(-mu_id, self.previous_link_units[:, index])
+            signed_tension = -float(q @ mu_id)
+            allocated_qid = _normalize(-mu_id, self.previous_link_units[:, index])
+            if signed_tension <= 0.0:
+                # A cable can pull but cannot push. Hold its measured direction
+                # when the unconstrained wrench allocation asks for compression.
+                qid = q.copy()
+            else:
+                qid = allocated_qid
+            desired_tension = max(signed_tension, 0.0)
+            mu_i = -desired_tension * q
             eq = np.cross(qid, q)
             self.link_integrals[:, index] = np.clip(
                 self.link_integrals[:, index] + dt * eq,
@@ -896,24 +951,51 @@ class SlungLoadController:
                 * float(omega_link @ omega_link) * q
                 + vehicle.get("mass", 0.043) * q * float(q @ ai)
             )
-            u_perp = (
+            raw_link_force = (
                 vehicle.get("mass", 0.043) * self.config.link_lengths_m[index]
                 * np.cross(q, correction)
-                - vehicle.get("mass", 0.043) * q_hat_sq @ ai
             )
+            link_force, _ = self._limit_link_force(
+                raw_link_force, previous_perpendicular_forces[index], dt
+            )
+            kinematic_force = -vehicle.get("mass", 0.043) * q_hat_sq @ ai
+            u_perp = link_force + kinematic_force
             total_force = u_parallel + u_perp
             outputs.append({
                 "force": total_force,
                 "force_dot": np.zeros(3),
+                "raw_link_force": raw_link_force.copy(),
+                "link_force": link_force.copy(),
+                "kinematic_perpendicular_force": kinematic_force.copy(),
+                "perpendicular_force": u_perp.copy(),
                 "payload_position_error": ep.copy(),
                 "payload_velocity_error": ev.copy(),
                 "payload_attitude_error": e_r.copy(),
                 "link_direction": q.copy(),
                 "desired_link_direction": qid.copy(),
+                "raw_desired_link_direction": allocated_qid.copy(),
                 "link_direction_error": eq.copy(),
-                "desired_tension": float(np.linalg.norm(mu_i)),
+                "desired_tension": desired_tension,
+                "desired_tension_signed": signed_tension,
                 "desired_tension_vector": mu_id.copy(),
             })
+        vehicle_forces = np.asarray([output["force"] for output in outputs], dtype=float)
+        self.previous_perpendicular_forces = [
+            output["perpendicular_force"].copy() for output in outputs
+        ]
+        if self.previous_vehicle_forces is None:
+            vehicle_force_dots = np.zeros_like(vehicle_forces)
+        else:
+            vehicle_force_dots = (vehicle_forces - self.previous_vehicle_forces) / dt
+            vehicle_force_dots = np.clip(
+                vehicle_force_dots,
+                -float(self.config.force_dot_limit_nps),
+                float(self.config.force_dot_limit_nps),
+            )
+        # ROS Noetic uses Python 3.8; these arrays both come from the same outputs.
+        for output, force_dot in zip(outputs, vehicle_force_dots):
+            output["force_dot"] = force_dot.copy()
+        self.previous_vehicle_forces = vehicle_forces.copy()
         self.previous_link_units = link_units.copy()
         return {
             "vehicles": outputs,
