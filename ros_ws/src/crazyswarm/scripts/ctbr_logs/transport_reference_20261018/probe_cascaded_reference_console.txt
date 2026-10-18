@@ -1,1 +1,0 @@
-{"success": false, "failure": "hover_position_error", "observed_post_handoff_s": 60.014285714230624, "minimum_vehicle_distance_m": 0.41259979739140695, "maximum_body_rate_rps": 0.025803241713376765}

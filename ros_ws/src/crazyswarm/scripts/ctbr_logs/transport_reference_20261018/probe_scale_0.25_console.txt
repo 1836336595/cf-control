@@ -1,1 +1,0 @@
-{"success": false, "failure": "emergency_landing", "observed_post_handoff_s": 11.785714285708647, "minimum_vehicle_distance_m": 0.29907664121517885, "maximum_body_rate_rps": 3.082838483792458}
