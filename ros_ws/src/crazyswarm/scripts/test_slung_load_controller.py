@@ -277,6 +277,58 @@ def test_link_force_correction_is_bounded_in_magnitude_and_rate():
     assert np.linalg.norm(second) <= 0.10 + 1e-12
 
 
+def _link_force_compute_case(link_kq=55.0):
+    config = SlungLoadConfig(
+        payload_mass_kg=0.054, gravity_mps2=9.80665,
+        payload_size_m=np.array([0.08, 0.06, 0.05]),
+        attachment_points_m=attachment_points_ros_z_up([0.08, 0.06, 0.05]),
+        link_length_m=0.65, position_gain=np.ones(3), velocity_gain=np.ones(3),
+        integral_gain=np.zeros(3), integral_limit=np.ones(3), c1=0.5,
+        force_norm_epsilon=1e-9, tension_pinv_tolerance=1e-9,
+        link_kq=link_kq, link_komega=20.0, link_integral_gain=0.0,
+        link_integral_limit=np.ones(3), link_force_correction_limit_n=0.4,
+        link_force_correction_rate_limit_nps=20.0,
+    )
+    payload = dict(valid=True, position=np.zeros(3), velocity=np.zeros(3),
+                   rotation=np.eye(3), body_rate=np.zeros(3))
+    vehicles = [
+        dict(position=config.attachment_points_m[:, i] + [0., 0., 0.65],
+             velocity=np.zeros(3), mass=0.043)
+        for i in range(3)
+    ]
+    target = dict(position=np.zeros(3), velocity=np.zeros(3),
+                  acceleration=np.array([3., 0., 0.]), rotation=np.eye(3),
+                  body_rate=np.zeros(3), body_rate_dot=np.zeros(3),
+                  payload_attitude_gain=np.zeros(3), payload_rate_gain=np.zeros(3))
+    return SlungLoadController(config), payload, vehicles, target
+
+
+def test_constant_link_correction_is_not_amplified_by_short_control_ticks():
+    controller, payload, vehicles, target = _link_force_compute_case()
+    first = controller.compute(payload, vehicles, target, 1.0 / 70.0)
+    assert all(np.linalg.norm(v["kinematic_perpendicular_force"]) > 0.1
+               for v in first["vehicles"])
+    for dt in (0.004, 0.025, 0.0037, 1.0 / 70.0):
+        following = controller.compute(payload, vehicles, target, dt)
+        for initial, actual in zip(first["vehicles"], following["vehicles"]):
+            np.testing.assert_allclose(actual["raw_link_force"], initial["raw_link_force"])
+            np.testing.assert_allclose(actual["link_force"], initial["link_force"], atol=1e-12)
+            np.testing.assert_allclose(actual["force"], initial["force"], atol=1e-12)
+
+
+def test_kinematic_force_change_does_not_create_a_disabled_link_correction():
+    controller, payload, vehicles, target = _link_force_compute_case(link_kq=0.0)
+    controller.compute(payload, vehicles, target, 1.0 / 70.0)
+    for acceleration in ([3., 0., 0.], [-2., 1., 0.], [0., 0., 0.]):
+        target["acceleration"] = np.asarray(acceleration)
+        result = controller.compute(payload, vehicles, target, 0.004)
+        for vehicle, actual in zip(vehicles, result["vehicles"]):
+            np.testing.assert_allclose(actual["raw_link_force"], np.zeros(3), atol=1e-12)
+            np.testing.assert_allclose(actual["link_force"], np.zeros(3), atol=1e-12)
+            np.testing.assert_allclose(actual["perpendicular_force"],
+                                       vehicle["mass"] * target["acceleration"], atol=1e-12)
+
+
 def test_payload_velocity_filter_derives_acceleration_from_filtered_velocity():
     filter_state = SecondOrderVelocityFilter(cutoff_hz=5.0, max_dt=0.05)
     assert filter_state.update(np.zeros(3), 0.0)[2] is False
@@ -477,7 +529,7 @@ def test_real_payload_takeoff_hover_height_is_above_low_slack_stage():
     assert np.all(link_lengths > 0.0)
     assert payload["transport_link_gain_scale"] == 0.4
     assert payload["transport_link_steady_gain_scale"] == 0.4
-    assert payload["transport_position_hold_gain_scale"] == 0.5
+    assert payload["transport_position_hold_gain_scale"] == 1.5
     assert payload["yaw_channel_enabled"] is True
 
 

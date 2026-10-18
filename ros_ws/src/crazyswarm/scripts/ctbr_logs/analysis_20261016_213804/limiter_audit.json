@@ -1,0 +1,26 @@
+{
+  "caveat": "Approximate offline reconstruction from asynchronously logged R error, velocity and desired moment; assumes horizontal yaw-zero desired payload rotation. Flags are not recorded limiter telemetry.",
+  "metrics": {
+    "3": {
+      "first10s_estimated_rate_limit_active_count": 85,
+      "raw_correction_norm_max_n": 0.0722916633475957,
+      "kinematic_perpendicular_norm_max_n": 0.25016511839395017,
+      "wrong_previous_delta_norm_max_n": 0.40433229375717133,
+      "minimum_step_limit_n": 0.07434171973727643
+    },
+    "4": {
+      "first10s_estimated_rate_limit_active_count": 11,
+      "raw_correction_norm_max_n": 0.13316932797338352,
+      "kinematic_perpendicular_norm_max_n": 0.1881130602367097,
+      "wrong_previous_delta_norm_max_n": 0.27659897425945984,
+      "minimum_step_limit_n": 0.07434171973727643
+    },
+    "5": {
+      "first10s_estimated_rate_limit_active_count": 4,
+      "raw_correction_norm_max_n": 0.07791518359175956,
+      "kinematic_perpendicular_norm_max_n": 0.1495023156175972,
+      "wrong_previous_delta_norm_max_n": 0.1558241039865167,
+      "minimum_step_limit_n": 0.07434171973727643
+    }
+  }
+}

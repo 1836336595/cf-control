@@ -1,0 +1,9 @@
+ctbr_controller_cf3:
+  transport_attitude_gain: [9.0, 9.0, 4.5]
+  transport_rate_gain: [0.5, 0.5, 0.25]
+ctbr_controller_cf4:
+  transport_attitude_gain: [9.0, 9.0, 4.5]
+  transport_rate_gain: [0.5, 0.5, 0.25]
+ctbr_controller_cf5:
+  transport_attitude_gain: [9.0, 9.0, 4.5]
+  transport_rate_gain: [0.5, 0.5, 0.25]

@@ -1,0 +1,449 @@
+{
+  "source": "/home/csy/my_project/crazyswarm/ros_ws/src/crazyswarm/scripts/ctbr_logs/multi_ctbr_20261018_162455.csv",
+  "handoff_time_s": 52.25243880401831,
+  "fault_time_s": 61.247075845021755,
+  "nominal_lengths_m": [
+    0.689,
+    0.699,
+    0.664
+  ],
+  "effective_lengths_m": [
+    0.689,
+    0.699,
+    0.664
+  ],
+  "calibration_applied": false,
+  "logged_calibration_status_counts": [
+    {
+      "status": "",
+      "reason": "",
+      "rows": 71
+    },
+    {
+      "status": "collecting",
+      "reason": "",
+      "rows": 3347
+    },
+    {
+      "status": "collecting",
+      "reason": "phase_or_payload_not_ready",
+      "rows": 806
+    },
+    {
+      "status": "collecting",
+      "reason": "motion_or_spacing_not_ready",
+      "rows": 398
+    },
+    {
+      "status": "within_tolerance",
+      "reason": "no_positive_mismatch",
+      "rows": 610
+    }
+  ],
+  "stable_completed_window_rows": 610,
+  "first_within_tolerance_time_s": 23.262209601001814,
+  "maximum_logged_window_s": 3.0302071571350098,
+  "maximum_logged_sample_count": 211,
+  "prehandoff_geometric_windows": {
+    "takeup_last_10_s": {
+      "3": {
+        "measured_m": {
+          "count": 656,
+          "mean": 0.718038498648369,
+          "median": 0.7181825232894529,
+          "p05": 0.7167413381834951,
+          "p10": 0.7168551508392428,
+          "p90": 0.7190304921570863,
+          "p95": 0.7191402084545035,
+          "minimum": 0.7157496516216421,
+          "maximum": 0.7195461368934705,
+          "p90_minus_p10": 0.002175341317843471
+        },
+        "error_from_nominal_m": {
+          "count": 656,
+          "mean": 0.029038498648368927,
+          "median": 0.029182523289452922,
+          "p05": 0.027741338183495085,
+          "p10": 0.027855150839242837,
+          "p90": 0.030030492157086308,
+          "p95": 0.03014020845450366,
+          "minimum": 0.026749651621642112,
+          "maximum": 0.03054613689347052,
+          "p90_minus_p10": 0.002175341317843471
+        }
+      },
+      "4": {
+        "measured_m": {
+          "count": 656,
+          "mean": 0.7046436679970123,
+          "median": 0.7048093604917716,
+          "p05": 0.7018739122986577,
+          "p10": 0.7024114417006728,
+          "p90": 0.706603910226737,
+          "p95": 0.7068466808297265,
+          "minimum": 0.7008131986546283,
+          "maximum": 0.7080298637067118,
+          "p90_minus_p10": 0.0041924685260641414
+        },
+        "error_from_nominal_m": {
+          "count": 656,
+          "mean": 0.0056436679970122165,
+          "median": 0.0058093604917715536,
+          "p05": 0.0028739122986577437,
+          "p10": 0.003411441700672868,
+          "p90": 0.007603910226737065,
+          "p95": 0.007846680829726449,
+          "minimum": 0.0018131986546283674,
+          "maximum": 0.009029863706711883,
+          "p90_minus_p10": 0.004192468526064197
+        }
+      },
+      "5": {
+        "measured_m": {
+          "count": 656,
+          "mean": 0.6843013841652037,
+          "median": 0.6840278463953766,
+          "p05": 0.6833989036386052,
+          "p10": 0.6835019428884546,
+          "p90": 0.6853278923026039,
+          "p95": 0.685429582185479,
+          "minimum": 0.6827832268570672,
+          "maximum": 0.6860898735729556,
+          "p90_minus_p10": 0.0018259494141493748
+        },
+        "error_from_nominal_m": {
+          "count": 656,
+          "mean": 0.020301384165203697,
+          "median": 0.020027846395376525,
+          "p05": 0.01939890363860522,
+          "p10": 0.019501942888454582,
+          "p90": 0.0213278923026039,
+          "p95": 0.021429582185478968,
+          "minimum": 0.018783226857067126,
+          "maximum": 0.022089873572955554,
+          "p90_minus_p10": 0.0018259494141493193
+        }
+      }
+    },
+    "takeup_last_5_s": {
+      "3": {
+        "measured_m": {
+          "count": 324,
+          "mean": 0.7173082204628409,
+          "median": 0.7170780069495217,
+          "p05": 0.7163116249141368,
+          "p10": 0.7167374495973206,
+          "p90": 0.7182545238956577,
+          "p95": 0.7183787851369334,
+          "minimum": 0.7157496516216421,
+          "maximum": 0.718737137734543,
+          "p90_minus_p10": 0.00151707429833714
+        },
+        "error_from_nominal_m": {
+          "count": 324,
+          "mean": 0.028308220462840927,
+          "median": 0.02807800694952184,
+          "p05": 0.027311624914136856,
+          "p10": 0.027737449597320572,
+          "p90": 0.029254523895657702,
+          "p95": 0.029378785136933455,
+          "minimum": 0.026749651621642112,
+          "maximum": 0.029737137734543007,
+          "p90_minus_p10": 0.0015170742983371295
+        }
+      },
+      "4": {
+        "measured_m": {
+          "count": 324,
+          "mean": 0.7050255112660507,
+          "median": 0.7058987860674308,
+          "p05": 0.7019834746701117,
+          "p10": 0.7023326336331942,
+          "p90": 0.7068535434252176,
+          "p95": 0.7070196647745162,
+          "minimum": 0.7008131986546283,
+          "maximum": 0.7080298637067118,
+          "p90_minus_p10": 0.004520909792023353
+        },
+        "error_from_nominal_m": {
+          "count": 324,
+          "mean": 0.006025511266050802,
+          "median": 0.00689878606743094,
+          "p05": 0.0029834746701116856,
+          "p10": 0.0033326336331942156,
+          "p90": 0.007853543425217624,
+          "p95": 0.008019664774516233,
+          "minimum": 0.0018131986546283674,
+          "maximum": 0.009029863706711883,
+          "p90_minus_p10": 0.004520909792023409
+        }
+      },
+      "5": {
+        "measured_m": {
+          "count": 324,
+          "mean": 0.6848409211317332,
+          "median": 0.6850480544759758,
+          "p05": 0.6837352878256903,
+          "p10": 0.6838827379536373,
+          "p90": 0.6854309495705514,
+          "p95": 0.6854951878329587,
+          "minimum": 0.6830022816701186,
+          "maximum": 0.6860898735729556,
+          "p90_minus_p10": 0.001548211616914097
+        },
+        "error_from_nominal_m": {
+          "count": 324,
+          "mean": 0.020840921131733213,
+          "median": 0.021048054475975853,
+          "p05": 0.019735287825690256,
+          "p10": 0.01988273795363721,
+          "p90": 0.02143094957055134,
+          "p95": 0.021495187832958673,
+          "minimum": 0.019002281670118526,
+          "maximum": 0.022089873572955554,
+          "p90_minus_p10": 0.0015482116169141316
+        }
+      }
+    },
+    "stable_within_tolerance": {
+      "3": {
+        "measured_m": {
+          "count": 604,
+          "mean": 0.715023815649757,
+          "median": 0.7150795633474182,
+          "p05": 0.7134495838737174,
+          "p10": 0.7136897438677915,
+          "p90": 0.7162629156957295,
+          "p95": 0.7163782025922651,
+          "minimum": 0.7129582837650584,
+          "maximum": 0.7168893982345131,
+          "p90_minus_p10": 0.0025731718279380367
+        },
+        "error_from_nominal_m": {
+          "count": 604,
+          "mean": 0.02602381564975716,
+          "median": 0.026079563347418233,
+          "p05": 0.02444958387371743,
+          "p10": 0.024689743867791512,
+          "p90": 0.02726291569572963,
+          "p95": 0.027378202592265206,
+          "minimum": 0.023958283765058486,
+          "maximum": 0.027889398234513196,
+          "p90_minus_p10": 0.0025731718279381165
+        }
+      },
+      "4": {
+        "measured_m": {
+          "count": 604,
+          "mean": 0.7024484563685643,
+          "median": 0.7024582511808342,
+          "p05": 0.7014935735674811,
+          "p10": 0.7017792943555007,
+          "p90": 0.7031563544881696,
+          "p95": 0.7033358535296462,
+          "minimum": 0.7009618313679906,
+          "maximum": 0.7035761727364287,
+          "p90_minus_p10": 0.001377060132668917
+        },
+        "error_from_nominal_m": {
+          "count": 604,
+          "mean": 0.0034484563685644033,
+          "median": 0.0034582511808342598,
+          "p05": 0.0024935735674811443,
+          "p10": 0.0027792943555007056,
+          "p90": 0.0041563544881696,
+          "p95": 0.004335853529646316,
+          "minimum": 0.001961831367990663,
+          "maximum": 0.004576172736428741,
+          "p90_minus_p10": 0.0013770601326688948
+        }
+      },
+      "5": {
+        "measured_m": {
+          "count": 604,
+          "mean": 0.6830984266803504,
+          "median": 0.6831344732485527,
+          "p05": 0.6819544876713768,
+          "p10": 0.6822372408496177,
+          "p90": 0.6838486601749435,
+          "p95": 0.6839492987631502,
+          "minimum": 0.681332819991427,
+          "maximum": 0.6842873084008618,
+          "p90_minus_p10": 0.0016114193253258247
+        },
+        "error_from_nominal_m": {
+          "count": 604,
+          "mean": 0.0190984266803503,
+          "median": 0.019134473248552608,
+          "p05": 0.01795448767137677,
+          "p10": 0.018237240849617597,
+          "p90": 0.01984866017494342,
+          "p95": 0.019949298763150214,
+          "minimum": 0.017332819991426995,
+          "maximum": 0.020287308400861792,
+          "p90_minus_p10": 0.0016114193253258247
+        }
+      }
+    }
+  },
+  "cooperative_reconstructed_geometry": {
+    "3": {
+      "reconstructed_m": {
+        "count": 488,
+        "mean": 0.7180617970941762,
+        "median": 0.7179635939065219,
+        "p05": 0.7164971682329554,
+        "p10": 0.7169485184095713,
+        "p90": 0.7193834419972925,
+        "p95": 0.7197444458193997,
+        "minimum": 0.7156451451697392,
+        "maximum": 0.7213293255440059,
+        "p90_minus_p10": 0.0024349235877212383
+      },
+      "error_from_nominal_m": {
+        "count": 488,
+        "mean": 0.029061797094176084,
+        "median": 0.02896359390652198,
+        "p05": 0.02749716823295542,
+        "p10": 0.027948518409571344,
+        "p90": 0.030383441997292548,
+        "p95": 0.030744445819399762,
+        "minimum": 0.02664514516973926,
+        "maximum": 0.032329325544005916,
+        "p90_minus_p10": 0.0024349235877212036
+      },
+      "direction_residual": {
+        "count": 488,
+        "mean": 0.00039179639459192064,
+        "median": 0.0001913249351059048,
+        "p05": 0.0,
+        "p10": 0.0,
+        "p90": 0.0010901356182222532,
+        "p95": 0.0016962332594105227,
+        "minimum": 0.0,
+        "maximum": 0.006353127376384623,
+        "p90_minus_p10": 0.0010901356182222532
+      }
+    },
+    "4": {
+      "reconstructed_m": {
+        "count": 488,
+        "mean": 0.7034965821277359,
+        "median": 0.7034154702236646,
+        "p05": 0.7015877818424263,
+        "p10": 0.7019953058516859,
+        "p90": 0.7052411505752171,
+        "p95": 0.7054695884150702,
+        "minimum": 0.7010334318434831,
+        "maximum": 0.7076058487278055,
+        "p90_minus_p10": 0.003245844723531177
+      },
+      "error_from_nominal_m": {
+        "count": 488,
+        "mean": 0.004496582127735947,
+        "median": 0.004415470223664675,
+        "p05": 0.0025877818424263786,
+        "p10": 0.002995305851685992,
+        "p90": 0.006241150575217125,
+        "p95": 0.006469588415070248,
+        "minimum": 0.0020334318434831467,
+        "maximum": 0.008605848727805565,
+        "p90_minus_p10": 0.003245844723531133
+      },
+      "direction_residual": {
+        "count": 488,
+        "mean": 0.0007359930381920424,
+        "median": 0.00044251759610204714,
+        "p05": 0.0,
+        "p10": 0.0,
+        "p90": 0.001976542222575958,
+        "p95": 0.002717565964805842,
+        "minimum": 0.0,
+        "maximum": 0.00510909922764597,
+        "p90_minus_p10": 0.001976542222575958
+      }
+    },
+    "5": {
+      "reconstructed_m": {
+        "count": 488,
+        "mean": 0.6839457812295838,
+        "median": 0.6840987419938234,
+        "p05": 0.6816686123758156,
+        "p10": 0.682508376920446,
+        "p90": 0.6851711694572321,
+        "p95": 0.6854414053334662,
+        "minimum": 0.6779627610424592,
+        "maximum": 0.6865535580923628,
+        "p90_minus_p10": 0.0026627925367861405
+      },
+      "error_from_nominal_m": {
+        "count": 488,
+        "mean": 0.019945781229583803,
+        "median": 0.020098741993823388,
+        "p05": 0.017668612375815556,
+        "p10": 0.018508376920445935,
+        "p90": 0.021171169457232065,
+        "p95": 0.02144140533346619,
+        "minimum": 0.013962761042459193,
+        "maximum": 0.022553558092362813,
+        "p90_minus_p10": 0.00266279253678613
+      },
+      "direction_residual": {
+        "count": 488,
+        "mean": 0.000817978727374854,
+        "median": 0.0005113053541783955,
+        "p05": 0.0,
+        "p10": 0.0,
+        "p90": 0.0019408350816873155,
+        "p95": 0.002599032790233874,
+        "minimum": 0.0,
+        "maximum": 0.007148499039088634,
+        "p90_minus_p10": 0.0019408350816873155
+      }
+    }
+  },
+  "cooperative_payload_orientation_principal_rpy_deg": {
+    "at_handoff": [
+      -2.5607847604146885,
+      24.763445021715956,
+      -9.146327484080887
+    ],
+    "minimum": [
+      -16.91732243405452,
+      20.098181811982307,
+      -46.89224646274346
+    ],
+    "maximum": [
+      0.45678357161034233,
+      29.54791906591848,
+      16.18425406047084
+    ]
+  },
+  "payload_center_z_m": {
+    "count": 488,
+    "mean": 0.7014694601680467,
+    "median": 0.7064591948981214,
+    "p05": 0.6644336225940797,
+    "p10": 0.6761968454926912,
+    "p90": 0.7152510067435291,
+    "p95": 0.715967619297469,
+    "minimum": 0.6552660395005726,
+    "maximum": 0.7167086902567456,
+    "p90_minus_p10": 0.03905416125083794
+  },
+  "metadata_caveats": [
+    "link_length_measured_m is cached during cooperative transport. It remains constant and is not evidence of constant physical cable geometry.",
+    "Prehandoff samples deduplicate consecutive identical three-cable cached geometry vectors. Raw payload sample timestamps are not logged, so exact independent sensor-frame counts cannot be recovered.",
+    "Cooperative geometry uses the principal rotation reconstructed from payload attitude error assuming desired payload rotation identity; asynchronous per-vehicle snapshots produce residual direction error.",
+    "Geometric endpoint distances include attachment, rigid-body marker/frame and synchronization errors. They do not separately identify cable material length, stretch or tension.",
+    "Current takeup mismatch trigger is 0.030 m and maximum permitted calibration increase is also 0.030 m. The strict greater-than trigger and same upper bound leave no acceptable positive correction interval.",
+    "Longer actual cable geometry can produce tilt against nominal position references, but this flight does not isolate it from force allocation, COM/attachment offsets, timing jitter or cable compliance."
+  ],
+  "simulation_model": {
+    "physical_length_setting": "slung_payload.simulation.physical_link_lengths_m",
+    "controller_lengths_setting": "slung_payload.link_lengths_m",
+    "independent_physical_lengths_supported": true,
+    "description": "MuJoCo spatial tendons limited to range [0,length] with damping=0, attached to aircraft center and load sites. Unilateral soft solver constraints permit numerical constraint extension; no measured elastic cable stiffness/damping is identified. Do not treat finite overlength as modeled real stretch.",
+    "source": "simulate_uav/udaan/udaan/models/mujoco/crazyswarm_slung_scene.py:144"
+  }
+}

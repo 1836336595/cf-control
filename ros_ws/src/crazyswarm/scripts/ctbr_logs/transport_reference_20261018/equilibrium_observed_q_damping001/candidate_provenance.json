@@ -1,0 +1,8 @@
+{
+  "source": "input_parameters.yaml",
+  "source_sha256": "ef59a2659f282bdaaf1a4b1c3593895919c77b94df36fd27932511bebcad7761",
+  "method": "Freeze all original parameter roots; make originally implicit transport_force_mode=coupled and false reference switches explicit. simulation_runtime is recorded output, not an input parameter root.",
+  "original_overlay_archive": "candidate_overlay_original.yaml",
+  "summary_sha256": "0e9e91860666b3b479ece960ce38bd4051f9a2629af90975a75a04f469f81354",
+  "outputs_rerun_or_overwritten": false
+}

@@ -1,0 +1,434 @@
+{
+  "source": "/home/csy/my_project/crazyswarm/ros_ws/src/crazyswarm/scripts/ctbr_logs/multi_ctbr_20261018_211815.csv",
+  "assumptions": {
+    "vehicle_order": [
+      3,
+      4,
+      5
+    ],
+    "payload_anchors_body_m": [
+      [
+        0.04,
+        0.0,
+        0.025
+      ],
+      [
+        -0.04,
+        0.03,
+        0.025
+      ],
+      [
+        -0.04,
+        -0.03,
+        0.025
+      ]
+    ],
+    "vehicle_masses_kg": [
+      0.0434,
+      0.044,
+      0.0424
+    ],
+    "independent_position_acceleration_gains": [
+      [
+        3.0,
+        3.0,
+        4.0
+      ],
+      [
+        4.0,
+        4.0,
+        4.0
+      ],
+      [
+        4.0,
+        4.0,
+        4.0
+      ]
+    ],
+    "hypothetical_level_target_rotation": [
+      [
+        1.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        1.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "payload_geometric_center_equals_com": true,
+    "aircraft_mocap_origin_equals_cable_endpoint": true
+  },
+  "caveats": [
+    "R is inverted from the controller's own q and logged positions; it is not an independent measurement of true physical attitude.",
+    "Timestamp-asynchronous vehicle/payload snapshots can make the geometry inversion inconsistent; inspect fit residual.",
+    "The finite anchor displacement preserves world q and cable length only if load center is fixed and both cable endpoints follow the ideal point model.",
+    "Projected hold moment is a quasistatic sensitivity estimate, not a replay, actual tension measurement or prediction of closed-loop motion.",
+    "Position-only incremental feedback excludes existing errors, velocity feedback, actuator dynamics, blend-history dynamics and changes of q along an actual transition.",
+    "The first sample has almost zero transport blend: full-blend moment describes potential stiffness, not a force actually commanded then.",
+    "Moment lever arms assume geometric-center anchors and COM=geometric center; real COM offset, hang hardware, aircraft endpoint offset or NOKOV frame bias can change these values.",
+    "No claim is made that this mechanism alone explains the growing 2Hz instability."
+  ],
+  "samples": [
+    {
+      "control_time_s": 38.88680940895574,
+      "flight_phase": "tension_ramp",
+      "transport_blend": 0.0,
+      "position_hold_gain_scale": 2.0,
+      "q_geometry_fit_residual_norm": 5.721958498152797e-17,
+      "q_geometry_inferred_rpy_deg": [
+        6.036338417045638,
+        20.409250984978957,
+        -10.426774893557216
+      ],
+      "q_geometry_inferred_rotation": [
+        [
+          0.9217492935457638,
+          0.21604121669925708,
+          0.32203172597585755
+        ],
+        [
+          -0.16961794290249854,
+          0.9713972068446334,
+          -0.16618429522662262
+        ],
+        [
+          -0.3487233764653725,
+          0.09855789781417398,
+          0.93202915592005
+        ]
+      ],
+      "logged_link_direction": [
+        [
+          -0.4269833016354237,
+          0.11444634837609666,
+          -0.8969879004021681
+        ],
+        [
+          0.2221987767571408,
+          -0.29776167675452203,
+          -0.9284210722856121
+        ],
+        [
+          0.2442430182347553,
+          0.2196489303918391,
+          -0.9445102939731774
+        ]
+      ],
+      "fixed_q_leveling_aircraft_displacement_m": [
+        [
+          -0.004920764891226996,
+          0.010939325096765507,
+          0.015648206160613652
+        ],
+        [
+          -0.017662057908543596,
+          -0.0017720265407733735,
+          -0.015206400891041368
+        ],
+        [
+          -0.004699584906588172,
+          -0.0034881941300953755,
+          -0.009292927022190929
+        ]
+      ],
+      "full_blend_incremental_position_hold_force_n": [
+        [
+          0.0012813671776755098,
+          -0.002848600255197738,
+          -0.0054330571789650605
+        ],
+        [
+          0.006217044383807346,
+          0.0006237533423522274,
+          0.005352653113646561
+        ],
+        [
+          0.001594099200314708,
+          0.0011831954489283513,
+          0.003152160845927163
+        ]
+      ],
+      "full_blend_quasistatic_projected_load_force_n": [
+        [
+          -0.0017080409200833585,
+          0.00045781426447303306,
+          -0.0035881778815198815
+        ],
+        [
+          -0.0008385395491841646,
+          0.001123700795450188,
+          0.003503699699743899
+        ],
+        [
+          -0.0005686009588287994,
+          -0.0005113455988595704,
+          0.0021988323869328876
+        ]
+      ],
+      "full_blend_quasistatic_restoring_moment_world_nm": [
+        1.239178285773908e-05,
+        0.0002937488630254587,
+        1.916520425957574e-06
+      ],
+      "at_sample_blend_quasistatic_restoring_moment_world_nm": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "logged_requested_moment_body_nm": [
+        -7.130394477492949e-05,
+        -0.00023341756269760198,
+        1.2789114521325988e-05
+      ],
+      "logged_requested_moment_world_nm": [
+        -0.00011203367434447698,
+        -0.00021677208998267488,
+        1.3780035697106378e-05
+      ],
+      "time_since_handoff_s": 0.0
+    },
+    {
+      "control_time_s": 43.90098150097765,
+      "flight_phase": "height_correction",
+      "transport_blend": 1.0,
+      "position_hold_gain_scale": 1.9999999753350786,
+      "q_geometry_fit_residual_norm": 0.0,
+      "q_geometry_inferred_rpy_deg": [
+        9.734462996832907,
+        23.05913751770292,
+        -8.794498945355452
+      ],
+      "q_geometry_inferred_rotation": [
+        [
+          0.9092835040329017,
+          0.2161373079022837,
+          0.3556517586437628
+        ],
+        [
+          -0.14067513096687773,
+          0.963888885068057,
+          -0.22611661763282562
+        ],
+        [
+          -0.3916810141187593,
+          0.15557275267543177,
+          0.9068534070090319
+        ]
+      ],
+      "logged_link_direction": [
+        [
+          -0.4645509248115883,
+          0.07787506560263106,
+          -0.88211558903246
+        ],
+        [
+          0.20128024001312725,
+          -0.21200975380367873,
+          -0.9563148693146842
+        ],
+        [
+          0.28866355902250956,
+          0.19999864184540914,
+          -0.9363086526100515
+        ]
+      ],
+      "fixed_q_leveling_aircraft_displacement_m": [
+        [
+          -0.005262634127410133,
+          0.01127992067949575,
+          0.017995905389524572
+        ],
+        [
+          -0.019004073041846516,
+          0.0011092436501038173,
+          -0.018005758320239124
+        ],
+        [
+          -0.006035834567709494,
+          -0.0010574232458127539,
+          -0.008671393159713214
+        ]
+      ],
+      "full_blend_incremental_position_hold_force_n": [
+        [
+          0.0013703899098773187,
+          -0.002937291308716663,
+          -0.006248178274187518
+        ],
+        [
+          0.0066894336282327955,
+          -0.000390453760021288,
+          0.0063380268505607035
+        ],
+        [
+          0.0020473550601181343,
+          0.00035867796055630416,
+          0.0029413365235008045
+        ]
+      ],
+      "full_blend_quasistatic_projected_load_force_n": [
+        [
+          -0.0021584233603969584,
+          0.0003618276313998021,
+          -0.004098536440779226
+        ],
+        [
+          -0.0009323136689169856,
+          0.000982011902420245,
+          0.004429572542205299
+        ],
+        [
+          -0.0006036725560299663,
+          -0.00041825054653304983,
+          0.0019580713252066854
+        ]
+      ],
+      "full_blend_quasistatic_restoring_moment_world_nm": [
+        5.100531182778348e-05,
+        0.00032708697269405066,
+        1.7818844071148582e-06
+      ],
+      "at_sample_blend_quasistatic_restoring_moment_world_nm": [
+        5.100531182778348e-05,
+        0.00032708697269405066,
+        1.7818844071148582e-06
+      ],
+      "logged_requested_moment_body_nm": [
+        -3.214203716327277e-05,
+        -0.00028801481607793587,
+        5.39036800727145e-06
+      ],
+      "logged_requested_moment_world_nm": [
+        -8.955987730010968e-05,
+        -0.0002743115464465579,
+        -2.7329558444172556e-05
+      ],
+      "time_since_handoff_s": 5.014172092021909
+    },
+    {
+      "control_time_s": 48.55823610298103,
+      "flight_phase": "height_correction",
+      "transport_blend": 1.0,
+      "position_hold_gain_scale": 1.5513558101741838,
+      "q_geometry_fit_residual_norm": 4.424055047107267e-16,
+      "q_geometry_inferred_rpy_deg": [
+        -1.675033962145334,
+        26.02419518627489,
+        -28.455094994276273
+      ],
+      "q_geometry_inferred_rotation": [
+        [
+          0.7900486423197319,
+          0.46499064030553294,
+          0.39950825673194684
+        ],
+        [
+          -0.4281600227008189,
+          0.8849258450568889,
+          -0.18326277230028376
+        ],
+        [
+          -0.43875065553179854,
+          -0.026266959827925554,
+          0.8982248655497217
+        ]
+      ],
+      "logged_link_direction": [
+        [
+          -0.4082356582626135,
+          0.04866973366521636,
+          -0.9115782491634208
+        ],
+        [
+          0.19145872596709715,
+          -0.1367598425432314,
+          -0.9719260783200576
+        ],
+        [
+          0.21344331270301325,
+          0.14639174588171203,
+          -0.9659251570386123
+        ]
+      ],
+      "fixed_q_leveling_aircraft_displacement_m": [
+        [
+          -0.0015896521110879483,
+          0.02170797021553985,
+          0.0200944045825289
+        ],
+        [
+          -0.032335479934675386,
+          -0.009092606952232324,
+          -0.014217639065177222
+        ],
+        [
+          -0.004436041516343407,
+          -0.015997056248818996,
+          -0.01579365665485275
+        ]
+      ],
+      "full_blend_incremental_position_hold_force_n": [
+        [
+          0.0003210883082376913,
+          -0.004384717500869757,
+          -0.005411731977870431
+        ],
+        [
+          0.008828834902171573,
+          0.0024826328779957393,
+          0.003881964586847095
+        ],
+        [
+          0.0011671666411818297,
+          0.004208984596276144,
+          0.004155468140212176
+        ]
+      ],
+      "full_blend_quasistatic_projected_load_force_n": [
+        [
+          -0.0018732850212318179,
+          0.00022333248264104757,
+          -0.004182990498933958
+        ],
+        [
+          -0.000463741679660581,
+          0.0003312528001571152,
+          0.002354150377787029
+        ],
+        [
+          -0.000672044775174039,
+          -0.00046092710379406197,
+          0.0030412991008070983
+        ]
+      ],
+      "full_blend_quasistatic_restoring_moment_world_nm": [
+        -2.29559161657046e-05,
+        0.00030791081219946247,
+        7.871178585716036e-06
+      ],
+      "at_sample_blend_quasistatic_restoring_moment_world_nm": [
+        -2.29559161657046e-05,
+        0.00030791081219946247,
+        7.871178585716036e-06
+      ],
+      "logged_requested_moment_body_nm": [
+        -0.0003886695570503061,
+        -0.00010114056825592465,
+        0.0005762451101900333
+      ],
+      "logged_requested_moment_world_nm": [
+        -0.000123882594030465,
+        -2.869341288153978e-05,
+        0.0006907833648085547
+      ],
+      "time_since_handoff_s": 9.671426694025286
+    }
+  ]
+}

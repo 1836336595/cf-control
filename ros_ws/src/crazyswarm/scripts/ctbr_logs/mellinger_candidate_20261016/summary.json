@@ -1,0 +1,35 @@
+{
+  "success": false,
+  "failure": "emergency_landing",
+  "control_rate_hz": 70.0,
+  "physics_timestep_s": 0.002,
+  "pose_sample_rate_hz": 100.0,
+  "pose_delay_s": 0.01,
+  "command_delay_s": 0.005,
+  "rate_loop_bandwidth": [
+    35.0,
+    35.0,
+    20.0
+  ],
+  "initial_tilt_deg": 0.0,
+  "handoff_time_s": null,
+  "final_time_s": 13.899999999999746,
+  "phases": [
+    "takeup",
+    "emergency_landing"
+  ],
+  "minimum_clearance_m": null,
+  "maximum_prelift_xy_error_m": 0.29561714958169333,
+  "maximum_body_rate_rps": 0.0,
+  "maximum_tilt_deg": 0.0,
+  "minimum_vehicle_distance_m": 0.2973065713679093,
+  "mocap_rate_alpha": 0.2,
+  "target_payload_height_m": 0.6,
+  "post_handoff_s": 60.0,
+  "payload_safety_reason": "distance",
+  "rate_saturation_fraction": 0.0,
+  "final_payload_target_m": null,
+  "final_payload_position_error_m": null,
+  "final_payload_height_m": 0.024998363767633106,
+  "controller_csv": "ctbr_logs/mellinger_candidate_20261016/multi_ctbr_20261016_000300.csv"
+}

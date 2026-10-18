@@ -1,0 +1,11 @@
+{
+  "name": "bw1_configured_damping_40g",
+  "returncode": 0,
+  "wall_s": 45.346634742978495,
+  "success": true,
+  "failure": null,
+  "observed_post_handoff_s": 60.00263548095245,
+  "maximum_body_rate_rps": 0.007417364560314595,
+  "minimum_vehicle_distance_m": 0.3933230102881555,
+  "final_payload_position_error_m": 1.5657577046531268e-05
+}

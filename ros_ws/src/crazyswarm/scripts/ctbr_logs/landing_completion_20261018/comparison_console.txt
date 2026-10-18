@@ -1,0 +1,90 @@
+{
+  "baseline_gain110": {
+    "success": false,
+    "failure": "emergency_landing",
+    "final_vehicle_z_m": [
+      0.9933218988982225,
+      0.9636575896990411,
+      0.9664815842027266
+    ],
+    "final_time_s": 46.214285714285715,
+    "all_vehicles_zero": false
+  },
+  "baseline_nominal": {
+    "success": true,
+    "failure": null,
+    "final_vehicle_z_m": [
+      0.00699825283603483,
+      0.006998252836101624,
+      0.006998252835944574
+    ],
+    "final_time_s": 50.01428571428571,
+    "all_vehicles_zero": true
+  },
+  "baseline_release_gain105": {
+    "success": false,
+    "failure": "validation_landing_incomplete",
+    "final_vehicle_z_m": [
+      0.1281513959152445,
+      0.1262034429396794,
+      0.13129639373917407
+    ],
+    "final_time_s": 89.99999999992335,
+    "all_vehicles_zero": false
+  },
+  "baseline_release_gain1075": {
+    "success": false,
+    "failure": "validation_landing_incomplete",
+    "final_vehicle_z_m": [
+      0.18451495979785631,
+      0.18274157845176425,
+      0.18737550428175515
+    ],
+    "final_time_s": 89.99999999992335,
+    "all_vehicles_zero": false
+  },
+  "baseline_release_gain110": {
+    "success": false,
+    "failure": "validation_landing_incomplete",
+    "final_vehicle_z_m": [
+      0.2612584838877337,
+      0.258774958628524,
+      0.2630297173858961
+    ],
+    "final_time_s": 89.99999999992335,
+    "all_vehicles_zero": false
+  },
+  "current_nominal": {
+    "success": true,
+    "failure": null,
+    "final_vehicle_z_m": [
+      0.006998252835969322,
+      0.006998252835975574,
+      0.00699825283596323
+    ],
+    "final_time_s": 49.99999999998672,
+    "all_vehicles_zero": true
+  },
+  "current_release_gain1075": {
+    "success": true,
+    "failure": null,
+    "final_vehicle_z_m": [
+      0.00699825283585595,
+      0.00699825283604905,
+      0.006998252835851025
+    ],
+    "final_time_s": 55.27142857142857,
+    "all_vehicles_zero": true
+  },
+  "current_release_gain110": {
+    "success": true,
+    "failure": null,
+    "final_vehicle_z_m": [
+      0.006998252836010087,
+      0.006998252835831233,
+      0.006998252835900968
+    ],
+    "final_time_s": 57.81428571428572,
+    "all_vehicles_zero": true
+  }
+}

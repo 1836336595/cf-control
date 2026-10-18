@@ -1,0 +1,11 @@
+{
+  "name": "bw2_configured_damping_27g",
+  "returncode": 0,
+  "wall_s": 48.54904794500908,
+  "success": true,
+  "failure": null,
+  "observed_post_handoff_s": 60.004194527922664,
+  "maximum_body_rate_rps": 0.02074116251086581,
+  "minimum_vehicle_distance_m": 0.4430535733807991,
+  "final_payload_position_error_m": 8.783461746592287e-06
+}

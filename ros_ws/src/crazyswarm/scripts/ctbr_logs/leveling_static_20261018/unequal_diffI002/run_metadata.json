@@ -1,0 +1,85 @@
+{
+  "command": [
+    "ctbr_logs/leveling_static_20261018/run_probe.py",
+    "--case",
+    "unequal_diffI002",
+    "--efficiencies",
+    "1",
+    "1.05",
+    "1.10",
+    "--hold-integral-ki",
+    ".02"
+  ],
+  "actual_motor_thrust_efficiency": [
+    1.0,
+    1.05,
+    1.1
+  ],
+  "onset": "from_start",
+  "source_snapshot": "/home/csy/my_project/crazyswarm/ros_ws/src/crazyswarm/scripts/ctbr_logs/leveling_static_20261018/source_snapshot",
+  "config_snapshot": "/home/csy/my_project/crazyswarm/ros_ws/src/crazyswarm/scripts/ctbr_logs/leveling_static_20261018/config_snapshot",
+  "baseline_candidate": "/home/csy/my_project/crazyswarm/ros_ws/src/crazyswarm/scripts/ctbr_logs/transport_reference_20261018/cascade_observed_q_damping000_timing_noise/candidate.yaml",
+  "physical_state_or_completion_forcing": false,
+  "physical_disturbance": "Native per-vehicle efficiency multiplies four rotor lift forces and resulting roll/pitch moments; Graefe reactive yaw torque is unchanged",
+  "frame": "ROS world z-up; payload R = Rz(yaw) Ry(pitch) Rx(roll); truth body-center positions",
+  "cable_lengths_m": [
+    0.85,
+    0.85,
+    0.85
+  ],
+  "payload_mass_kg": 0.023,
+  "differential_hold_integral": {
+    "ki_n_per_m_s": 0.02,
+    "force_norm_cap_n": 0.03,
+    "force_rate_norm_cap_nps": 0.002,
+    "projection": "Remove per-axis fleet mean; joint fleet scaling",
+    "injection": "desired_force_override plus b; desired_force_dot_override plus actual bdot",
+    "common_load_support_trim": "Unchanged production implementation",
+    "first_learning_elapsed_s": 17.014376629027538,
+    "learning_ticks": 3011,
+    "trace_ticks": 4202,
+    "final_bias_n": [
+      [
+        0.0211282938322379,
+        0.0014678700908957486,
+        0.019178168822988804
+      ],
+      [
+        -0.008448982086331006,
+        0.010634861744542201,
+        -0.0032493750021243004
+      ],
+      [
+        -0.012679311745906977,
+        -0.012102731835437955,
+        -0.01592879382086446
+      ]
+    ],
+    "maximum_bias_norm_n": 0.028572042318815577,
+    "maximum_bias_rate_norm_nps": 0.0016671968448890638,
+    "maximum_sum_bias_norm_n": 1.0530500229294491e-16,
+    "maximum_sum_bias_rate_norm_nps": 2.960942089212139e-16
+  },
+  "vehicle_masses_kg": [
+    0.0434,
+    0.044,
+    0.0424
+  ],
+  "payload_attachment_points_m": [
+    [
+      0.04,
+      -0.04,
+      -0.04
+    ],
+    [
+      0.0,
+      0.03,
+      -0.03
+    ],
+    [
+      0.025,
+      0.025,
+      0.025
+    ]
+  ]
+}

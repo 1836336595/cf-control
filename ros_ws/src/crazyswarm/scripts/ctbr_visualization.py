@@ -311,14 +311,12 @@ def load_multi_log(log_path, max_abs_position_m=10.0, vehicle_id=None):
 
 
 def load_payload_plot_data(log_path, max_abs_position_m=10.0):
-    """Read the deduplicated load state appended to a merged CTBR log."""
+    """Read load state/reference; optional attitude is returned in degrees."""
     with open(log_path, newline="") as log_file:
         rows = [row for row in csv.DictReader(log_file)
                 if row.get("mode") in ("control", "shadow")]
     required = (
         "payload_position_x", "payload_position_y", "payload_position_z",
-        "payload_velocity_x", "payload_velocity_y", "payload_velocity_z",
-        "payload_acceleration_x", "payload_acceleration_y", "payload_acceleration_z",
     )
     if not rows or not all(name in rows[0] for name in required):
         return None
@@ -335,12 +333,7 @@ def load_payload_plot_data(log_path, max_abs_position_m=10.0):
         time_value = value(row, "mission_time_s")
         if not np.isfinite(time_value):
             time_value = value(row, "control_time_s")
-        position = np.array([
-            value(row, "payload_position_x"),
-            value(row, "payload_position_y"),
-            value(row, "payload_position_z"),
-        ])
-        if not np.all(np.isfinite(position)):
+        if not np.isfinite(time_value):
             continue
         # Each task tick is logged once per vehicle. Keep one load sample per
         # timestamp so the merged log does not triple the load trajectory.
@@ -360,7 +353,17 @@ def load_payload_plot_data(log_path, max_abs_position_m=10.0):
 
     time_s = np.asarray([time_value for _, time_value in samples], dtype=float)
     position = matrix("payload_position")
+    if not np.any(np.all(np.isfinite(position), axis=0)):
+        return None
     target = matrix("payload_target")
+    rpy = np.rad2deg(np.asarray([
+        [value(row, "payload_" + axis + "_rad") for row, _ in samples]
+        for axis in ("roll", "pitch", "yaw")
+    ]))
+    desired_rpy = np.rad2deg(np.asarray([
+        [value(row, "payload_target_" + axis + "_rad") for row, _ in samples]
+        for axis in ("roll", "pitch", "yaw")
+    ]))
     velocity = matrix("payload_raw_velocity")
     velocity_filtered = matrix("payload_velocity")
     acceleration = matrix("payload_raw_acceleration")
@@ -368,18 +371,98 @@ def load_payload_plot_data(log_path, max_abs_position_m=10.0):
     plausible = np.all(np.isfinite(position), axis=0) & np.all(
         np.abs(position) <= float(max_abs_position_m), axis=0
     )
-    for values in (position, target, velocity, velocity_filtered,
+    if "payload_state_valid" in rows[0]:
+        state_valid = np.asarray([value(row, "payload_state_valid") for row, _ in samples])
+        plausible &= np.isfinite(state_valid) & (state_valid >= 0.5)
+    for values in (position, rpy, velocity, velocity_filtered,
                    acceleration, acceleration_filtered):
         values[:, ~plausible] = np.nan
+    # Keep the reference visible during measured-state gaps. Missing reference
+    # fields stay NaN rather than inventing a horizontal target for old logs.
+    target_valid = np.all(np.isfinite(target), axis=0) & np.all(
+        np.abs(target) <= float(max_abs_position_m), axis=0
+    )
+    target[:, ~target_valid] = np.nan
+    for values in (rpy, desired_rpy):
+        values[:, ~np.all(np.isfinite(values), axis=0)] = np.nan
     return {
+        "log_path": log_path,
         "time_s": time_s,
         "position": position,
         "target": target,
+        "rpy": rpy,
+        "desired_rpy": desired_rpy,
         "velocity": velocity,
         "velocity_filtered": velocity_filtered,
         "acceleration": acceleration,
         "acceleration_filtered": acceleration_filtered,
     }
+
+
+def create_payload_figure(pyplot):
+    """Create a companion figure so load pose stays readable beside the UAVs."""
+    figure, axes = pyplot.subplots(
+        2, 3, num="Crazyflie Payload Pose", figsize=(15, 8),
+        sharex=True, constrained_layout=True,
+    )
+    measured_lines, reference_lines, availability_texts = [], [], []
+    for index, (axis, name) in enumerate(zip(axes.flat, ("X", "Y", "Z", "Roll", "Pitch", "Yaw"))):
+        measured_lines.append(axis.plot([], [], color="#8a3ffc", label="Measured")[0])
+        reference_lines.append(axis.plot([], [], "--", color="#202020", label="Reference")[0])
+        axis.set(title="Load " + name, xlabel="Time (s)",
+                 ylabel="Position (m)" if index < 3 else "Attitude (deg)")
+        axis.grid(True)
+        axis.legend(loc="best", fontsize=9)
+        availability_texts.append(axis.text(
+            0.02, 0.97, "", transform=axis.transAxes, va="top", fontsize=8,
+            color="#666666",
+        ))
+    return {
+        "figure": figure, "axes": list(axes.flat),
+        "measured_lines": measured_lines, "reference_lines": reference_lines,
+        "availability_texts": availability_texts,
+    }
+
+
+def update_payload_figure(handles, data, title_prefix):
+    """Update actual/reference load XYZ and RPY, preserving unknown data gaps."""
+    time_s = [] if data is None else data["time_s"]
+    measured = np.empty((6, 0)) if data is None else np.vstack((data["position"], data["rpy"]))
+    reference = np.empty((6, 0)) if data is None else np.vstack((data["target"], data["desired_rpy"]))
+    for axis, line, target_line, text, values, target in zip(
+            handles["axes"], handles["measured_lines"], handles["reference_lines"],
+            handles["availability_texts"], measured, reference):
+        line.set_data(time_s, values)
+        target_line.set_data(time_s, target)
+        unavailable = []
+        if not np.any(np.isfinite(values)):
+            unavailable.append("Measured unavailable")
+        if not np.any(np.isfinite(target)):
+            unavailable.append("Reference unavailable")
+        text.set_text("\n".join(unavailable))
+        axis.relim()
+        axis.autoscale_view()
+    source = "" if data is None else ": " + os.path.basename(data["log_path"])
+    handles["figure"].suptitle("%s - Payload Pose%s" % (title_prefix, source), fontsize=14)
+    # FuncAnimation belongs to the UAV figure. The companion needs its own
+    # redraw request when the shared timer refreshes both figures.
+    handles["figure"].canvas.draw_idle()
+    return handles["measured_lines"] + handles["reference_lines"]
+
+
+def save_plot_figures(handles, payload_handles, output_path):
+    """Save the vehicle figure and an adjacent *_payload image when present."""
+    output_path = os.path.abspath(output_path)
+    stem, extension = os.path.splitext(output_path)
+    if not extension:
+        extension = "." + handles["figure"].canvas.get_default_filetype()
+        output_path += extension
+    handles["figure"].savefig(output_path, dpi=150)
+    print("已保存图像：%s" % output_path)
+    if payload_handles is not None:
+        payload_path = stem + "_payload" + extension
+        payload_handles["figure"].savefig(payload_path, dpi=150)
+        print("已保存负载位姿图像：%s" % payload_path)
 
 
 def create_figure(pyplot, vehicle_ids=None):
@@ -849,14 +932,18 @@ def plot(log_path, output_path, show, max_abs_position_m, vehicle_id=None):
     else:
         handles = create_multi_figure(pyplot, list(grouped))
         update_multi_figure(handles, grouped, "CTBR Flight Log", load_data=load_data)
+    payload_handles = None
+    if load_data is not None:
+        payload_handles = create_payload_figure(pyplot)
+        update_payload_figure(payload_handles, load_data, "CTBR Flight Log")
     if output_path:
-        output_path = os.path.abspath(output_path)
-        handles["figure"].savefig(output_path, dpi=150)
-        print("已保存图像：%s" % output_path)
+        save_plot_figures(handles, payload_handles, output_path)
     if show:
         pyplot.show()
     else:
         pyplot.close(handles["figure"])
+        if payload_handles is not None:
+            pyplot.close(payload_handles["figure"])
 
 
 def realtime_plot(log_path, output_path, interval_s, max_abs_position_m, log_directory,
@@ -894,10 +981,15 @@ def realtime_plot(log_path, output_path, interval_s, max_abs_position_m, log_dir
     else:
         handles = create_figure(pyplot)
         update_figure(handles, next(iter(grouped.values())), "CTBR Realtime", load_data=load_data)
+    payload_handles = None
+    if load_data is not None:
+        payload_handles = create_payload_figure(pyplot)
+        update_payload_figure(payload_handles, load_data, "CTBR Realtime")
 
     from matplotlib.animation import FuncAnimation
 
     def refresh(_frame):
+        nonlocal payload_handles
         try:
             # 未指定路径时跟踪最新文件，确保本次 launch 创建的日志会被接管。
             active_log_path = requested_log_path or latest_ctbr_log(log_directory)
@@ -909,13 +1001,20 @@ def realtime_plot(log_path, output_path, interval_s, max_abs_position_m, log_dir
             # 控制器刚创建文件或正在写入表头时，保留上一帧等待下一次刷新。
             return []
         if multi:
-            return update_multi_figure(
+            artists = update_multi_figure(
                 handles, latest_grouped, "CTBR Realtime", load_data=latest_load_data
             )
-        return update_figure(
-            handles, next(iter(latest_grouped.values())), "CTBR Realtime",
-            load_data=latest_load_data,
-        )
+        else:
+            artists = update_figure(
+                handles, next(iter(latest_grouped.values())), "CTBR Realtime",
+                load_data=latest_load_data,
+            )
+        # Payload telemetry may arrive after the UAVs have started logging.
+        if latest_load_data is not None and payload_handles is None:
+            payload_handles = create_payload_figure(pyplot)
+        if payload_handles is not None:
+            update_payload_figure(payload_handles, latest_load_data, "CTBR Realtime")
+        return artists
 
     animation = FuncAnimation(
         handles["figure"],
@@ -929,9 +1028,7 @@ def realtime_plot(log_path, output_path, interval_s, max_abs_position_m, log_dir
     print("实时绘图：跟踪最新 CTBR CSV（每 %.2f s 刷新）" % interval_s)
     pyplot.show()
     if output_path:
-        output_path = os.path.abspath(output_path)
-        handles["figure"].savefig(output_path, dpi=150)
-        print("已保存图像：%s" % output_path)
+        save_plot_figures(handles, payload_handles, output_path)
 
 
 def main():
@@ -939,7 +1036,7 @@ def main():
         description="实时绘制最新 CTBR CSV；使用 --static 进行一次性绘图"
     )
     parser.add_argument("log", nargs="?", help="CSV 路径；默认读取最新 CTBR CSV")
-    parser.add_argument("--output", help="保存 PNG、PDF 或其他 matplotlib 支持的格式")
+    parser.add_argument("--output", help="保存图像；有负载数据时另存同名 _payload 位姿图")
     parser.add_argument("--static", action="store_true", help="只绘制一次，不实时刷新")
     parser.add_argument("--no-show", action="store_true", help="保存静态图像但不打开窗口")
     parser.add_argument(

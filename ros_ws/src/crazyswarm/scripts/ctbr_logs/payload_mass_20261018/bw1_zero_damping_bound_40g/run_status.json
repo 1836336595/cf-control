@@ -1,0 +1,11 @@
+{
+  "name": "bw1_zero_damping_bound_40g",
+  "returncode": 1,
+  "wall_s": 20.853585859003942,
+  "success": false,
+  "failure": "emergency_landing",
+  "observed_post_handoff_s": 10.333768796001095,
+  "maximum_body_rate_rps": 2.704290161351034,
+  "minimum_vehicle_distance_m": 0.29980420789668266,
+  "final_payload_position_error_m": null
+}

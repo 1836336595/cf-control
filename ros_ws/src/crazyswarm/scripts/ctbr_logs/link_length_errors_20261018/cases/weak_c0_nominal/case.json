@@ -1,0 +1,45 @@
+{
+  "name": "weak_c0_nominal",
+  "family": "weak_damping_zero",
+  "physical_error_m": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "matched_controller_lengths": false,
+  "calibration_enabled": false,
+  "payload_rotational_damping": 0.0,
+  "pair": null,
+  "index": 18,
+  "worker": 0,
+  "controller_lengths_m": [
+    0.689,
+    0.699,
+    0.664
+  ],
+  "physical_lengths_m": [
+    0.689,
+    0.699,
+    0.664
+  ],
+  "initial_vehicle_positions_m": [
+    [
+      0.3896666666666666,
+      -1.8919038110434076e-17,
+      0.6436785512566732
+    ],
+    [
+      -0.3475365338796904,
+      0.33422316189239004,
+      0.5990633370545356
+    ],
+    [
+      -0.3365418865274146,
+      -0.32307887750870257,
+      0.5667820440891895
+    ]
+  ],
+  "parameters_path": "/home/csy/my_project/crazyswarm/ros_ws/src/crazyswarm/scripts/ctbr_logs/link_length_errors_20261018/cases/weak_c0_nominal/parameters.yaml",
+  "parameters_sha256": "b945ccb6142ecdebb047b776fd46e1825296f397dedd8b9ef2ab67da58f7c3e2",
+  "output_directory": "/home/csy/my_project/crazyswarm/ros_ws/src/crazyswarm/scripts/ctbr_logs/link_length_errors_20261018/cases/weak_c0_nominal/replay"
+}

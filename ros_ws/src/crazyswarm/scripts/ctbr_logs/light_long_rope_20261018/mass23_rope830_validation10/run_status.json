@@ -1,0 +1,12 @@
+{
+  "name": "mass23_rope830_validation10",
+  "returncode": 0,
+  "wall_s": 23.296936031023506,
+  "success": true,
+  "failure": null,
+  "observed_post_handoff_s": 26.214326191169675,
+  "validation_completed": true,
+  "all_vehicles_zero": true,
+  "minimum_vehicle_distance_m": 0.5264085813632373,
+  "maximum_body_rate_rps": 0.009658509163662314
+}

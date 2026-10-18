@@ -1,0 +1,12 @@
+{
+  "name": "mass23_rope830_zero_bound60",
+  "returncode": 1,
+  "wall_s": 17.106212853977922,
+  "success": false,
+  "failure": "emergency_landing",
+  "observed_post_handoff_s": 12.128561934048776,
+  "validation_completed": false,
+  "all_vehicles_zero": false,
+  "minimum_vehicle_distance_m": 0.2999301475143462,
+  "maximum_body_rate_rps": 2.941388094052739
+}

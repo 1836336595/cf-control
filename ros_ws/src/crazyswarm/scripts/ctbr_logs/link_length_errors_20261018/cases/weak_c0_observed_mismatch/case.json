@@ -1,0 +1,45 @@
+{
+  "name": "weak_c0_observed_mismatch",
+  "family": "weak_damping_observed",
+  "physical_error_m": [
+    0.024,
+    0.002,
+    0.017
+  ],
+  "matched_controller_lengths": false,
+  "calibration_enabled": false,
+  "payload_rotational_damping": 0.0,
+  "pair": "weak_c0_observed",
+  "index": 19,
+  "worker": 1,
+  "controller_lengths_m": [
+    0.689,
+    0.699,
+    0.664
+  ],
+  "physical_lengths_m": [
+    0.713,
+    0.701,
+    0.681
+  ],
+  "initial_vehicle_positions_m": [
+    [
+      0.3896666666666666,
+      -1.8919038110434076e-17,
+      0.671371243478665
+    ],
+    [
+      -0.3475365338796904,
+      0.33422316189239004,
+      0.6016072407949905
+    ],
+    [
+      -0.3365418865274146,
+      -0.32307887750870257,
+      0.5884502586989824
+    ]
+  ],
+  "parameters_path": "/home/csy/my_project/crazyswarm/ros_ws/src/crazyswarm/scripts/ctbr_logs/link_length_errors_20261018/cases/weak_c0_observed_mismatch/parameters.yaml",
+  "parameters_sha256": "964c2d054b43318fe6dff4f91adb9571a06959395ea74d8507ab775a5a2d2023",
+  "output_directory": "/home/csy/my_project/crazyswarm/ros_ws/src/crazyswarm/scripts/ctbr_logs/link_length_errors_20261018/cases/weak_c0_observed_mismatch/replay"
+}

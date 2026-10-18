@@ -1,0 +1,277 @@
+{
+  "145240": {
+    "source_csv": "/home/csy/my_project/crazyswarm/ros_ws/src/crazyswarm/scripts/ctbr_logs/multi_ctbr_20261016_145240.csv",
+    "handoff_s": 49.463785784028005,
+    "fault_s": 62.106576135003706,
+    "fault_elapsed_s": 12.642790350975702,
+    "planned_landing_s": 59.46534054202493,
+    "continuous_height_error_over_0p08m_onset_s": null,
+    "final_time_s": 66.16379413200775,
+    "fault_reason": "payload_load: distance: distance=0.300 m predicted=0.153 m height_error=None",
+    "stages": [
+      {
+        "time_s": 0.13516838100622408,
+        "flight_phase": "waiting_for_ekf",
+        "validation_landing_stage": ""
+      },
+      {
+        "time_s": 1.1352099460200407,
+        "flight_phase": "waiting_for_fleet",
+        "validation_landing_stage": ""
+      },
+      {
+        "time_s": 1.149592432018835,
+        "flight_phase": "pre_takeoff_hold",
+        "validation_landing_stage": ""
+      },
+      {
+        "time_s": 3.163776976027293,
+        "flight_phase": "takeoff",
+        "validation_landing_stage": ""
+      },
+      {
+        "time_s": 8.164105470001232,
+        "flight_phase": "takeup",
+        "validation_landing_stage": ""
+      },
+      {
+        "time_s": 49.463785784028005,
+        "flight_phase": "tension_ramp",
+        "validation_landing_stage": ""
+      },
+      {
+        "time_s": 54.463978082028916,
+        "flight_phase": "height_correction",
+        "validation_landing_stage": ""
+      },
+      {
+        "time_s": 59.46534054202493,
+        "flight_phase": "landing",
+        "validation_landing_stage": "payload_lowering"
+      },
+      {
+        "time_s": 62.106576135003706,
+        "flight_phase": "emergency_landing",
+        "validation_landing_stage": "payload_lowering"
+      }
+    ],
+    "whole_log_minimum_true_pair_distance": {
+      "distance_m": 0.11023160982696757,
+      "time_s": 65.99228998401668
+    },
+    "post_handoff_before_fault_minimum_true_pair_distance": {
+      "distance_m": 0.31470177003709326,
+      "time_s": 62.09234527501394
+    },
+    "per_pair_whole_log_minimum": {
+      "CF3-CF4": {
+        "distance_m": 0.18031919463181892,
+        "time_s": 62.60655278500053
+      },
+      "CF3-CF5": {
+        "distance_m": 0.11023160982696757,
+        "time_s": 65.99228998401668
+      },
+      "CF4-CF5": {
+        "distance_m": 0.14152827904700843,
+        "time_s": 62.593802076007705
+      }
+    },
+    "handoff_payload_center_m": 0.651135773924877,
+    "handoff_payload_clearance_m": 0.612606519656215,
+    "fault_payload_clearance_m": 0.008061172218719888,
+    "command_step_at_fault_n": {
+      "3": -0.3283139314027868,
+      "4": -0.22632238771537877,
+      "5": -0.042347198002525954
+    },
+    "before_fault_command_n": {
+      "3": 0.7576088785218349,
+      "4": 0.5815663270842514,
+      "5": 0.35076082384814034
+    },
+    "fault_command_n": {
+      "3": 0.4292949471190481,
+      "4": 0.3552439393688726,
+      "5": 0.3084136258456144
+    },
+    "quiet_force_balance": {
+      "window_s": [
+        47.463785784028005,
+        49.463785784028005
+      ],
+      "system_mass_kg": 0.1838,
+      "static_required_force_n": 1.8024622699999997,
+      "required_force_from_logged_acceleration_n": 1.7987806596891407,
+      "commanded_vertical_force_n": 2.34889026389582,
+      "required_to_command_ratio": 0.7658002109922841,
+      "per_vehicle_mean_command_n": {
+        "3": 0.8008197361404884,
+        "4": 0.7897431067699003,
+        "5": 0.771856954207719
+      },
+      "note": "Host command units are not measured motor force; acceleration estimates also have filtering errors."
+    },
+    "post_handoff_before_fault": {
+      "rate_command_any_xy_saturation_fraction": 0.031638418079096044,
+      "thrust_command_saturation_fraction_by_vehicle": {
+        "3": 0.011299435028248588,
+        "4": 0.007909604519774011,
+        "5": 0.00903954802259887
+      },
+      "rate_command_any_xy_saturation_fraction_by_vehicle": {
+        "3": 0.005649717514124294,
+        "4": 0.014689265536723164,
+        "5": 0.021468926553672316
+      },
+      "maximum_abs_measured_body_rate_rps": 3.3481876850128174
+    },
+    "planned_payload_landing_release_gate": {
+      "clearance_limit_m": 0.015,
+      "abs_vertical_velocity_limit_mps": 0.05,
+      "required_continuous_s": 0.3,
+      "longest_continuous_ready_before_fault": {
+        "start_s": 61.27890194300562,
+        "end_s": 61.39225868601352,
+        "duration_s": 0.11335674300789833,
+        "frames": 9
+      },
+      "vehicle_descent_logged": false
+    }
+  },
+  "145831": {
+    "source_csv": "/home/csy/my_project/crazyswarm/ros_ws/src/crazyswarm/scripts/ctbr_logs/multi_ctbr_20261016_145831.csv",
+    "handoff_s": 50.64059659198392,
+    "fault_s": 56.377431897009956,
+    "fault_elapsed_s": 5.736835305026034,
+    "planned_landing_s": null,
+    "continuous_height_error_over_0p08m_onset_s": 54.15491481899517,
+    "final_time_s": 64.28344833001029,
+    "fault_reason": "payload_load: height_drop: distance=0.355 m predicted=0.355 m height_error=0.08297343865749712",
+    "stages": [
+      {
+        "time_s": 0.11252516700187698,
+        "flight_phase": "waiting_for_ekf",
+        "validation_landing_stage": ""
+      },
+      {
+        "time_s": 1.1263511219876818,
+        "flight_phase": "waiting_for_fleet",
+        "validation_landing_stage": ""
+      },
+      {
+        "time_s": 1.140639643999748,
+        "flight_phase": "pre_takeoff_hold",
+        "validation_landing_stage": ""
+      },
+      {
+        "time_s": 3.154915154009359,
+        "flight_phase": "takeoff",
+        "validation_landing_stage": ""
+      },
+      {
+        "time_s": 8.169206933991518,
+        "flight_phase": "takeup",
+        "validation_landing_stage": ""
+      },
+      {
+        "time_s": 50.64059659198392,
+        "flight_phase": "tension_ramp",
+        "validation_landing_stage": ""
+      },
+      {
+        "time_s": 55.65497932699509,
+        "flight_phase": "height_correction",
+        "validation_landing_stage": ""
+      },
+      {
+        "time_s": 56.377431897009956,
+        "flight_phase": "emergency_landing",
+        "validation_landing_stage": ""
+      }
+    ],
+    "whole_log_minimum_true_pair_distance": {
+      "distance_m": 0.28769761288067697,
+      "time_s": 63.04061894098413
+    },
+    "post_handoff_before_fault_minimum_true_pair_distance": {
+      "distance_m": 0.35549022709095274,
+      "time_s": 55.99777030700352
+    },
+    "per_pair_whole_log_minimum": {
+      "CF3-CF4": {
+        "distance_m": 0.4955641363592892,
+        "time_s": 49.79786824900657
+      },
+      "CF3-CF5": {
+        "distance_m": 0.28769761288067697,
+        "time_s": 63.04061894098413
+      },
+      "CF4-CF5": {
+        "distance_m": 0.31818623731396656,
+        "time_s": 57.03563733800547
+      }
+    },
+    "handoff_payload_center_m": 0.42943180338361625,
+    "handoff_payload_clearance_m": 0.38682541473758136,
+    "fault_payload_clearance_m": 0.31180526970602607,
+    "command_step_at_fault_n": {
+      "3": -0.48215701545059764,
+      "4": -0.2934034586120378,
+      "5": -0.47800665022750044
+    },
+    "before_fault_command_n": {
+      "3": 0.8857766256800268,
+      "4": 0.7128608671332777,
+      "5": 0.9027948573757542
+    },
+    "fault_command_n": {
+      "3": 0.40361961022942916,
+      "4": 0.41945740852123986,
+      "5": 0.4247882071482537
+    },
+    "quiet_force_balance": {
+      "window_s": [
+        48.64059659198392,
+        50.64059659198392
+      ],
+      "system_mass_kg": 0.1838,
+      "static_required_force_n": 1.8024622699999997,
+      "required_force_from_logged_acceleration_n": 1.8032510673643862,
+      "commanded_vertical_force_n": 2.5085000316621966,
+      "required_to_command_ratio": 0.7188563063997674,
+      "per_vehicle_mean_command_n": {
+        "3": 0.8489499798839902,
+        "4": 0.8502494055862395,
+        "5": 0.8255484910677385
+      },
+      "note": "Host command units are not measured motor force; acceleration estimates also have filtering errors."
+    },
+    "post_handoff_before_fault": {
+      "rate_command_any_xy_saturation_fraction": 0.0,
+      "thrust_command_saturation_fraction_by_vehicle": {
+        "3": 0.0,
+        "4": 0.0,
+        "5": 0.0
+      },
+      "rate_command_any_xy_saturation_fraction_by_vehicle": {
+        "3": 0.0,
+        "4": 0.0,
+        "5": 0.0
+      },
+      "maximum_abs_measured_body_rate_rps": 1.7211239337921143
+    },
+    "planned_payload_landing_release_gate": {
+      "clearance_limit_m": 0.015,
+      "abs_vertical_velocity_limit_mps": 0.05,
+      "required_continuous_s": 0.3,
+      "longest_continuous_ready_before_fault": {
+        "start_s": null,
+        "end_s": null,
+        "duration_s": 0.0,
+        "frames": 0
+      },
+      "vehicle_descent_logged": false
+    }
+  }
+}

@@ -82,6 +82,7 @@ add_message_files(
   GenericLogData.msg
   MocapState.msg
   CTBR.msg
+  CTBRTiming.msg
   FullState.msg
   VelocityWorld.msg
   TrajectoryPolynomialPiece.msg
@@ -210,6 +211,7 @@ target_link_libraries(mocap_helper
 install(PROGRAMS
   scripts/ctbr_controller.py
   scripts/slung_load_controller.py
+  scripts/slung_reference.py
   scripts/ctbr_trajectory.py
   scripts/ctbr_visualization.py
   scripts/cf_arm.py

@@ -1,0 +1,73 @@
+{
+  "success": true,
+  "failure": null,
+  "handoff_time_s": 23.385714285714286,
+  "validation_landing_started_time_s": 33.385714285714286,
+  "observed_transport_before_landing_s": 10.0,
+  "validation_completed": true,
+  "all_vehicles_zero": true,
+  "final_vehicle_z_m": [
+    0.006998252836010087,
+    0.006998252835831233,
+    0.006998252835900968
+  ],
+  "final_vehicle_vz_mps": [
+    -9.354363637809213e-12,
+    -3.288366223626308e-11,
+    2.5814386297854817e-12
+  ],
+  "final_time_s": 57.81428571428572,
+  "minimum_clearance_m": 0.27666144253554875,
+  "minimum_vehicle_distance_m": 0.46510710030152747,
+  "maximum_body_rate_rps": 0.005237202104961447,
+  "rate_saturation_fraction": 0.0,
+  "phases": [
+    "takeup",
+    "tension_ramp",
+    "height_correction",
+    "landing",
+    "landing_settle",
+    "landed"
+  ],
+  "first_stage_time_s": {
+    "payload_lowering": 33.385714285714286,
+    "payload_landing_touchdown_confirmed": 40.84285714285714,
+    "payload_landing_unloading": 40.84285714285714,
+    "vehicle_descent": 42.84285714285714
+  },
+  "peak_actual_body_rate_rps_entire_mission": 0.7782977470577672,
+  "peak_actual_body_rate_rps_during_landing": 0.7782977470577672,
+  "peak_landing_tilt_deg": 3.402268073761389,
+  "vehicle_descent_truth_height_difference_vz_min_mps": -1.0704107086567962,
+  "vehicle_descent_truth_height_difference_vz_max_mps": 0.15505276668849646,
+  "powered_vehicle_descent_truth_height_difference_vz_min_mps": -0.2522951278080999,
+  "landing_tail_by_vehicle": {
+    "3": {
+      "position_z_median": 0.10053539742712145,
+      "command_thrust_n_median": 0.37858308297868465,
+      "actual_thrust_n_median": 0.42578738984026265,
+      "target_z_median": 0.007000000000000006,
+      "position_error_z_median": 0.0936543255764313,
+      "position_integral_z_median": 0.8943777679236982,
+      "target_velocity_z_median": 0.0
+    },
+    "4": {
+      "position_z_median": 0.09951170769081401,
+      "command_thrust_n_median": 0.3841006308021257,
+      "actual_thrust_n_median": 0.4316712301909444,
+      "target_z_median": 0.007000000000000006,
+      "position_error_z_median": 0.09262958055822582,
+      "position_integral_z_median": 0.8866950985579515,
+      "target_velocity_z_median": 0.0
+    },
+    "5": {
+      "position_z_median": 0.10108866599027472,
+      "command_thrust_n_median": 0.3694238351441958,
+      "actual_thrust_n_median": 0.41597546653286066,
+      "target_z_median": 0.007000000000000006,
+      "position_error_z_median": 0.09420868139856745,
+      "position_integral_z_median": 0.9074781613413926,
+      "target_velocity_z_median": 0.0
+    }
+  }
+}

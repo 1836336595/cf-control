@@ -108,9 +108,12 @@ def plot_trace(path, save=None, show=True):
 
     ax = axes[2, 0]
     for vehicle, vehicle_rows in by_vehicle.items():
-        ax.plot(values(vehicle_rows, "control_time_s"), values(vehicle_rows, "command_thrust_n"),
-                label=f"CF{vehicle}")
-    ax.set_ylabel("Command thrust (N)")
+        line, = ax.plot(values(vehicle_rows, "control_time_s"), values(vehicle_rows, "command_thrust_n"),
+                        label=f"CF{vehicle} command")
+        if "actual_thrust_n" in vehicle_rows[0]:
+            ax.plot(values(vehicle_rows, "control_time_s"), values(vehicle_rows, "actual_thrust_n"),
+                    "--", color=line.get_color(), label=f"CF{vehicle} actual")
+    ax.set_ylabel("Command / actual thrust (N)")
     ax.set_xlabel("Control time (s)")
     ax.grid(True, alpha=.25)
     ax.legend()

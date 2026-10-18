@@ -1,0 +1,36 @@
+{
+  "label": "single_2",
+  "python": "3.8.10 (default, Mar 18 2025, 20:04:55) \n[GCC 9.4.0]",
+  "numpy": "1.24.4",
+  "environment": {
+    "OPENBLAS_NUM_THREADS": "1",
+    "OMP_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1"
+  },
+  "blas": [
+    {
+      "path": "/home/csy/.local/lib/python3.8/site-packages/numpy.libs/libopenblas64_p-r0-15028c96.3.21.so",
+      "threads": 1
+    }
+  ],
+  "slung_controller": {
+    "samples": 500,
+    "warmup": 100,
+    "mean_ms": 0.8083481488283724,
+    "p50_ms": 0.798442488303408,
+    "p95_ms": 0.8665501052746549,
+    "p99_ms": 0.9199412597808986,
+    "maximum_ms": 1.9054010044783354,
+    "over_14_286_ms_count": 0
+  },
+  "geometric_controller": {
+    "samples": 500,
+    "warmup": 100,
+    "mean_ms": 0.15153309842571616,
+    "p50_ms": 0.14804999227635562,
+    "p95_ms": 0.17335651791654524,
+    "p99_ms": 0.1943000097526237,
+    "maximum_ms": 0.2386610140092671,
+    "over_14_286_ms_count": 0
+  }
+}

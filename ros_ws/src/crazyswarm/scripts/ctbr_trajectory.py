@@ -247,6 +247,7 @@ class CircularFlightTrajectory:
         self.formation_offset = None
         self.landing_target_position = None
         self.landing_start_position = None
+        self.controlled_landing_yaw = None
         self.active_landing_duration_s = None
         phase = (
             float(self.config.orbit_phase_rad)
@@ -439,6 +440,27 @@ class CircularFlightTrajectory:
         self.abort_position = _as_vector(position, "abort_position")
         self.paused_at = None
         self._transition("aborted", now, "轨迹安全中止：%s；保持零 CTBR 推力。" % reason)
+
+    def begin_controlled_landing(self, now, position, yaw, reason):
+        """Begin planned vertical descent and retain normal landing/settle gates."""
+        if self.phase in ("emergency_landing", "landed", "aborted"):
+            return
+        position = _as_vector(position, "controlled_landing_position")
+        self.landing_start_position = position.copy()
+        self.controlled_landing_yaw = float(yaw)
+        self.emergency_landing_reason = str(reason)  # Existing CSV reason column.
+        self.landing_target_position = position.copy()
+        self.landing_target_position[2] = self.start_position[2]
+        self.landing_arrival_time = self.landing_unstable_since = None
+        self.active_landing_duration_s = max(
+            float(self.config.landing_duration_s),
+            1.875 * abs(position[2] - self.landing_target_position[2]) /
+            float(self.config.landing_max_speed_mps),
+        )
+        # Re-anchor when the payload has landed but aircraft are already in
+        # the landing phase; _transition intentionally ignores same-phase calls.
+        self.phase_start_time = float(now)
+        self._transition("landing", now, "计划受控降落：%s" % str(reason))
 
     def begin_emergency_landing(self, now, position, yaw, reason):
         """从当前 NOKOV 位置开始一条慢速、受控的紧急降落参考。
@@ -748,7 +770,8 @@ class CircularFlightTrajectory:
             "velocity": velocity_scale * displacement,
             "acceleration": acceleration_scale * displacement,
             "jerk": jerk_scale * displacement,
-            "yaw": final_target["yaw"],
+            "yaw": (final_target["yaw"] if self.controlled_landing_yaw is None
+                    else self.controlled_landing_yaw),
             "yaw_rate": 0.0,
             "flight_phase": "landing",
             "max_tilt_rad": cfg.landing_max_tilt_rad,

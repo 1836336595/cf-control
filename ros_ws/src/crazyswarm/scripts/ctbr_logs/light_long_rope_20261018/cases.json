@@ -1,0 +1,64 @@
+{
+  "assumption": "User confirmed totalpayloadmassincludingaccessories23g and three effective link lengths0.830m",
+  "cases": [
+    {
+      "name": "mass23_rope830_nominal60",
+      "output": "/home/csy/my_project/crazyswarm/ros_ws/src/crazyswarm/scripts/ctbr_logs/light_long_rope_20261018/mass23_rope830_nominal60",
+      "candidate": "/home/csy/my_project/crazyswarm/ros_ws/src/crazyswarm/scripts/ctbr_logs/light_long_rope_20261018/mass23_rope830_nominal60/candidate.yaml",
+      "short_validation": false,
+      "rotational_damping": 0.001
+    },
+    {
+      "name": "mass23_rope830_validation10",
+      "output": "/home/csy/my_project/crazyswarm/ros_ws/src/crazyswarm/scripts/ctbr_logs/light_long_rope_20261018/mass23_rope830_validation10",
+      "candidate": "/home/csy/my_project/crazyswarm/ros_ws/src/crazyswarm/scripts/ctbr_logs/light_long_rope_20261018/mass23_rope830_validation10/candidate.yaml",
+      "short_validation": true,
+      "rotational_damping": 0.001
+    },
+    {
+      "name": "mass23_rope830_zero_bound60",
+      "output": "/home/csy/my_project/crazyswarm/ros_ws/src/crazyswarm/scripts/ctbr_logs/light_long_rope_20261018/mass23_rope830_zero_bound60",
+      "candidate": "/home/csy/my_project/crazyswarm/ros_ws/src/crazyswarm/scripts/ctbr_logs/light_long_rope_20261018/mass23_rope830_zero_bound60/candidate.yaml",
+      "short_validation": false,
+      "rotational_damping": 0.0
+    },
+    {
+      "name": "mass23_rope830_low_damping60",
+      "output": "/home/csy/my_project/crazyswarm/ros_ws/src/crazyswarm/scripts/ctbr_logs/light_long_rope_20261018/mass23_rope830_low_damping60",
+      "candidate": "/home/csy/my_project/crazyswarm/ros_ws/src/crazyswarm/scripts/ctbr_logs/light_long_rope_20261018/mass23_rope830_low_damping60/candidate.yaml",
+      "short_validation": false,
+      "rotational_damping": 0.0001
+    },
+    {
+      "name": "mass23_rope830_delay60",
+      "output": "/home/csy/my_project/crazyswarm/ros_ws/src/crazyswarm/scripts/ctbr_logs/light_long_rope_20261018/mass23_rope830_delay60",
+      "candidate": "/home/csy/my_project/crazyswarm/ros_ws/src/crazyswarm/scripts/ctbr_logs/light_long_rope_20261018/mass23_rope830_delay60/candidate.yaml",
+      "short_validation": false,
+      "rotational_damping": 0.001
+    },
+    {
+      "name": "mass23_rope830_noise60",
+      "output": "/home/csy/my_project/crazyswarm/ros_ws/src/crazyswarm/scripts/ctbr_logs/light_long_rope_20261018/mass23_rope830_noise60",
+      "candidate": "/home/csy/my_project/crazyswarm/ros_ws/src/crazyswarm/scripts/ctbr_logs/light_long_rope_20261018/mass23_rope830_noise60/candidate.yaml",
+      "short_validation": false,
+      "rotational_damping": 0.001
+    }
+  ],
+  "control_intervals_count": 491,
+  "data_source": "multi_ctbr_20261018_203211.csv",
+  "frozen_sources": {
+    "/home/csy/my_project/crazyswarm/ros_ws/src/crazyswarm/scripts/ctbr_controller.py": "45f9c87bf7e8b933e5229253e4e405d91e271b84ffd564370d0de321bb9adcb9",
+    "/home/csy/my_project/crazyswarm/ros_ws/src/crazyswarm/scripts/slung_load_controller.py": "e8d946ec87a92d0929fe709e0baf6efff4ff95add9e7409b810a0f86d0e3ad78",
+    "/home/csy/my_project/crazyswarm/ros_ws/src/crazyswarm/scripts/simulate_slung_handoff.py": "4bd651bee854f1eccae3c61b1c8691a97681a33b9abd54e38b41e33d36cc99f8",
+    "/home/csy/my_project/crazyswarm/ros_ws/src/crazyswarm/config/slung_payload.yaml": "d1af636e5092d7f68f2a4d7debac7362709c474ed8781932de9fcb98b453ebb2",
+    "/home/csy/my_project/crazyswarm/ros_ws/src/crazyswarm/config/ctbr_vehicle.yaml": "60946186948f0218d2b75630c5f2062149a72f21e353fa11daf8b368c5b1e36b"
+  },
+  "user_confirmation": {
+    "mass_kg": 0.023,
+    "link_lengths_m": [
+      0.83,
+      0.83,
+      0.83
+    ]
+  }
+}

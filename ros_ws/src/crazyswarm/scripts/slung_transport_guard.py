@@ -67,14 +67,38 @@ class SlungSupportTrim:
 
     def reset(self):
         self.bias = np.zeros(3)
+        self.requested_bias = np.zeros(3)
+        self.initialization_clipped = np.zeros(3, dtype=bool)
+        self.limits = np.full(3, self.limit_n)
         self.initialized = False
 
-    def initialize(self, handoff_z, model_z):
-        difference = np.asarray(handoff_z, dtype=float) - np.asarray(model_z, dtype=float)
-        difference = difference.reshape(3)
-        if not np.all(np.isfinite(difference)):
-            raise ValueError("support trim forces must be finite")
-        self.bias = np.clip(difference, 0.0, self.limit_n)
+    @staticmethod
+    def _force_vector(value, name, *, nonnegative=False):
+        array = np.asarray(value, dtype=float)
+        if array.shape != (3,) or not np.all(np.isfinite(array)):
+            raise ValueError(name + " must contain three finite values")
+        if nonnegative and np.any(array < 0.0):
+            raise ValueError(name + " must be nonnegative")
+        return array
+
+    def initialize(self, handoff_z, model_z, available_z=None):
+        handoff = self._force_vector(handoff_z, "handoff_z", nonnegative=True)
+        model = self._force_vector(model_z, "model_z", nonnegative=True)
+        self.requested_bias = np.maximum(handoff - model, 0.0)
+        if available_z is None:
+            # Preserve the original 0.25 N bound for callers without explicit
+            # actuator headroom information.
+            self.limits = np.full(3, self.limit_n)
+        else:
+            available = self._force_vector(available_z, "available_z", nonnegative=True)
+            headroom = np.maximum(available - model, 0.0)
+            # A handoff residual larger than the normal trim cap must be
+            # retained to avoid a force step. Its per-vehicle ceiling is
+            # bounded by both the residual/cap and available vertical force.
+            requested_limit = np.maximum(self.limit_n, self.requested_bias)
+            self.limits = np.minimum(requested_limit, headroom)
+        self.initialization_clipped = self.requested_bias > self.limits + 1.0e-12
+        self.bias = np.minimum(self.requested_bias, self.limits)
         self.initialized = True
         return self.bias.copy()
 
@@ -89,8 +113,11 @@ class SlungSupportTrim:
         derivative = np.full(3, np.clip(self.integral_gain * float(height_error),
                                        -self.rate_limit_nps, self.rate_limit_nps))
         if thrust_saturated is not None:
+            saturated = np.asarray(thrust_saturated, dtype=bool)
+            if saturated.shape != (3,):
+                raise ValueError("thrust_saturated must contain three values")
             # Do not wind up while an actuator cannot supply more force.
-            derivative[(np.asarray(thrust_saturated, dtype=bool)) & (derivative > 0)] = 0.0
+            derivative[saturated & (derivative > 0)] = 0.0
         previous = self.bias.copy()
-        self.bias = np.clip(previous + derivative * dt, 0.0, self.limit_n)
+        self.bias = np.clip(previous + derivative * dt, 0.0, self.limits)
         return self.bias.copy(), (self.bias - previous) / dt

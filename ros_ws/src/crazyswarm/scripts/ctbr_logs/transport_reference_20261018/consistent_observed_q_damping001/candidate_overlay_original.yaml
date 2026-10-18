@@ -1,0 +1,41 @@
+ctbr_controller:
+  control_rate_hz: 70.0
+slung_payload:
+  mass_kg: 0.023
+  link_lengths_m:
+  - 0.85
+  - 0.85
+  - 0.85
+  target_payload_height_m: 0.6
+  post_handoff_s: 60.0
+  flight_validation_enabled: false
+  link_calibration_enabled: false
+  transport_attitude_reference_enabled: true
+  simulation:
+    initial_payload_rpy_deg:
+    - 6.036338417045638
+    - 20.40925098497897
+    - -10.426774893557216
+    initial_vehicle_positions_m:
+    - - 0.4078565712813371
+      - -0.10821872121644767
+      - 0.8119979100722705
+    - - -0.2112069023350261
+      - 0.2848694517821171
+      - 0.869570713224853
+    - - -0.24290698059295385
+      - -0.21321339670296785
+      - 0.8773330777904331
+    physical_link_lengths_m:
+    - 0.85
+    - 0.85
+    - 0.85
+    payload_rotational_damping: 0.001
+    ekf_sample_rate_hz: 70.0
+    control_intervals_s: []
+    time_limit_s: 160.0
+    bridge_thrust_raw_scale:
+    - 1.0213949773283308
+    - 1.017476585895766
+    - 1.02666668842457
+  transport_attitude_reference_s: 12.0

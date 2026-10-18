@@ -1,0 +1,362 @@
+{
+  "source": "/home/csy/my_project/crazyswarm/ros_ws/src/crazyswarm/scripts/ctbr_logs/multi_ctbr_20261016_222247.csv",
+  "rows": 2451,
+  "takeoff_s": 3.225339670025278,
+  "fault_s": 10.396715431998018,
+  "fault_reason": "payload_load: distance: distance=0.290 m predicted=0.241 m height_error=None",
+  "reached_transport": false,
+  "pose_age_cross_vehicle_correlation": [
+    [
+      0.9999999999999999,
+      0.9923251987891658,
+      0.993281773917525
+    ],
+    [
+      0.9923251987891658,
+      1.0,
+      0.987170936828676
+    ],
+    [
+      0.9932817739175251,
+      0.9871709368286761,
+      1.0
+    ]
+  ],
+  "vehicles": {
+    "3": {
+      "full_record": {
+        "mocap_sample_age_s_p50_p95_max": [
+          0.019730091094970703,
+          0.12355136871337882,
+          0.2908759117126465
+        ],
+        "state_age_s_p50_p95_max": [
+          0.01793628098675981,
+          0.1227963692275807,
+          0.28947606502333656
+        ],
+        "ekf_state_age_s_p50_p95_max": [
+          0.009363621968077496,
+          0.02344140012573916,
+          0.034041545004583895
+        ],
+        "bridge_latest_command_age_s_p50_p95_max": [
+          0.009129119000000002,
+          0.014596492449999998,
+          0.01702025
+        ],
+        "bridge_latest_send_call_wall_s_p50_p95_max": [
+          0.0011493195,
+          0.0017497046999999765,
+          0.00348111
+        ],
+        "previous_fleet_cycle_wall_s_p50_p95_max": [
+          0.0025450900138821453,
+          0.00557577949075494,
+          0.00911179301328957
+        ],
+        "rows": 817,
+        "mocap_derivatives_invalid": 118,
+        "local_mocap_filter_invalid": 264,
+        "ekf_status_fresh": 810,
+        "pose_age_over50ms_fraction": 0.2386780905752754
+      },
+      "takeoff_to_fault": {
+        "mocap_sample_age_s_p50_p95_max": [
+          0.019206643104553223,
+          0.11977167129516597,
+          0.23397135734558105
+        ],
+        "state_age_s_p50_p95_max": [
+          0.01750206298311241,
+          0.11786684461403633,
+          0.23230035998858511
+        ],
+        "ekf_state_age_s_p50_p95_max": [
+          0.009258491510991007,
+          0.02325429836346302,
+          0.034041545004583895
+        ],
+        "bridge_latest_command_age_s_p50_p95_max": [
+          0.009284750000000001,
+          0.014688412250000001,
+          0.01702025
+        ],
+        "bridge_latest_send_call_wall_s_p50_p95_max": [
+          0.0011487115,
+          0.0014189985999999994,
+          0.00348111
+        ],
+        "previous_fleet_cycle_wall_s_p50_p95_max": [
+          0.003032388020073995,
+          0.006029448466142638,
+          0.00911179301328957
+        ],
+        "rows": 502,
+        "mocap_derivatives_invalid": 53,
+        "local_mocap_filter_invalid": 126,
+        "ekf_status_fresh": 502,
+        "pose_age_over50ms_fraction": 0.22310756972111553
+      }
+    },
+    "4": {
+      "full_record": {
+        "mocap_sample_age_s_p50_p95_max": [
+          0.020386934280395508,
+          0.12533278465270986,
+          0.29119443893432617
+        ],
+        "state_age_s_p50_p95_max": [
+          0.018004893034230918,
+          0.12330962262349199,
+          0.28963635105174035
+        ],
+        "ekf_state_age_s_p50_p95_max": [
+          0.009784444497199729,
+          0.024676214714418165,
+          0.05058480205480009
+        ],
+        "bridge_latest_command_age_s_p50_p95_max": [
+          0.009130131,
+          0.0141875567,
+          0.016939168
+        ],
+        "bridge_latest_send_call_wall_s_p50_p95_max": [
+          0.0011576899999999998,
+          0.0024180227999999995,
+          0.003714792
+        ],
+        "previous_fleet_cycle_wall_s_p50_p95_max": [
+          0.0025450900138821453,
+          0.00557577949075494,
+          0.00911179301328957
+        ],
+        "rows": 817,
+        "mocap_derivatives_invalid": 117,
+        "local_mocap_filter_invalid": 263,
+        "ekf_status_fresh": 810,
+        "pose_age_over50ms_fraction": 0.24724602203182375
+      },
+      "takeoff_to_fault": {
+        "mocap_sample_age_s_p50_p95_max": [
+          0.01996028423309326,
+          0.12130688428878779,
+          0.2344832420349121
+        ],
+        "state_age_s_p50_p95_max": [
+          0.01720571401529014,
+          0.11801362679398146,
+          0.23252477496862411
+        ],
+        "ekf_state_age_s_p50_p95_max": [
+          0.009496024518739432,
+          0.024651184256072153,
+          0.05058480205480009
+        ],
+        "bridge_latest_command_age_s_p50_p95_max": [
+          0.009250291,
+          0.014162795249999999,
+          0.016939168
+        ],
+        "bridge_latest_send_call_wall_s_p50_p95_max": [
+          0.001158798,
+          0.00249304,
+          0.003714792
+        ],
+        "previous_fleet_cycle_wall_s_p50_p95_max": [
+          0.003032388020073995,
+          0.006029448466142638,
+          0.00911179301328957
+        ],
+        "rows": 502,
+        "mocap_derivatives_invalid": 53,
+        "local_mocap_filter_invalid": 126,
+        "ekf_status_fresh": 502,
+        "pose_age_over50ms_fraction": 0.2350597609561753
+      }
+    },
+    "5": {
+      "full_record": {
+        "mocap_sample_age_s_p50_p95_max": [
+          0.020625710487365723,
+          0.12491804361343369,
+          0.29144787788391113
+        ],
+        "state_age_s_p50_p95_max": [
+          0.017153834487544373,
+          0.12240008137887332,
+          0.28987525403499603
+        ],
+        "ekf_state_age_s_p50_p95_max": [
+          0.009315964009147137,
+          0.025358076498378068,
+          0.04285240900935605
+        ],
+        "bridge_latest_command_age_s_p50_p95_max": [
+          0.008906767,
+          0.014116657850000002,
+          0.016978431000000002
+        ],
+        "bridge_latest_send_call_wall_s_p50_p95_max": [
+          0.0011416955,
+          0.0016261560499999882,
+          0.002738043
+        ],
+        "previous_fleet_cycle_wall_s_p50_p95_max": [
+          0.0025450900138821453,
+          0.00557577949075494,
+          0.00911179301328957
+        ],
+        "rows": 817,
+        "mocap_derivatives_invalid": 121,
+        "local_mocap_filter_invalid": 265,
+        "ekf_status_fresh": 811,
+        "pose_age_over50ms_fraction": 0.24969400244798043
+      },
+      "takeoff_to_fault": {
+        "mocap_sample_age_s_p50_p95_max": [
+          0.020560860633850098,
+          0.12184382677078243,
+          0.23515701293945312
+        ],
+        "state_age_s_p50_p95_max": [
+          0.016801450517959893,
+          0.11819895251828705,
+          0.2328278719796799
+        ],
+        "ekf_state_age_s_p50_p95_max": [
+          0.008997299999464303,
+          0.02503951577818952,
+          0.03474581899354234
+        ],
+        "bridge_latest_command_age_s_p50_p95_max": [
+          0.009248061,
+          0.014287230900000001,
+          0.016978431000000002
+        ],
+        "bridge_latest_send_call_wall_s_p50_p95_max": [
+          0.0011414024999999999,
+          0.0017359353999999998,
+          0.002738043
+        ],
+        "previous_fleet_cycle_wall_s_p50_p95_max": [
+          0.003032388020073995,
+          0.006029448466142638,
+          0.00911179301328957
+        ],
+        "rows": 502,
+        "mocap_derivatives_invalid": 53,
+        "local_mocap_filter_invalid": 125,
+        "ekf_status_fresh": 502,
+        "pose_age_over50ms_fraction": 0.23705179282868527
+      }
+    }
+  },
+  "pose_gap_blocks": [
+    {
+      "start_s": 0.7682635739911348,
+      "end_s": 0.7824324850225821,
+      "maximum_sample_age_s": 0.11584258079528809
+    },
+    {
+      "start_s": 0.9400965599925257,
+      "end_s": 0.953956293000374,
+      "maximum_sample_age_s": 0.12686634063720703
+    },
+    {
+      "start_s": 2.053955545008648,
+      "end_s": 2.0967058130190708,
+      "maximum_sample_age_s": 0.1486048698425293
+    },
+    {
+      "start_s": 2.282447166973725,
+      "end_s": 2.468121552024968,
+      "maximum_sample_age_s": 0.2908759117126465
+    },
+    {
+      "start_s": 2.7539140210137703,
+      "end_s": 2.7824410279863514,
+      "maximum_sample_age_s": 0.1341719627380371
+    },
+    {
+      "start_s": 3.096758872969076,
+      "end_s": 3.1109904550248757,
+      "maximum_sample_age_s": 0.12331628799438477
+    },
+    {
+      "start_s": 3.7825065500219353,
+      "end_s": 3.825367731973529,
+      "maximum_sample_age_s": 0.1482832431793213
+    },
+    {
+      "start_s": 6.2825212519965135,
+      "end_s": 6.410976568993647,
+      "maximum_sample_age_s": 0.23397135734558105
+    },
+    {
+      "start_s": 6.925269605009817,
+      "end_s": 6.95395215798635,
+      "maximum_sample_age_s": 0.13950729370117188
+    },
+    {
+      "start_s": 8.525265313975979,
+      "end_s": 8.596798131009564,
+      "maximum_sample_age_s": 0.18262815475463867
+    },
+    {
+      "start_s": 9.453941743995529,
+      "end_s": 9.539545324980281,
+      "maximum_sample_age_s": 0.1854851245880127
+    },
+    {
+      "start_s": 9.725306904001627,
+      "end_s": 9.768157581973355,
+      "maximum_sample_age_s": 0.14389753341674805
+    },
+    {
+      "start_s": 10.253940980008338,
+      "end_s": 10.253940980008338,
+      "maximum_sample_age_s": 0.10104775428771973
+    },
+    {
+      "start_s": 10.382577047974337,
+      "end_s": 10.382577047974337,
+      "maximum_sample_age_s": 0.10660576820373535
+    },
+    {
+      "start_s": 10.611057152971625,
+      "end_s": 10.639563255012035,
+      "maximum_sample_age_s": 0.13463592529296875
+    }
+  ],
+  "comparison": {
+    "multi_ctbr_20261016_213804.csv": {
+      "window_s": [
+        3.3,
+        10.39
+      ],
+      "rows": 496,
+      "pose_age_p95_s": 0.011807441711425781,
+      "pose_age_max_s": 0.01401209831237793,
+      "over50ms_fraction": 0.0,
+      "source_derivatives_invalid": 0
+    },
+    "multi_ctbr_20261016_222247.csv": {
+      "window_s": [
+        3.3,
+        10.39
+      ],
+      "rows": 496,
+      "pose_age_p95_s": 0.12005490064620972,
+      "pose_age_max_s": 0.23397135734558105,
+      "over50ms_fraction": 0.2217741935483871,
+      "source_derivatives_invalid": 51
+    }
+  },
+  "minimum_pair_distance": {
+    "m": 0.060792409790287376,
+    "time_s": 11.568147270998452,
+    "pair": "CF3-CF4",
+    "caveat": "Logged positions during emergency; contact/rigid-body quality cannot be established from CSV alone."
+  }
+}

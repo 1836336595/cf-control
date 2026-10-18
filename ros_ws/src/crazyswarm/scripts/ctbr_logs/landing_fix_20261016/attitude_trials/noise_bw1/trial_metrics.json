@@ -1,0 +1,51 @@
+{
+  "case": "noise_bw1",
+  "bandwidth_hz": 1.0,
+  "success": true,
+  "failure": null,
+  "observed_post_handoff_s": 60.01428571428571,
+  "minimum_vehicle_distance_m": 0.3584609688824988,
+  "minimum_clearance_m": 0.3227450260357737,
+  "maximum_body_rate_rps": 0.2915463721439503,
+  "rate_saturation_fraction": 0.0,
+  "final_payload_height_m": 0.600009236454455,
+  "final_payload_position_error_m": 0.000257634466741109,
+  "final_20s_payload_attitude_std_rad": [
+    0.0012196426941978675,
+    0.0017570777668221413,
+    0.000570461134120236
+  ],
+  "final_20s_payload_rate_std_rps": [
+    0.014330197026254312,
+    0.016104226691599798,
+    0.001961958482782442
+  ],
+  "final_20s_cf3_command_thrust_std_n": 0.0034462699710358542,
+  "final_20s_observed_payload_rate_std_rps": [
+    0.2120123421613438,
+    0.17587572210616403,
+    0.16078310803133167
+  ],
+  "final_20s_per_vehicle_force_variability": {
+    "3": {
+      "command_std_n": 0.0034462699710358542,
+      "actual_std_n": 0.0010327013672999904,
+      "command_mean_n": 0.6747320911415902
+    },
+    "4": {
+      "command_std_n": 0.004084575035146549,
+      "actual_std_n": 0.0012454486629643938,
+      "command_mean_n": 0.5911101079886044
+    },
+    "5": {
+      "command_std_n": 0.0038159640665929658,
+      "actual_std_n": 0.0012328901335836298,
+      "command_mean_n": 0.5835362979983122
+    }
+  },
+  "final_20s_payload_attitude_mean_deg": [
+    -1.0369783861222523,
+    9.933380679325758,
+    0.2561355201758789
+  ]
+}

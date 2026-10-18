@@ -1,0 +1,60 @@
+{
+  "success": true,
+  "failure": null,
+  "control_rate_hz": 70.0,
+  "onboard_controller": "mellinger",
+  "ekf_feedback_mode": "sampled_filtered",
+  "ekf_sample_rate_hz": 50.0,
+  "ekf_delay_s": 0.02,
+  "ekf_host_filter_cutoff_hz": 5.0,
+  "ekf_sample_frames": 4445,
+  "ekf_delivered_frames": 4444,
+  "observed_post_handoff_s": 60.0,
+  "mellinger_attitude_gains": [
+    70000.0,
+    70000.0,
+    60000.0
+  ],
+  "mellinger_rate_gains": [
+    20000.0,
+    20000.0,
+    12000.0
+  ],
+  "mellinger_rate_derivative_gain": 200.0,
+  "physics_timestep_s": 0.002,
+  "pose_sample_rate_hz": 100.0,
+  "pose_delay_s": 0.01,
+  "command_delay_s": 0.005,
+  "rate_loop_bandwidth": [
+    35.0,
+    35.0,
+    20.0
+  ],
+  "initial_tilt_deg": 0.0,
+  "handoff_time_s": 28.885714285714286,
+  "final_time_s": 88.88571428571429,
+  "phases": [
+    "takeup",
+    "tension_ramp",
+    "height_correction",
+    "hover"
+  ],
+  "minimum_clearance_m": 0.3287589666569645,
+  "maximum_prelift_xy_error_m": 0.21721119995418278,
+  "maximum_body_rate_rps": 0.01707265419611395,
+  "maximum_tilt_deg": 6.534780977297704,
+  "minimum_vehicle_distance_m": 0.3488031107737281,
+  "mocap_rate_alpha": 0.2,
+  "target_payload_height_m": 0.6,
+  "post_handoff_s": 60.0,
+  "payload_safety_reason": "",
+  "rate_saturation_fraction": 0.0,
+  "final_payload_target_m": [
+    -0.09696191822983093,
+    0.0026531673415046884,
+    0.6
+  ],
+  "final_payload_position_error_m": 3.0798835300881165e-06,
+  "final_payload_height_m": 0.5999993448924613,
+  "controller_csv": "ctbr_logs/ekf_feedback_20261016/filtered_nominal/multi_ctbr_20261016_100908.csv"
+}

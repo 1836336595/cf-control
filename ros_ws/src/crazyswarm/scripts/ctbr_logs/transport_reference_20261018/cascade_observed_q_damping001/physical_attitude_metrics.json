@@ -1,0 +1,123 @@
+{
+  "success": true,
+  "failure": null,
+  "handoff_time_s": 22.728571428566884,
+  "final_time_s": 82.74285714279752,
+  "observed_post_handoff_s": 60.01428571423064,
+  "initial_physical_cable_errors_m": [
+    -1.1102230246251565e-16,
+    0.0,
+    0.0
+  ],
+  "minimum_clearance_m": 0.2756592871393795,
+  "minimum_vehicle_distance_m": 0.4204487206257882,
+  "maximum_tilt_deg": 4.584794210557048,
+  "rate_saturation_fraction": 0.0,
+  "final_payload_position_error_m": 0.04344967202750268,
+  "terminal_reason": "post_handoff_window_complete",
+  "initial_physical_payload_rpy_deg": [
+    6.036338417045638,
+    20.409250984978975,
+    -10.426774893557214
+  ],
+  "final_physical_payload_rpy_deg": [
+    -0.9774395215325586,
+    -3.380092005742484,
+    0.06584825580715341
+  ],
+  "handoff_physical_payload_rpy_deg": [
+    1.2877112600685818,
+    20.891222042287744,
+    -11.26452074399283
+  ],
+  "windows": [
+    {
+      "start_after_handoff_s": 0,
+      "end_after_handoff_s": 5,
+      "actual_duration_s": 4.999999999997229,
+      "physical_payload_mean_rpy_deg": [
+        0.4921128826950947,
+        20.630073689099913,
+        -10.53487217449397
+      ],
+      "physical_payload_std_rpy_deg": [
+        0.7925178917551119,
+        0.8882926159052719,
+        0.9895136319875841
+      ],
+      "physical_payload_peak_to_peak_rpy_deg": [
+        2.4343412756640914,
+        3.6797527770597434,
+        3.3795759271293813
+      ],
+      "pitch_dominant_1_3_hz": 1.199999999999855,
+      "pitch_1_3_hz_rms_deg": 0.0017425394441952743
+    },
+    {
+      "start_after_handoff_s": 5,
+      "end_after_handoff_s": 15,
+      "actual_duration_s": 9.985714285710763,
+      "physical_payload_mean_rpy_deg": [
+        -2.797749979216131,
+        4.910113119753214,
+        -1.5757880041588022
+      ],
+      "physical_payload_std_rpy_deg": [
+        0.6934592805157043,
+        5.397888055578208,
+        2.524923248289902
+      ],
+      "physical_payload_peak_to_peak_rpy_deg": [
+        2.2793469831346216,
+        17.166822380879044,
+        8.298577623059128
+      ],
+      "pitch_dominant_1_3_hz": 1.0937500000001399,
+      "pitch_1_3_hz_rms_deg": 0.0026136254323066376
+    },
+    {
+      "start_after_handoff_s": 15,
+      "end_after_handoff_s": 30,
+      "actual_duration_s": 14.985714285711303,
+      "physical_payload_mean_rpy_deg": [
+        -2.625426681529507,
+        -0.04751383029900048,
+        0.24529334485255855
+      ],
+      "physical_payload_std_rpy_deg": [
+        0.3665149786512355,
+        0.44300335270836294,
+        0.03856564782830553
+      ],
+      "physical_payload_peak_to_peak_rpy_deg": [
+        1.224145813982212,
+        1.4292023647235044,
+        0.13277769748174648
+      ],
+      "pitch_dominant_1_3_hz": 1.2304687500001574,
+      "pitch_1_3_hz_rms_deg": 0.0003669373992024494
+    },
+    {
+      "start_after_handoff_s": 30,
+      "end_after_handoff_s": 60,
+      "actual_duration_s": 29.98571428566848,
+      "physical_payload_mean_rpy_deg": [
+        -1.4223342169024769,
+        -2.356772653023,
+        0.1187228463491995
+      ],
+      "physical_payload_std_rpy_deg": [
+        0.3118659926587727,
+        0.7084215991198378,
+        0.03568087816991063
+      ],
+      "physical_payload_peak_to_peak_rpy_deg": [
+        1.0881646083276972,
+        2.442211364276253,
+        0.12361420944750139
+      ],
+      "pitch_dominant_1_3_hz": 1.9140624999992928,
+      "pitch_1_3_hz_rms_deg": 0.00037782517167395504
+    }
+  ]
+}

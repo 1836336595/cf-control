@@ -1,0 +1,50 @@
+[
+  {
+    "success": true,
+    "failure": null,
+    "observed_post_handoff_s": 60.00432705320418,
+    "minimum_vehicle_distance_m": 0.34572882848485686,
+    "maximum_body_rate_rps": 0.009974838637249447,
+    "mass_g": 54,
+    "scenario": "default",
+    "late_pitch_deg": 9.148341332150892,
+    "CF4_late_command_n": 0.5959341510389675,
+    "yaw_std5to9": 3.7309864214158005e-05
+  },
+  {
+    "success": false,
+    "failure": "emergency_landing",
+    "observed_post_handoff_s": 11.749592944048345,
+    "minimum_vehicle_distance_m": 0.300617146410772,
+    "maximum_body_rate_rps": 1.6854581862634532,
+    "mass_g": 54,
+    "scenario": "zero_bound",
+    "late_pitch_deg": null,
+    "CF4_late_command_n": null,
+    "yaw_std5to9": 1.176517611315517
+  },
+  {
+    "success": true,
+    "failure": null,
+    "observed_post_handoff_s": 60.00483529421035,
+    "minimum_vehicle_distance_m": 0.4326210485911387,
+    "maximum_body_rate_rps": 0.008537165737703361,
+    "mass_g": 23,
+    "scenario": "default",
+    "late_pitch_deg": 4.930656603992206,
+    "CF4_late_command_n": 0.4918291323325145,
+    "yaw_std5to9": 1.9110050265941744e-05
+  },
+  {
+    "success": false,
+    "failure": "emergency_landing",
+    "observed_post_handoff_s": 25.420047696097754,
+    "minimum_vehicle_distance_m": 0.29875108090807717,
+    "maximum_body_rate_rps": 2.227250480074816,
+    "mass_g": 23,
+    "scenario": "zero_bound",
+    "late_pitch_deg": null,
+    "CF4_late_command_n": null,
+    "yaw_std5to9": 0.6532005966988668
+  }
+]

@@ -1,0 +1,27 @@
+{
+  "source": "frozen",
+  "source_directory": "/home/csy/my_project/crazyswarm/ros_ws/src/crazyswarm/scripts/ctbr_logs/landing_completion_20261018/frozen_sources",
+  "source_hashes": {
+    "ctbr_controller.py": "fc8b43216fc7248db2b98e979a660594503e67d4121cca493692c87c81093e6e",
+    "ctbr_trajectory.py": "696eeabe2b62d075ac1cf4d9eed5f2af7e6bf40463019d20c95ff396eaf6d765",
+    "simulate_slung_handoff.py": "ef388a22c59b407b2ff75bc27a1c8adb14f6b4783e124c9c99bad935ee930048"
+  },
+  "actual_motor_thrust_efficiency": 1.075,
+  "gain_onset": "vehicle_descent",
+  "physical_state_or_completion_forcing": false,
+  "source_parameters": "/home/csy/my_project/crazyswarm/ros_ws/src/crazyswarm/scripts/ctbr_logs/landing_completion_20261018/frozen_parameters.yaml",
+  "command": [
+    "ctbr_logs/landing_completion_20261018/run_landing_mapping.py",
+    "--source",
+    "frozen",
+    "--gain",
+    "1.075",
+    "--gain-onset",
+    "vehicle_descent",
+    "--time-limit",
+    "90",
+    "--output",
+    "ctbr_logs/landing_completion_20261018/baseline_release_gain1075"
+  ],
+  "actual_gain_onset_time_s": 42.84285714285714
+}

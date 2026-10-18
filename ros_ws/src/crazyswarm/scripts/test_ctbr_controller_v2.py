@@ -13,6 +13,7 @@ import tempfile
 import threading
 import types
 from collections import deque
+from copy import deepcopy
 from pathlib import Path
 
 import numpy as np
@@ -37,7 +38,7 @@ def _install_ros_import_stubs():
 
     crazyswarm = types.ModuleType("crazyswarm")
     crazyswarm_msg = types.ModuleType("crazyswarm.msg")
-    for name in ("CTBR", "GenericLogData", "MocapState"):
+    for name in ("CTBR", "CTBRTiming", "GenericLogData", "MocapState"):
         setattr(crazyswarm_msg, name, type(name, (), {}))
     crazyswarm.msg = crazyswarm_msg
     sys.modules["crazyswarm"] = crazyswarm
@@ -661,12 +662,22 @@ def test_prelift_handoff_retains_last_independent_force_at_blend_zero():
     assert np.allclose(command["desired_force"], [0.0, 0.0, 0.65])
 
 
+def _merge_parameter_overrides(baseline, overlay):
+    """Recursively overlay mappings; copy replaced scalars/lists for isolation."""
+    result = deepcopy(baseline)
+    for key, value in overlay.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _merge_parameter_overrides(result[key], value)
+        else:
+            result[key] = deepcopy(value)
+    return result
+
+
 def _slung_manager(module, directory, parameter_overrides=None):
     """Instantiate real mission/controller objects; replace only ROS transport."""
     roots = _controller_parameter_roots()
     roots.update(yaml.safe_load((CONTROLLER_CONFIG_PATH.parent / "slung_payload.yaml").read_text()))
-    for root, values in (parameter_overrides or {}).items():
-        roots[root].update(values)
+    roots = _merge_parameter_overrides(roots, parameter_overrides or {})
     roots["ctbr_controller"].update(transport_mode="slung_load", log_directory=str(directory))
     roots["crazyflies"] = [
         {"id": i, "channel": 80, "uri": "radio://0/80/2M/E7E7E7E7%02X" % i,
@@ -1695,7 +1706,7 @@ def test_filter_columns_are_appended_after_legacy_csv_columns():
         header = Path(logger.path).read_text().splitlines()[0].split(",")
 
     assert header[header.index("command_thrust_newton")] == "command_thrust_newton"
-    assert header[header.index("mocap_sample_age_s"):] == [
+    assert header[header.index("mocap_sample_age_s"):header.index("controller_tick_interval_s")] == [
         "mocap_sample_age_s",
         "ekf_position_x", "ekf_position_y", "ekf_position_z",
         "ekf_velocity_x", "ekf_velocity_y", "ekf_velocity_z",
@@ -1733,6 +1744,7 @@ def test_filter_columns_are_appended_after_legacy_csv_columns():
             "desired_tension_signed_n", "payload_yaw_enabled", "transport_blend",
             "transport_blend_dot", "transport_link_gain_scale",
             "ramp_position_hold_gain_scale", "transport_position_hold_gain_scale",
+            "payload_landing_rope_preserving", "payload_landing_rope_distance_m",
             "desired_force_dot_x", "desired_force_dot_y", "desired_force_dot_z",
             "payload_ground_clearance_m", "payload_prelift_clearance_target_m",
             "payload_prelift_ready", "payload_prelift_active",

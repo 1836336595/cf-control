@@ -1,0 +1,201 @@
+{
+  "success": true,
+  "failure": null,
+  "control_rate_hz": 70.0,
+  "success_category": "short_flight_validation",
+  "verify_controlled_fault_descent": false,
+  "controlled_fault_landing_started_time_s": null,
+  "controlled_fault_descent_completed": false,
+  "validation_enabled": true,
+  "validation_transport_s": 10.0,
+  "validation_landing_started_time_s": 39.44285714285714,
+  "observed_transport_before_landing_s": 10.0,
+  "validation_completed": true,
+  "all_vehicles_zero": true,
+  "final_vehicle_z_m": [
+    0.006998252835995201,
+    0.006998252835994125,
+    0.006998252835930826
+  ],
+  "final_vehicle_vz_mps": [
+    1.2811874473712126e-13,
+    -7.846543305919788e-12,
+    1.3298420531012725e-11
+  ],
+  "terminal_reason": "payload_load: flight_validation_complete: 10.000 s",
+  "link_calibration_enabled": true,
+  "link_calibration_applied": false,
+  "link_calibration_status": "within_tolerance",
+  "link_calibration_reason": "no_positive_mismatch",
+  "nominal_link_lengths_m": [
+    0.709,
+    0.699,
+    0.664
+  ],
+  "effective_link_lengths_m": [
+    0.709,
+    0.699,
+    0.664
+  ],
+  "physical_link_lengths_m": [
+    0.709,
+    0.699,
+    0.664
+  ],
+  "onboard_controller": "mellinger",
+  "motor_model": "graefe2026",
+  "effective_plant": {
+    "onboard_controller": "mellinger",
+    "motor_model": "graefe2026",
+    "vehicle_inertia": [
+      3.3e-05,
+      3.6e-05,
+      5.9e-05
+    ],
+    "arm_length": 0.04999244943,
+    "thrust_time_constant": 0.012,
+    "motor_thrust_efficiency": [
+      1.0,
+      1.0,
+      1.0
+    ],
+    "motor_yaw_torque_coefficient": 0.006,
+    "brushless_motor_time_constant_s": 0.05,
+    "brushless_motor_speed_gain_radps": 2900.0,
+    "brushless_speed_normalization_radps": 2900.0,
+    "brushless_rotor_inertia_kgm2": 5e-08,
+    "brushless_thrust_coefficients": [
+      -0.23009526,
+      0.56176458,
+      -0.0433191
+    ],
+    "brushless_torque_coefficients": [
+      -0.0003396,
+      0.00087032,
+      0.0002896
+    ],
+    "bridge_collective_pwm_reference": 60000.0,
+    "bridge_collective_pwm_limit": 60000.0,
+    "bridge_thrust_curve_exponent": 2.0,
+    "bridge_thrust_raw_scale": [
+      1.0,
+      1.0,
+      1.0
+    ],
+    "motor_pwm_max": 65535.0,
+    "motor_available_command_fraction": [
+      1.0,
+      1.0,
+      1.0
+    ],
+    "mellinger_rate_hz": 500.0,
+    "mellinger_attitude_gains": [
+      70000.0,
+      70000.0,
+      60000.0
+    ],
+    "mellinger_rate_gains": [
+      20000.0,
+      20000.0,
+      12000.0
+    ],
+    "mellinger_rate_derivative_gain": 200.0,
+    "mellinger_yaw_integral_gain": 500.0,
+    "mellinger_yaw_integral_limit": 1500.0,
+    "onboard_pid_rate_hz": 500.0,
+    "onboard_pid_rate_kp": [
+      250.0,
+      250.0,
+      120.0
+    ],
+    "onboard_pid_rate_ki": [
+      500.0,
+      500.0,
+      16.7
+    ],
+    "onboard_pid_rate_kd": [
+      2.5,
+      2.5,
+      0.0
+    ],
+    "onboard_pid_rate_integral_limit": [
+      33.3,
+      33.3,
+      166.7
+    ],
+    "onboard_pid_yaw_gains": [
+      6.0,
+      1.0,
+      0.35
+    ],
+    "onboard_pid_yaw_integral_limit": 360.0,
+    "payload_rotational_damping": 0.001,
+    "vehicle_masses_kg": [
+      0.0434,
+      0.044,
+      0.0424
+    ],
+    "thrust_reference_n": [
+      1.176798,
+      1.176798,
+      1.176798
+    ],
+    "physical_link_lengths_m": [
+      0.709,
+      0.699,
+      0.664
+    ]
+  },
+  "ekf_feedback_mode": "sampled_filtered",
+  "ekf_sample_rate_hz": 50.0,
+  "ekf_delay_s": 0.02,
+  "ekf_host_filter_cutoff_hz": 5.0,
+  "ekf_sample_frames": 2768,
+  "ekf_delivered_frames": 2767,
+  "observed_post_handoff_s": 25.9,
+  "mellinger_attitude_gains": [
+    70000.0,
+    70000.0,
+    60000.0
+  ],
+  "mellinger_rate_gains": [
+    20000.0,
+    20000.0,
+    12000.0
+  ],
+  "mellinger_rate_derivative_gain": 200.0,
+  "physics_timestep_s": 0.002,
+  "pose_sample_rate_hz": 100.0,
+  "pose_delay_s": 0.01,
+  "command_delay_s": 0.005,
+  "rate_loop_bandwidth": [
+    35.0,
+    35.0,
+    20.0
+  ],
+  "initial_tilt_deg": 0.0,
+  "handoff_time_s": 29.442857142857143,
+  "final_time_s": 55.34285714285714,
+  "phases": [
+    "takeup",
+    "tension_ramp",
+    "height_correction",
+    "landing",
+    "landing_settle",
+    "landed"
+  ],
+  "minimum_clearance_m": 0.33571515964467447,
+  "maximum_prelift_xy_error_m": 0.21151156155266415,
+  "maximum_body_rate_rps": 0.01982380803292089,
+  "maximum_tilt_deg": 7.106222686292228,
+  "minimum_vehicle_distance_m": 0.4097405552426441,
+  "mocap_rate_alpha": 0.2,
+  "target_payload_height_m": 0.6,
+  "post_handoff_s": 60.0,
+  "payload_safety_reason": "",
+  "rate_saturation_fraction": 0.0,
+  "final_payload_target_m": null,
+  "final_payload_position_error_m": null,
+  "final_payload_height_m": 0.024998252835931406,
+  "controller_csv": "ctbr_logs/link_calibration_20261016/nominal/multi_ctbr_20261016_182503.csv"
+}

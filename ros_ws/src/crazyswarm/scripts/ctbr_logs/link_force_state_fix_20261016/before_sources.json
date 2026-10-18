@@ -1,0 +1,12 @@
+{
+  "slung_load_controller": {
+    "source": "/home/csy/my_project/crazyswarm/ros_ws/src/crazyswarm/scripts/slung_load_controller.py",
+    "snapshot": "/home/csy/my_project/crazyswarm/ros_ws/src/crazyswarm/scripts/ctbr_logs/link_force_state_fix_20261016/slung_load_controller_before.py",
+    "sha256": "ab42da78ba35f5342e83b9b3b2a1ba0cea317e4171a30f778c2ec45252d1f942"
+  },
+  "simulate_slung_handoff": {
+    "source": "/home/csy/my_project/crazyswarm/ros_ws/src/crazyswarm/scripts/simulate_slung_handoff.py",
+    "snapshot": "/home/csy/my_project/crazyswarm/ros_ws/src/crazyswarm/scripts/ctbr_logs/link_force_state_fix_20261016/simulate_slung_handoff_before.py",
+    "sha256": "dad60097478d2127ae2d01d0129a6838d04999ac161ca56ca9df5632e8b31b9f"
+  }
+}

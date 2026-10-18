@@ -1,0 +1,45 @@
+{
+  "name": "random_00_matched",
+  "family": "random",
+  "physical_error_m": [
+    0.022477650461173206,
+    -0.006833785970143089,
+    -0.027956679306226254
+  ],
+  "matched_controller_lengths": true,
+  "calibration_enabled": false,
+  "payload_rotational_damping": 0.001,
+  "pair": "random_00",
+  "index": 6,
+  "worker": 0,
+  "controller_lengths_m": [
+    0.7114776504611732,
+    0.6921662140298569,
+    0.6360433206937738
+  ],
+  "physical_lengths_m": [
+    0.7114776504611732,
+    0.6921662140298569,
+    0.6360433206937738
+  ],
+  "initial_vehicle_positions_m": [
+    [
+      0.3896666666666666,
+      -1.8919038110434076e-17,
+      0.6696238127509091
+    ],
+    [
+      -0.3475365338796904,
+      0.33422316189239004,
+      0.5903365765353003
+    ],
+    [
+      -0.3365418865274146,
+      -0.32307887750870257,
+      0.5303319548938668
+    ]
+  ],
+  "parameters_path": "/home/csy/my_project/crazyswarm/ros_ws/src/crazyswarm/scripts/ctbr_logs/link_length_errors_20261018/cases/random_00_matched/parameters.yaml",
+  "parameters_sha256": "2437921959e62b4568efb9bcf7ac693f9965d84a2af9d110bcc3c379fd23f468",
+  "output_directory": "/home/csy/my_project/crazyswarm/ros_ws/src/crazyswarm/scripts/ctbr_logs/link_length_errors_20261018/cases/random_00_matched/replay"
+}

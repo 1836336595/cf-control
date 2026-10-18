@@ -1,0 +1,63 @@
+{
+  "command": [
+    "ctbr_logs/leveling_static_20261018/run_probe.py",
+    "--case",
+    "unequal_bw2_noI",
+    "--efficiencies",
+    "1",
+    "1.05",
+    "1.10",
+    "--attitude-bandwidth",
+    "2",
+    "2",
+    ".45"
+  ],
+  "actual_motor_thrust_efficiency": [
+    1.0,
+    1.05,
+    1.1
+  ],
+  "onset": "from_start",
+  "source_snapshot": "/home/csy/my_project/crazyswarm/ros_ws/src/crazyswarm/scripts/ctbr_logs/leveling_static_20261018/source_snapshot",
+  "config_snapshot": "/home/csy/my_project/crazyswarm/ros_ws/src/crazyswarm/scripts/ctbr_logs/leveling_static_20261018/config_snapshot",
+  "baseline_candidate": "/home/csy/my_project/crazyswarm/ros_ws/src/crazyswarm/scripts/ctbr_logs/transport_reference_20261018/cascade_observed_q_damping000_timing_noise/candidate.yaml",
+  "physical_state_or_completion_forcing": false,
+  "physical_disturbance": "Native per-vehicle efficiency multiplies four rotor lift forces and resulting roll/pitch moments; Graefe reactive yaw torque is unchanged",
+  "frame": "ROS world z-up; payload R = Rz(yaw) Ry(pitch) Rx(roll); truth body-center positions",
+  "cable_lengths_m": [
+    0.85,
+    0.85,
+    0.85
+  ],
+  "payload_mass_kg": 0.023,
+  "differential_hold_integral": {
+    "ki_n_per_m_s": 0.0,
+    "force_norm_cap_n": 0.03,
+    "force_rate_norm_cap_nps": 0.002,
+    "projection": "Remove per-axis fleet mean; joint fleet scaling",
+    "injection": "desired_force_override plus b; desired_force_dot_override plus actual bdot",
+    "common_load_support_trim": "Unchanged production implementation"
+  },
+  "vehicle_masses_kg": [
+    0.0434,
+    0.044,
+    0.0424
+  ],
+  "payload_attachment_points_m": [
+    [
+      0.04,
+      -0.04,
+      -0.04
+    ],
+    [
+      0.0,
+      0.03,
+      -0.03
+    ],
+    [
+      0.025,
+      0.025,
+      0.025
+    ]
+  ]
+}

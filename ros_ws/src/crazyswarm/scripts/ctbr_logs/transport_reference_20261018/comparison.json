@@ -1,0 +1,406 @@
+{
+  "baseline_observed_q_damping001": {
+    "success": true,
+    "failure": null,
+    "handoff_time_s": 22.728571428566884,
+    "final_time_s": 82.74285714279752,
+    "observed_post_handoff_s": 60.01428571423064,
+    "initial_physical_cable_errors_m": [
+      -1.1102230246251565e-16,
+      0.0,
+      0.0
+    ],
+    "minimum_clearance_m": 0.2756592871393795,
+    "minimum_vehicle_distance_m": 0.4204487206257882,
+    "maximum_tilt_deg": 4.781847000884479,
+    "rate_saturation_fraction": 0.0,
+    "final_payload_position_error_m": 8.18346763598215e-05,
+    "terminal_reason": "post_handoff_window_complete",
+    "initial_physical_payload_rpy_deg": [
+      6.036338417045638,
+      20.409250984978975,
+      -10.426774893557214
+    ],
+    "final_physical_payload_rpy_deg": [
+      -3.649026745652176,
+      4.174401290956276,
+      -6.248179177962428
+    ],
+    "handoff_physical_payload_rpy_deg": [
+      1.2877112600685818,
+      20.891222042287744,
+      -11.26452074399283
+    ],
+    "windows": [
+      {
+        "start_after_handoff_s": 0,
+        "end_after_handoff_s": 5,
+        "actual_duration_s": 4.999999999997229,
+        "physical_payload_mean_rpy_deg": [
+          -0.0785119699242382,
+          16.293461424848115,
+          -10.731313741481022
+        ],
+        "physical_payload_std_rpy_deg": [
+          1.2463136605953034,
+          3.740714368744696,
+          0.4705014990694281
+        ],
+        "physical_payload_peak_to_peak_rpy_deg": [
+          3.6338065463615803,
+          10.63650202253079,
+          1.344908774428255
+        ],
+        "pitch_dominant_1_3_hz": 1.199999999999855,
+        "pitch_1_3_hz_rms_deg": 0.002173268713129676
+      },
+      {
+        "start_after_handoff_s": 5,
+        "end_after_handoff_s": 15,
+        "actual_duration_s": 9.985714285710763,
+        "physical_payload_mean_rpy_deg": [
+          -3.125289573574724,
+          7.838915414170975,
+          -8.930153544208093
+        ],
+        "physical_payload_std_rpy_deg": [
+          0.2827449776102278,
+          1.4938008071831237,
+          0.6314808244772216
+        ],
+        "physical_payload_peak_to_peak_rpy_deg": [
+          1.247856875971992,
+          5.43543279973663,
+          2.409031947163176
+        ],
+        "pitch_dominant_1_3_hz": 1.0937500000001399,
+        "pitch_1_3_hz_rms_deg": 0.0002457924953677264
+      },
+      {
+        "start_after_handoff_s": 15,
+        "end_after_handoff_s": 30,
+        "actual_duration_s": 14.985714285711303,
+        "physical_payload_mean_rpy_deg": [
+          -3.6547147855748263,
+          4.2038023661674195,
+          -6.439201214500623
+        ],
+        "physical_payload_std_rpy_deg": [
+          0.01818207164219037,
+          0.10757826988791128,
+          0.29818659411478204
+        ],
+        "physical_payload_peak_to_peak_rpy_deg": [
+          0.1076442229220671,
+          0.6363393490508624,
+          1.2491837599452236
+        ],
+        "pitch_dominant_1_3_hz": 1.2304687500001574,
+        "pitch_1_3_hz_rms_deg": 0.00029129666289755117
+      },
+      {
+        "start_after_handoff_s": 30,
+        "end_after_handoff_s": 60,
+        "actual_duration_s": 29.98571428566848,
+        "physical_payload_mean_rpy_deg": [
+          -3.650077828421224,
+          4.173850157741827,
+          -6.248691818923522
+        ],
+        "physical_payload_std_rpy_deg": [
+          0.00130627952150439,
+          0.0006476421716350955,
+          0.0007650821861149793
+        ],
+        "physical_payload_peak_to_peak_rpy_deg": [
+          0.006090710189802451,
+          0.00308605547610874,
+          0.003388334024364781
+        ],
+        "pitch_dominant_1_3_hz": 1.0937499999995959,
+        "pitch_1_3_hz_rms_deg": 0.0002151055305905224
+      }
+    ]
+  },
+  "consistent_observed_q_damping001": {
+    "success": true,
+    "failure": null,
+    "handoff_time_s": 22.728571428566884,
+    "final_time_s": 82.74285714279752,
+    "observed_post_handoff_s": 60.01428571423064,
+    "initial_physical_cable_errors_m": [
+      -1.1102230246251565e-16,
+      0.0,
+      0.0
+    ],
+    "minimum_clearance_m": 0.2756592871393795,
+    "minimum_vehicle_distance_m": 0.4204487206257882,
+    "maximum_tilt_deg": 4.646002219978825,
+    "rate_saturation_fraction": 0.0,
+    "final_payload_position_error_m": 9.10198130779177e-05,
+    "terminal_reason": "post_handoff_window_complete",
+    "initial_physical_payload_rpy_deg": [
+      6.036338417045638,
+      20.409250984978975,
+      -10.426774893557214
+    ],
+    "final_physical_payload_rpy_deg": [
+      -3.637349145995123,
+      3.3278161877459946,
+      -5.4619665038618574
+    ],
+    "handoff_physical_payload_rpy_deg": [
+      1.2877112600685818,
+      20.891222042287744,
+      -11.26452074399283
+    ],
+    "windows": [
+      {
+        "start_after_handoff_s": 0,
+        "end_after_handoff_s": 5,
+        "actual_duration_s": 4.999999999997229,
+        "physical_payload_mean_rpy_deg": [
+          0.44856251238993966,
+          20.571588572024275,
+          -11.327626487424222
+        ],
+        "physical_payload_std_rpy_deg": [
+          0.8256249982407956,
+          0.7697141071312396,
+          0.05632296353202554
+        ],
+        "physical_payload_peak_to_peak_rpy_deg": [
+          2.487588842053335,
+          2.9556437696115196,
+          0.18447721161866326
+        ],
+        "pitch_dominant_1_3_hz": 1.199999999999855,
+        "pitch_1_3_hz_rms_deg": 0.0019071365618654511
+      },
+      {
+        "start_after_handoff_s": 5,
+        "end_after_handoff_s": 15,
+        "actual_duration_s": 9.985714285710763,
+        "physical_payload_mean_rpy_deg": [
+          -2.7320676624950386,
+          8.960342852349294,
+          -8.879011329338308
+        ],
+        "physical_payload_std_rpy_deg": [
+          0.6902220889527921,
+          4.415024957041649,
+          1.391458779436007
+        ],
+        "physical_payload_peak_to_peak_rpy_deg": [
+          2.386966253400142,
+          14.493079561380947,
+          4.606418040296121
+        ],
+        "pitch_dominant_1_3_hz": 1.0937500000001399,
+        "pitch_1_3_hz_rms_deg": 0.0012446515470685847
+      },
+      {
+        "start_after_handoff_s": 15,
+        "end_after_handoff_s": 30,
+        "actual_duration_s": 14.985714285711303,
+        "physical_payload_mean_rpy_deg": [
+          -3.640522188050405,
+          3.34264700725228,
+          -5.635602305972667
+        ],
+        "physical_payload_std_rpy_deg": [
+          0.01898454552683852,
+          0.07254918227351397,
+          0.27242327155271856
+        ],
+        "physical_payload_peak_to_peak_rpy_deg": [
+          0.10916353806087864,
+          0.4351292163696341,
+          1.148518848084418
+        ],
+        "pitch_dominant_1_3_hz": 1.0937500000001399,
+        "pitch_1_3_hz_rms_deg": 0.00022852441556047267
+      },
+      {
+        "start_after_handoff_s": 30,
+        "end_after_handoff_s": 60,
+        "actual_duration_s": 29.98571428566848,
+        "physical_payload_mean_rpy_deg": [
+          -3.6362143019752193,
+          3.328202238263101,
+          -5.462619265701331
+        ],
+        "physical_payload_std_rpy_deg": [
+          0.0010821145087296625,
+          0.0016411134527697245,
+          0.0006273368890129644
+        ],
+        "physical_payload_peak_to_peak_rpy_deg": [
+          0.005308650876606258,
+          0.007902155282839107,
+          0.0033278477769380643
+        ],
+        "pitch_dominant_1_3_hz": 1.0937499999995959,
+        "pitch_1_3_hz_rms_deg": 0.00012719009426083715
+      }
+    ]
+  },
+  "baseline_observed_q_damping000": {
+    "success": false,
+    "failure": "emergency_landing",
+    "handoff_time_s": 22.699999999995452,
+    "final_time_s": 34.871428571418306,
+    "observed_post_handoff_s": 12.171428571422855,
+    "initial_physical_cable_errors_m": [
+      -1.1102230246251565e-16,
+      0.0,
+      0.0
+    ],
+    "minimum_clearance_m": 0.27672835686183245,
+    "minimum_vehicle_distance_m": 0.2998090203352141,
+    "maximum_tilt_deg": 7.130532784901431,
+    "rate_saturation_fraction": 0.0,
+    "final_payload_position_error_m": null,
+    "terminal_reason": "payload_load: distance: distance=0.300 m predicted=0.279 m height_error=0.00784102314741908",
+    "initial_physical_payload_rpy_deg": [
+      6.036338417045638,
+      20.409250984978975,
+      -10.426774893557214
+    ],
+    "final_physical_payload_rpy_deg": [
+      -6.724897268769931,
+      7.535322131668529,
+      -52.68502741242227
+    ],
+    "handoff_physical_payload_rpy_deg": [
+      1.1572816036691913,
+      19.058947246981017,
+      -12.808303855014936
+    ],
+    "windows": [
+      {
+        "start_after_handoff_s": 0,
+        "end_after_handoff_s": 5,
+        "actual_duration_s": 4.999999999997229,
+        "physical_payload_mean_rpy_deg": [
+          -0.12466029261085164,
+          16.302523381039734,
+          -10.683619869294612
+        ],
+        "physical_payload_std_rpy_deg": [
+          2.0355677352729145,
+          4.133916135200493,
+          1.6448991117990823
+        ],
+        "physical_payload_peak_to_peak_rpy_deg": [
+          7.7672093696848865,
+          13.891650779368515,
+          7.506576719861993
+        ],
+        "pitch_dominant_1_3_hz": 2.5999999999996857,
+        "pitch_1_3_hz_rms_deg": 0.5867580128354674
+      },
+      {
+        "start_after_handoff_s": 5,
+        "end_after_handoff_s": 15,
+        "actual_duration_s": 7.142857142854197,
+        "physical_payload_mean_rpy_deg": [
+          -3.289149154709094,
+          9.041644969763212,
+          -9.664668387208552
+        ],
+        "physical_payload_std_rpy_deg": [
+          1.0822384262722735,
+          1.0793305332460568,
+          17.393356234706328
+        ],
+        "physical_payload_peak_to_peak_rpy_deg": [
+          5.999844497817012,
+          5.29983243184438,
+          100.17218281856033
+        ],
+        "pitch_dominant_1_3_hz": 2.5199999999996954,
+        "pitch_1_3_hz_rms_deg": 1.0330918216138085
+      }
+    ]
+  },
+  "consistent_observed_q_damping000": {
+    "success": false,
+    "failure": "emergency_landing",
+    "handoff_time_s": 22.699999999995452,
+    "final_time_s": 34.35714285713269,
+    "observed_post_handoff_s": 11.657142857137242,
+    "initial_physical_cable_errors_m": [
+      -1.1102230246251565e-16,
+      0.0,
+      0.0
+    ],
+    "minimum_clearance_m": 0.27672835686183245,
+    "minimum_vehicle_distance_m": 0.2994951289253526,
+    "maximum_tilt_deg": 7.345332564807481,
+    "rate_saturation_fraction": 0.0,
+    "final_payload_position_error_m": null,
+    "terminal_reason": "payload_load: distance: distance=0.300 m predicted=0.289 m height_error=0.0037422383898050304",
+    "initial_physical_payload_rpy_deg": [
+      6.036338417045638,
+      20.409250984978975,
+      -10.426774893557214
+    ],
+    "final_physical_payload_rpy_deg": [
+      -3.335375756093457,
+      9.350994459643937,
+      33.92566108337083
+    ],
+    "handoff_physical_payload_rpy_deg": [
+      1.1572816036691913,
+      19.058947246981017,
+      -12.808303855014936
+    ],
+    "windows": [
+      {
+        "start_after_handoff_s": 0,
+        "end_after_handoff_s": 5,
+        "actual_duration_s": 4.999999999997229,
+        "physical_payload_mean_rpy_deg": [
+          0.3610717312204298,
+          20.403493433193557,
+          -11.420856845867682
+        ],
+        "physical_payload_std_rpy_deg": [
+          1.7832294073970474,
+          1.5284975858207364,
+          1.9081911245059828
+        ],
+        "physical_payload_peak_to_peak_rpy_deg": [
+          7.475097818852814,
+          6.6343986512948945,
+          8.240827570326001
+        ],
+        "pitch_dominant_1_3_hz": 2.5999999999996857,
+        "pitch_1_3_hz_rms_deg": 0.6417438835402739
+      },
+      {
+        "start_after_handoff_s": 5,
+        "end_after_handoff_s": 15,
+        "actual_duration_s": 6.628571428568584,
+        "physical_payload_mean_rpy_deg": [
+          -2.853231190368526,
+          11.357502962432452,
+          -9.9509197574363
+        ],
+        "physical_payload_std_rpy_deg": [
+          1.5349025472491649,
+          3.2417982770094746,
+          20.667194016235033
+        ],
+        "physical_payload_peak_to_peak_rpy_deg": [
+          6.824061423269317,
+          12.353343222018903,
+          109.87320866349124
+        ],
+        "pitch_dominant_1_3_hz": 2.4137931034479845,
+        "pitch_1_3_hz_rms_deg": 0.9610944382763393
+      }
+    ]
+  }
+}

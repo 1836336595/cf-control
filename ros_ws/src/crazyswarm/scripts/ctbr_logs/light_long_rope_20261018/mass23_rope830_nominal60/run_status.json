@@ -1,0 +1,12 @@
+{
+  "name": "mass23_rope830_nominal60",
+  "returncode": 0,
+  "wall_s": 41.348254596989136,
+  "success": true,
+  "failure": null,
+  "observed_post_handoff_s": 60.00030592636904,
+  "validation_completed": false,
+  "all_vehicles_zero": false,
+  "minimum_vehicle_distance_m": 0.5180108911659493,
+  "maximum_body_rate_rps": 0.009658509163662314
+}

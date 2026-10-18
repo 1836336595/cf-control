@@ -17,6 +17,40 @@ def prepare(manager, anchors, now):
         vehicle.latest_state["received_time"] = now
 
 
+def test_rope_preserving_landing_references_keep_length_and_pair_spacing():
+    module = _controller_module()
+    payload_position = np.array([0.0, 0.0, 0.50])
+    target_position = np.array([0.0, 0.0, 0.08])
+    rotation = np.eye(3)
+    attachment = np.array([
+        [0.04, -0.04, -0.04],
+        [0.00, 0.03, -0.03],
+        [0.025, 0.025, 0.025],
+    ])
+    directions = np.array([
+        [0.02, -0.35, -0.93],
+        [0.12, 0.30, -0.95],
+        [-0.15, 0.28, -0.95],
+    ]).T
+    directions /= np.linalg.norm(directions, axis=0, keepdims=True)
+    lengths = np.array([0.70, 0.71, 0.68])
+    positions, velocities, accelerations = module.rope_preserving_vehicle_references(
+        target_position, np.zeros(3), np.zeros(3), rotation, attachment,
+        directions, lengths,
+    )
+    target_attachment = target_position[:, None] + attachment
+    np.testing.assert_allclose(
+        np.linalg.norm(target_attachment.T - positions, axis=1), lengths, atol=1e-12
+    )
+    initial_attachment = payload_position[:, None] + attachment
+    initial_positions = initial_attachment - directions * lengths[None, :]
+    initial_pair = np.linalg.norm(initial_positions[:, 1] - initial_positions[:, 2])
+    final_pair = np.linalg.norm(positions[1] - positions[2])
+    assert np.isclose(initial_pair, final_pair, atol=1e-12)
+    np.testing.assert_allclose(velocities, np.zeros((3, 3)))
+    np.testing.assert_allclose(accelerations, np.zeros((3, 3)))
+
+
 def test_transport_has_explicit_tilt_and_preserves_horizontal_force(tmp_path):
     module = _controller_module()
     manager, anchors = _slung_manager(module, tmp_path)
@@ -69,6 +103,53 @@ def test_physical_failure_routes_every_vehicle_to_landing_and_clears_overrides(t
         assert not manager.last_transport_overrides
         assert all(v.trajectory.phase == "emergency_landing" for v in manager.vehicles)
         assert "distance" in manager.payload_safety_reason
+    finally:
+        manager.logger.close()
+
+
+def test_payload_lowering_distance_fault_keeps_payload_aware_landing(tmp_path):
+    module = _controller_module()
+    manager, anchors = _slung_manager(module, tmp_path)
+    try:
+        prepare(manager, anchors, 1.0)
+        manager.payload_validation_landing_stage = "payload_lowering"
+        manager.latest_payload_state["received_time"] = 1.0
+        manager._begin_payload_emergency_landing(1.0, "distance: distance=0.300 m predicted=0.280 m")
+        assert manager.payload_transport_active
+        assert manager.payload_payload_aware_emergency
+        assert all(vehicle.trajectory.phase != "emergency_landing"
+                   for vehicle in manager.vehicles)
+    finally:
+        manager.logger.close()
+
+
+def test_payload_landing_override_preserves_each_rope_distance(tmp_path):
+    module = _controller_module()
+    manager, anchors = _slung_manager(module, tmp_path)
+    try:
+        prepare(manager, anchors, 1.0)
+        manager.payload_validation_landing_stage = "payload_lowering"
+        manager.latest_payload_state["received_time"] = 1.0
+        for vehicle in manager.vehicles:
+            vehicle.trajectory.begin_controlled_landing(
+                1.0, vehicle.latest_state["position"], 0.0, "test"
+            )
+        overrides = manager._transport_overrides(1.1)
+        payload = manager.latest_payload_state
+        measured = np.asarray([vehicle.latest_state["position"] for vehicle in manager.vehicles])
+        attachment = (
+            payload["position"][:, None]
+            + payload["rotation"] @ manager.slung_controller.config.attachment_points_m
+        )
+        target = np.asarray([overrides[id(vehicle)]["position"]
+                             for vehicle in manager.vehicles])
+        distances = np.linalg.norm(attachment.T - target, axis=1)
+        assert np.all(distances >= manager.slung_controller.config.link_lengths_m - 1.0e-9)
+        np.testing.assert_allclose(
+            np.linalg.norm(target[1] - target[2]),
+            np.linalg.norm(measured[1] - measured[2]),
+            atol=1.0e-9,
+        )
     finally:
         manager.logger.close()
 

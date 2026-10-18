@@ -6,20 +6,94 @@ slung_payload:
   rigid_body: "load"
   mocap_topic: "/load/mocap_state"
   size_m: [0.08, 0.06, 0.05]        # [长, 宽, 高]。
-  mass_kg: 0.054
+  mass_kg: 0.023        # 负载质量，kg。 0.054 / 0.023
   # 负载几何中心的绝对目标高度，m。预抬阶段先满足 prelift_clearance_m，
   # 接管后的 reference_lift 使用此目标，不再沿用普通轨迹的 1.0 m。
   target_payload_height_m: 0.60
   # 离线实机控制器回放在接管后继续观察的时间；不改变真实控制器时钟。
   post_handoff_s: 60.0
+  # 首次实飞验证：进入 TAUT_RAMP 后计时，含 5 s 张力渐增及后续参考抬升。
+  # 到时从当前实测位置受控降落；不是起飞后第 10 s，也不等待升至 0.60 m。
+  # 先协同放下负载，确认负载落地稳定后，再保持三机 XY 分别下降并停推。
+  flight_validation_enabled: true
+  flight_validation_transport_s: 20.0
+  # 独立的负载下降限幅；时间按实际下降距离自适应，不再取 4 s × 0.55。
+  landing_payload_max_speed_mps: 0.12
+  landing_payload_max_acceleration_mps2: 0.15
+  landing_gain_transition_s: 2.0
+  landing_unload_s: 2.0 # 实测稳定接地后才开始卸载，再转入三机下降。
+  # 仅负载触地/卸载后的三机独立下降：Z 积分独立于 XY 误差门控，
+  # 补偿推力模型静差，避免普通 ±0.20 积分上限导致离地低空悬停。
+  landing_vertical_integral_limit: 2.0
+  landing_vertical_integral_rate_limit: 0.5
+  landing_vertical_feedback_limit_mps2: 8.0
+  landing_touchdown_tolerance_m: 0.015 # 围绕起飞前实测地面基线的采样窗口。
+  landing_touchdown_contact_margin_m: 0.006 # 窗口高度中位数须在地面基线上方 6 mm 内。
+  landing_touchdown_speed_mps: 0.05 # 窗口高度斜率与速度中位数，非瞬时差分。
+  landing_touchdown_confirm_s: 0.30
+  landing_touchdown_window_s: 0.40
+  landing_touchdown_height_span_m: 0.012
+  landing_touchdown_timeout_s: 4.0 # 下降参考完成后的确认期限；超时不是确认接地。
+  # Udaan 执行器模型选择。实飞仍由 hover_swarm.launch 的 stabilizer.controller 控制。
+  simulation:
+    onboard_controller: mellinger # pid/mellinger
+    # Graefe 2026：混控后四个电机各自维护转速，随后计算推力和反扭矩。
+    # legacy_quadratic 保留旧平方推力曲线和 12 ms 推力滞后作对照。
+    motor_model: graefe2026
+    brushless_motor_time_constant_s: 0.05
+    brushless_motor_speed_gain_radps: 2900.0
+    brushless_speed_normalization_radps: 2900.0
+    brushless_rotor_inertia_kgm2: 5.0e-8
+    brushless_thrust_coefficients: [-0.23009526, 0.56176458, -0.0433191]
+    brushless_torque_coefficients: [-0.0003396, 0.00087032, 0.0002896]
+    vehicle_inertia: [3.3e-5, 3.6e-5, 5.9e-5] # 论文带保护圈惯量；质量仍取各机实测值。
+    arm_length: 0.04999244943 # 论文电机中心方形宽度 0.0707 m / sqrt(2)。
+    # 与当前 C++ 桥接一致：1.176798 N 对应 raw=60000；这是映射参数。
+    bridge_collective_pwm_reference: 60000.0
+    bridge_collective_pwm_limit: 60000.0
+    bridge_thrust_curve_exponent: 2.0
+    bridge_thrust_raw_scale: [1.0, 1.0, 1.0] # 可填写该次实飞冻结的 preflight scale。
+    motor_pwm_max: 65535.0 # 混控后单电机归一化范围，与 collective 上限不同。
+    motor_available_command_fraction: [1.0, 1.0, 1.0] # 作者式可用指令上限；不是电压标定曲线。
+    # sampled_filtered：50 Hz 位置/速度包进入实飞 _ekf_state_callback，
+    # 由 ctbr_controller.yaml 的 5 Hz 滤波器产生控制速度/加速度。
+    # delayed_truth：旧理想反馈，仅用于对照；两者都未模拟完整机载 EKF。
+    ekf_feedback_mode: sampled_filtered
+    ekf_sample_rate_hz: 50.0
+    ekf_delay_s: 0.02
+    pose_sample_rate_hz: 100.0
+    pose_delay_s: 0.01
+    command_delay_s: 0.005
+    time_limit_s: 180.0
+    # 空列表按固定 70 Hz 运行；非空列表按秒重复这些控制周期，位姿/EKF 时钟独立。
+    control_intervals_s: []
+    mellinger_rate_hz: 500.0
+    # 机载 Mellinger 增益单位为 PWM/rad，与主机 transport_* 增益不同；
+    # 用固件 ctrlMel 源码值核对模型，不能用主机增益替代。
+    mellinger_attitude_gains: [70000.0, 70000.0, 60000.0]
+    mellinger_rate_gains: [20000.0, 20000.0, 12000.0]
+    mellinger_rate_derivative_gain: 200.0
+    mellinger_yaw_integral_gain: 500.0
+    mellinger_yaw_integral_limit: 1500.0
+    payload_rotational_damping: 0.001
   density_kg_m3: 0.0                # 0 表示使用 mass_kg，不按密度派生质量。
   # 依据 2026-10-01 CSV 的早期稳定运输段拟合，顺序为 [CF3, CF4, CF5]，m。
   # CSV 未记录负载姿态，因此这是几何拟合值；重新测量绳长时应优先采用实测值。
-  link_lengths_m: [0.709, 0.699, 0.674]
+  link_lengths_m: [0.850, 0.850, 0.850] # [0.699, 0.699, 0.674] / [0.830, 0.830, 0.830]
+  # 名义长度保留；TAKEUP 完成后的稳定几何窗口可校准一次运行有效值。
+  # 只增加、不缩短，避免把松绳距离当成真实绳长；不回写本文件。
+  link_calibration_enabled: true
+  link_calibration_window_s: 3.0
+  link_calibration_max_adjustment_m: 0.045
+  link_calibration_max_spread_m: 0.02 # 稳定窗 P90-P10 距离波动。
+  link_calibration_max_drift_mps: 0.003
+  link_calibration_max_relative_speed_mps: 0.08
+  link_calibration_max_sample_gap_s: 0.10
+  link_calibration_min_samples: 100 # 独立时间戳，重复帧不重复计数。
   # 旧版单值参数仅作为未配置 link_lengths_m 时的兼容回退。
-  link_length_m: 0.694
+  link_length_m: 0.830
   mocap_hold_s: 0.20               # 负载状态短暂丢帧时保持上一周期运输输出，s。
-  emergency_land_after_s: 0.30     # 负载状态持续失效后进入受控降落，s。
+  emergency_land_after_s: 0.50     # 负载状态持续失效后进入受控降落，s。
   # 以下四项仅在 state_observer_enabled=false 的兼容路径中使用。
   velocity_filter_cutoff_hz: 3.0   # 旧版负载速度二阶因果低通截止频率，Hz。
   velocity_filter_max_dt: 0.05     # 旧版速度样本间隔超过此值时重置滤波器，s。
@@ -42,7 +116,7 @@ slung_payload:
   takeup_duration_s: 8.0           # 独立几何控制下收绳到当前负载几何目标的时间，s。
   takeup_pre_tension_slack_m: 0.0  # 实测绳距作为真实目标，不再额外扣除预张紧余量，m。
   takeup_outward_offset_m: 0.12     # TAKEUP 水平外张安全余量；平衡绳向失败时也作为回退值，m。
-  takeup_distance_tolerance_m: 0.015 # 绳长确认允许的距离余量，m。
+  takeup_distance_tolerance_m: 0.030 # 绳长确认允许的距离余量，m。
   takeup_position_tolerance_m: 0.15 # 名义 TAKEUP 目标位置偏差告警阈值，m；不再阻塞接管。
   takeup_link_angle_tolerance_deg: 10.0 # 实测绳向相对目标绳向的容差，deg。
   takeup_confirm_s: 0.50            # 几何条件同时满足的确认时间，s。
@@ -68,23 +142,30 @@ slung_payload:
   takeup_diagnostic_interval_s: 1.0 # TAKEUP 未接管时终端诊断输出周期，s。
   activation_hold_s: 0.30            # 绳长确认后负载状态连续有效的接管等待时间，s。
   tension_ramp_s: 5.0                # MATLAB TAUT_RAMP 张力建立时间，s。
+  # 接管后使用几何参考串级：负载张力分配 + 三机位置保持。
+  # coupled 为原绳向反馈/期望负载加速度补偿方法，保留用于离线对照。
+  transport_force_mode: reference_cascade
+  # 从接管时实测姿态/绳向平滑转到水平静力平衡构型，使用同一个五次时间参数。
+  transport_attitude_reference_enabled: true
+  transport_equilibrium_reference_enabled: true
+  transport_attitude_reference_s: 12.0 # 从 TAUT_RAMP 起点计时，五次曲线，端点角速度/角加速度为零。
   # Udaan 同款张力渐增位置保持：协同力逐步接管时仍保持 TAKEUP 实测锚点，
   # 防止水平绳张力把三架飞机拉向负载中心。
   ramp_position_hold_gain_scale: 2.0
   reference_lift_s: 12.0             # 与稳定 Udaan 仿真一致，张力建立后抬升参考的时间，s。
-  # 稳定 Udaan 仿真使用完整绳向反馈；按张力渐增比例接管绳向环。
+  # 以下两项仅 coupled 模式启用；reference_cascade 中绳向反馈实际倍率固定为 0，
+  # 由跟踪平衡构型的三机位置保持提供阻尼，CSV 记录有效倍率和实际模式。
   transport_link_gain_scale: 0.4
-  # 参考抬升结束后逐渐降低绳方向修正，减少长期姿态环激励；实机默认保持 1.0。
   transport_link_steady_gain_scale: 0.4
   # 稳态运输保持增益；预抬接管的保持项在 reference_lift_s 内平滑消退到此值。
-  transport_position_hold_gain_scale: 0.5
+  transport_position_hold_gain_scale: 1.5
   # 接管和运输的实测构型保护；达到实际间距边界立即受控降落。
   minimum_vehicle_distance_m: 0.30
   separation_prediction_s: 0.35
   transport_height_error_limit_m: 0.08
   transport_fault_confirm_s: 2.20  # 预测靠近/掉高/持续横向速率饱和的确认时间。
   # 保留预抬输出相对协同模型的竖直差额，用有界 I 项慢调，不重复叠加负载重量。
-  transport_support_trim_limit_n: 0.25
+  transport_support_trim_limit_n: 0.25 # 普通 I 上限；接管时在总推力余量内继承完整实测残差。
   transport_support_integral_gain_npm_s: 0.20
   transport_support_trim_rate_nps: 0.03
   landing_approach_fraction: 0.55    # MATLAB 降落前段保持绷紧控制的时长比例。
@@ -104,14 +185,15 @@ slung_payload:
   c1: 0.50
 
   # 负载姿态环：MATLAB 按负载惯量和目标带宽自动生成 kR/kOmega。
-  attitude_bandwidth_hz: [2.0, 2.0, 0.45]
+  attitude_bandwidth_hz: [1.0, 1.0, 0.45]
+  # 本轮保持 0.90，单独验证绳向力限制器修复；不以阻尼比取代稳定性验证。
   attitude_damping_ratio: 0.90
   yaw_channel_enabled: true
 
   # 张力分配数值保护和绳向环参数。
   force_norm_epsilon: 1.0e-9
   tension_pinv_tolerance: 1.0e-9
-  link_kq: 55.0
+  link_kq: 40.0
   link_komega: 20.0
   link_integral_gain: 0.0
   link_integral_limit: [0.30, 0.30, 0.30]

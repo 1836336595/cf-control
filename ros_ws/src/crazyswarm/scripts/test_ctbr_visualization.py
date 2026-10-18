@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -204,3 +205,170 @@ def test_second_order_velocity_filter_does_not_bridge_invalid_samples():
     assert np.all(np.isnan(filtered_acceleration[:, 10]))
     assert np.all(np.isfinite(filtered_velocity[:, :10]))
     assert np.all(np.isfinite(filtered_velocity[:, 11:]))
+
+
+def _payload_rows(vehicle_ids=(3,), attitude=True, payload=True):
+    rows = []
+    for time_s in (0.0, 0.01):
+        for vehicle_id in vehicle_ids:
+            row = {
+                "mode": "control", "control_time_s": time_s,
+                "mission_time_s": time_s, "vehicle_id": vehicle_id,
+                "position_x": 0.1, "position_y": 0.2, "position_z": 1.0,
+                "target_x": 0.0, "target_y": 0.0, "target_z": 1.0,
+            }
+            if payload:
+                row.update({
+                    "payload_state_valid": 1,
+                    "payload_position_x": 0.2 + time_s,
+                    "payload_position_y": -0.1, "payload_position_z": 0.4,
+                    "payload_target_x": 0.3, "payload_target_y": 0.0,
+                    "payload_target_z": 0.5,
+                    "payload_velocity_x": 0.0, "payload_velocity_y": 0.0,
+                    "payload_velocity_z": 0.0,
+                    "payload_acceleration_x": 0.0, "payload_acceleration_y": 0.0,
+                    "payload_acceleration_z": 0.0,
+                })
+                if attitude:
+                    row.update({
+                        "payload_roll_rad": math.pi / 6,
+                        "payload_pitch_rad": -math.pi / 12,
+                        "payload_yaw_rad": math.pi / 2,
+                        "payload_target_roll_rad": 0.0,
+                        "payload_target_pitch_rad": math.pi / 18,
+                        "payload_target_yaw_rad": math.pi / 3,
+                    })
+            rows.append(row)
+    return rows
+
+
+def _write_rows(path, rows):
+    with path.open("w", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    return path
+
+
+def test_payload_loader_converts_attitude_and_deduplicates_merged_ticks(tmp_path):
+    from ctbr_visualization import load_payload_plot_data
+
+    path = _write_rows(tmp_path / "merged.csv", _payload_rows((3, 4, 5)))
+    data = load_payload_plot_data(path)
+
+    assert np.allclose(data["time_s"], [0.0, 0.01])
+    assert np.allclose(data["rpy"][:, 0], [30.0, -15.0, 90.0])
+    assert np.allclose(data["desired_rpy"][:, 0], [0.0, 10.0, 60.0])
+
+
+def test_payload_loader_keeps_invalid_state_gaps_and_independent_reference(tmp_path):
+    from ctbr_visualization import load_payload_plot_data
+
+    rows = _payload_rows()
+    rows[1]["payload_state_valid"] = 0
+    missing_position = dict(rows[0], mission_time_s=0.02, payload_position_x="")
+    rows.append(missing_position)
+    data = load_payload_plot_data(_write_rows(tmp_path / "gaps.csv", rows))
+
+    assert np.allclose(data["time_s"], [0.0, 0.01, 0.02])
+    assert np.all(np.isnan(data["position"][:, 1:]))
+    assert np.all(np.isnan(data["rpy"][:, 1:]))
+    assert np.allclose(data["target"][0], [0.3, 0.3, 0.3])
+    assert np.allclose(data["desired_rpy"][1], [10.0, 10.0, 10.0])
+
+
+def test_legacy_payload_position_only_keeps_missing_attitude_unknown(tmp_path):
+    from ctbr_visualization import load_payload_plot_data
+
+    rows = _payload_rows(attitude=False)
+    for row in rows:
+        for field in list(row):
+            if field.startswith(("payload_velocity", "payload_acceleration")):
+                del row[field]
+    data = load_payload_plot_data(_write_rows(tmp_path / "legacy.csv", rows))
+
+    assert data is not None
+    assert np.allclose(data["position"][0], [0.2, 0.21])
+    assert np.all(np.isnan(data["rpy"]))
+    assert np.all(np.isnan(data["desired_rpy"]))
+
+
+@pytest.mark.parametrize("vehicle_ids,attitude", [((3,), True), ((3, 4), True), ((3,), False)])
+def test_static_viewer_renders_and_exports_payload_pose(tmp_path, monkeypatch, vehicle_ids, attitude):
+    import matplotlib
+    matplotlib.use("Agg")
+    import ctbr_visualization as viewer
+
+    pyplot = viewer.require_matplotlib()
+    path = _write_rows(tmp_path / "flight.csv", _payload_rows(vehicle_ids, attitude))
+    output = tmp_path / "flight.png"
+    monkeypatch.setattr(pyplot, "show", lambda: None)
+    try:
+        viewer.plot(path, output, True, 10.0)
+        payload_figure = pyplot.figure("Crazyflie Payload Pose")
+        assert len(payload_figure.axes) == 6
+        payload_figure.canvas.draw()
+        position_line, position_reference = payload_figure.axes[0].lines
+        assert np.allclose(position_line.get_ydata(), [0.2, 0.21])
+        assert np.allclose(position_reference.get_ydata(), [0.3, 0.3])
+        roll_line, roll_reference = payload_figure.axes[3].lines
+        if attitude:
+            assert np.allclose(roll_line.get_ydata(), [30.0, 30.0])
+            assert np.allclose(roll_reference.get_ydata(), [0.0, 0.0])
+        else:
+            assert np.all(np.isnan(roll_line.get_ydata()))
+            assert np.all(np.isnan(roll_reference.get_ydata()))
+        assert output.is_file()
+        assert (tmp_path / "flight_payload.png").is_file()
+    finally:
+        pyplot.close("all")
+
+
+def test_vehicle_only_log_does_not_open_or_export_payload_figure(tmp_path, monkeypatch):
+    import matplotlib
+    matplotlib.use("Agg")
+    import ctbr_visualization as viewer
+
+    pyplot = viewer.require_matplotlib()
+    path = _write_rows(tmp_path / "vehicle.csv", _payload_rows(payload=False))
+    monkeypatch.setattr(pyplot, "show", lambda: None)
+    try:
+        viewer.plot(path, tmp_path / "vehicle.png", True, 10.0)
+        assert "Crazyflie Payload Pose" not in pyplot.get_figlabels()
+        assert not (tmp_path / "vehicle_payload.png").exists()
+    finally:
+        pyplot.close("all")
+
+
+def test_realtime_viewer_adds_payload_figure_when_state_first_arrives(tmp_path, monkeypatch):
+    import matplotlib
+    matplotlib.use("Agg")
+    import ctbr_visualization as viewer
+
+    pyplot = viewer.require_matplotlib()
+    rows = _payload_rows((3, 4))
+    initial_rows = [dict(row, payload_position_x="", payload_roll_rad="") for row in rows]
+    path = _write_rows(tmp_path / "growing.csv", initial_rows)
+
+    def advance_log():
+        assert "Crazyflie Payload Pose" not in pyplot.get_figlabels()
+        _write_rows(path, rows)
+        main_figure = pyplot.figure("Crazyflie Multi-CTBR Visualization")
+        main_figure.canvas.draw()
+        main_figure._ctbr_animation._func(1)
+        payload_figure = pyplot.figure("Crazyflie Payload Pose")
+        assert len(payload_figure.axes) == 6
+        payload_figure.canvas.draw()
+        assert np.allclose(payload_figure.axes[3].lines[0].get_ydata(), [30.0, 30.0])
+        for row in rows:
+            row["payload_roll_rad"] = math.pi / 4
+        _write_rows(path, rows)
+        main_figure._ctbr_animation._func(2)
+        assert np.allclose(payload_figure.axes[3].lines[0].get_ydata(), [45.0, 45.0])
+
+    monkeypatch.setattr(pyplot, "show", advance_log)
+    try:
+        viewer.realtime_plot(path, tmp_path / "live.png", 0.2, 10.0, str(tmp_path))
+        assert (tmp_path / "live_payload.png").is_file()
+    finally:
+        pyplot.close("all")

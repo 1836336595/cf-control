@@ -1,4 +1,6 @@
 # Crazyflie 实机参数。运输控制器仍使用这些质量、推力标定和速率限制。
+# 当前 C++ 桥接以 raw=60000 作为推力映射参考；1.176798 N 在代码中对应
+# 这个参考点。混控后单电机上限为 65535；实际升力须由电机/桨/电池条件标定。
 # payload_attachment_index 明确 MATLAB 矩阵列与飞机的对应关系：
 # 1=CF3 前方，2=CF4 左下，3=CF5 右下。
 
@@ -37,8 +39,9 @@ ctbr_controller_cf3:
   omega_c_method: analytic
   omega_c_force_norm_epsilon: 1.0e-7
   omega_c_heading_projection_epsilon: 1.0e-6
-  transport_attitude_gain: [6.0, 6.0, 3.0]
-  transport_rate_gain: [2.0, 2.0, 1.0]
+  # Graefe 2026 电机模型：70 Hz + 20 ms 位姿/10 ms 指令延迟验证。
+  transport_attitude_gain: [12.0, 12.0, 6.0]
+  transport_rate_gain: [0.25, 0.25, 0.125]
   transport_body_rate_filter_tau_s: 0.0
   transport_force_filter_tau_s: 0.005
   preflight_voltage_reference_v: 4.20
@@ -81,8 +84,8 @@ ctbr_controller_cf4:
   omega_c_method: analytic
   omega_c_force_norm_epsilon: 1.0e-7
   omega_c_heading_projection_epsilon: 1.0e-6
-  transport_attitude_gain: [6.0, 6.0, 3.0]
-  transport_rate_gain: [2.0, 2.0, 1.0]
+  transport_attitude_gain: [12.0, 12.0, 6.0]
+  transport_rate_gain: [0.25, 0.25, 0.125]
   transport_body_rate_filter_tau_s: 0.0
   transport_force_filter_tau_s: 0.005
   preflight_voltage_reference_v: 4.20
@@ -125,8 +128,8 @@ ctbr_controller_cf5:
   omega_c_method: analytic
   omega_c_force_norm_epsilon: 1.0e-7
   omega_c_heading_projection_epsilon: 1.0e-6
-  transport_attitude_gain: [6.0, 6.0, 3.0]
-  transport_rate_gain: [2.0, 2.0, 1.0]
+  transport_attitude_gain: [12.0, 12.0, 6.0]
+  transport_rate_gain: [0.25, 0.25, 0.125]
   transport_body_rate_filter_tau_s: 0.0
   transport_force_filter_tau_s: 0.005
   preflight_voltage_reference_v: 4.20

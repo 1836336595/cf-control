@@ -1,0 +1,12 @@
+{
+  "name": "mass23_rope830_delay60",
+  "returncode": 0,
+  "wall_s": 41.25108499999624,
+  "success": true,
+  "failure": null,
+  "observed_post_handoff_s": 60.00030592636904,
+  "validation_completed": false,
+  "all_vehicles_zero": false,
+  "minimum_vehicle_distance_m": 0.5180817248259582,
+  "maximum_body_rate_rps": 0.009380348388228021
+}

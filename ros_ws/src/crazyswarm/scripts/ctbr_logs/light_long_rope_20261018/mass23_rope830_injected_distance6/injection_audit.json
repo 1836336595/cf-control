@@ -1,0 +1,24 @@
+{
+  "method": "guard reason injection in actual MuJoCo replay",
+  "physical_close_approach_injected": false,
+  "production_source_changed": false,
+  "expected_result": "early distance fault enters independent emergency_landing",
+  "injected": true,
+  "injected_time_s": 29.428548812225927,
+  "handoff_time_s": 23.414288288156968,
+  "actual_minimum_distance_m": 0.5473716611234055,
+  "actual_predicted_distance_m": 0.5473716611234055,
+  "original_guard_reason": "",
+  "injected_reason": "distance",
+  "replay_success": false,
+  "replay_failure": "emergency_landing",
+  "terminal_phases": [
+    "emergency_landing",
+    "emergency_landing",
+    "emergency_landing"
+  ],
+  "controlled_exit_reason": "",
+  "payload_transport_active": false,
+  "rope_preserving_initialized": false,
+  "expected_branch_reproduced": true
+}

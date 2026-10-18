@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""MATLAB-compatible geometric controller for a three-Crazyflie slung load.
+"""Geometric controller for a three-Crazyflie slung load.
 
 The implementation keeps the MATLAB controller's control stages in one place:
 payload position/attitude feedback, wrench allocation, link-direction control,
 and per-vehicle force construction.  Inputs and outputs use the project's
 right-handed world-z-up convention.  The load rigid body itself is measured at
 the top-surface origin; :func:`mocap_top_surface_to_center` converts it to the
-geometric center before this controller is called.
+geometric center before this controller is called. The default ``coupled``
+force mode follows the MATLAB stages. ``reference_cascade`` uses desired
+attachment acceleration for aircraft support and leaves cable-motion damping
+to the caller's aircraft position hold.
 """
 
 from dataclasses import dataclass
@@ -658,15 +661,19 @@ class SlungLoadConfig:
     link_force_correction_limit_n: float = 0.12
     link_force_correction_rate_limit_nps: float = 5.0
     link_lengths_m: object = None
+    transport_force_mode: str = "coupled"
 
     def __post_init__(self):
+        if (not isinstance(self.transport_force_mode, str) or
+                self.transport_force_mode not in ("coupled", "reference_cascade")):
+            raise ValueError("transport_force_mode must be coupled or reference_cascade")
         source = self.link_length_m if self.link_lengths_m is None else self.link_lengths_m
         self.link_lengths_m = link_lengths_vector(source)
         self.link_length_m = float(np.mean(self.link_lengths_m))
 
 
 class SlungLoadController:
-    """Stateful MATLAB slung-load controller in ROS world-z-up coordinates."""
+    """Stateful slung-load controller in ROS world-z-up coordinates."""
 
     def __init__(self, config):
         self.config = config
@@ -857,10 +864,12 @@ class SlungLoadController:
             ) / 12.0,
         ])
         feedforward = r0.T @ rd @ omegad
+        # Desired rates live in Rd's body frame.  Their derivative after
+        # transport into the measured body includes -omega x feedforward;
+        # cancel measured gyroscopic coupling before commanding that rate.
         desired_moment = (
-            -np.array([0.0, 0.0, 0.0]) * e_r
-            - np.array([0.0, 0.0, 0.0]) * e_omega
-            + _hat(feedforward) @ inertia @ feedforward
+            np.cross(omega0, inertia @ omega0)
+            - inertia @ np.cross(omega0, feedforward)
             + inertia @ r0.T @ rd @ omegadd
         )
         # Payload attitude gains are supplied by the caller in target.  This
@@ -912,16 +921,29 @@ class SlungLoadController:
         # Full-strength correction at handoff can pull an aircraft inward when
         # its measured cable direction still differs from static allocation.
         link_gain_scale = float(np.clip(target.get("link_gain_scale", 1.0), 0.0, 1.0))
+        reference_cascade = self.config.transport_force_mode == "reference_cascade"
+        if reference_cascade:
+            # Aircraft position hold supplies cable-motion damping in this
+            # cascade.  Keep load feedback in tension allocation, and support
+            # aircraft inertia from the desired attachment motion only.
+            link_gain_scale = 0.0
         for index, vehicle in enumerate(vehicle_states):
             q = link_units[:, index]
             qdot = link_rates[:, index]
             omega_link = np.cross(q, qdot)
             rho = self.config.attachment_points_m[:, index]
-            ai = (
-                desired_load_acceleration + gravity
-                + r0 @ (_hat(omega0) @ (_hat(omega0) @ rho))
-                - r0 @ _hat(rho) @ omega0_dot_cmd
-            )
+            if reference_cascade:
+                ai = (
+                    ad + gravity
+                    + rd @ (_hat(omegad) @ (_hat(omegad) @ rho))
+                    - rd @ _hat(rho) @ omegadd
+                )
+            else:
+                ai = (
+                    desired_load_acceleration + gravity
+                    + r0 @ (_hat(omega0) @ (_hat(omega0) @ rho))
+                    - r0 @ _hat(rho) @ omega0_dot_cmd
+                )
             mu_id = mu_desired[:, index]
             signed_tension = -float(q @ mu_id)
             allocated_qid = _normalize(-mu_id, self.previous_link_units[:, index])
@@ -958,6 +980,11 @@ class SlungLoadController:
             link_force, _ = self._limit_link_force(
                 raw_link_force, previous_perpendicular_forces[index], dt
             )
+            correction_norm = float(np.linalg.norm(raw_link_force))
+            correction_limit = float(self.config.link_force_correction_limit_n)
+            bounded_correction = raw_link_force * min(
+                1.0, correction_limit / max(correction_norm, 1.0e-12)
+            )
             kinematic_force = -vehicle.get("mass", 0.043) * q_hat_sq @ ai
             u_perp = link_force + kinematic_force
             total_force = u_parallel + u_perp
@@ -966,7 +993,12 @@ class SlungLoadController:
                 "force_dot": np.zeros(3),
                 "raw_link_force": raw_link_force.copy(),
                 "link_force": link_force.copy(),
+                "link_force_magnitude_limited": correction_norm > correction_limit,
+                "link_force_rate_limited": bool(
+                    np.linalg.norm(link_force - bounded_correction) > 1.0e-12
+                ),
                 "kinematic_perpendicular_force": kinematic_force.copy(),
+                "kinematic_specific_acceleration": ai.copy(),
                 "perpendicular_force": u_perp.copy(),
                 "payload_position_error": ep.copy(),
                 "payload_velocity_error": ev.copy(),
@@ -980,8 +1012,10 @@ class SlungLoadController:
                 "desired_tension_vector": mu_id.copy(),
             })
         vehicle_forces = np.asarray([output["force"] for output in outputs], dtype=float)
+        # The rate limiter applies only to cable-direction correction. Keep
+        # kinematic compensation out of its history, including on short ticks.
         self.previous_perpendicular_forces = [
-            output["perpendicular_force"].copy() for output in outputs
+            output["link_force"].copy() for output in outputs
         ]
         if self.previous_vehicle_forces is None:
             vehicle_force_dots = np.zeros_like(vehicle_forces)
@@ -998,6 +1032,7 @@ class SlungLoadController:
         self.previous_vehicle_forces = vehicle_forces.copy()
         self.previous_link_units = link_units.copy()
         return {
+            "force_mode": self.config.transport_force_mode,
             "vehicles": outputs,
             "payload_position_error": ep,
             "payload_velocity_error": ev,
