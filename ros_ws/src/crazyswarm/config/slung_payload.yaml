@@ -12,11 +12,11 @@ slung_payload:
   target_payload_height_m: 0.60
   # 离线实机控制器回放在接管后继续观察的时间；不改变真实控制器时钟。
   post_handoff_s: 60.0
-  # 首次实飞验证：进入 TAUT_RAMP 后计时，含 5 s 张力渐增及后续参考抬升。
-  # 到时从当前实测位置受控降落；不是起飞后第 10 s，也不等待升至 0.60 m。
+  # 实飞验证：进入 TAUT_RAMP 后计时，前 17 s 完成参考运动，余下约 43 s 观察差分补偿。
+  # 到时从当前实测位置受控降落；不是起飞后第 60 s，也不是到达 0.60 m 后再等 60 s。
   # 先协同放下负载，确认负载落地稳定后，再保持三机 XY 分别下降并停推。
   flight_validation_enabled: true
-  flight_validation_transport_s: 20.0
+  flight_validation_transport_s: 60.0
   # 独立的负载下降限幅；时间按实际下降距离自适应，不再取 4 s × 0.55。
   landing_payload_max_speed_mps: 0.12
   landing_payload_max_acceleration_mps2: 0.15
@@ -159,6 +159,34 @@ slung_payload:
   transport_link_steady_gain_scale: 0.4
   # 稳态运输保持增益；预抬接管的保持项在 reference_lift_s 内平滑消退到此值。
   transport_position_hold_gain_scale: 1.5
+  # 两种 reference_cascade 飞机反馈共用：负载姿态误差缓慢修正三机三维参考。
+  # 期望姿态仍保持当前水平/零航向；本项不把姿态目标改成补偿角。
+  transport_attitude_trim_enabled: true
+  transport_attitude_trim_gain_per_s: [0.0, 0.10, 0.01] # 当前先只验证 pitch，roll/yaw 保持原姿态环。
+  transport_attitude_trim_limit_m: 0.010 # 最大任一飞机参考偏置的三维范数，m。
+  transport_attitude_trim_rate_limit_mps: 0.0015
+  transport_attitude_trim_acceleration_limit_mps2: 0.002
+  transport_attitude_trim_interval_s: 1.0 # 每段五次平滑修正的时间，s。
+  # 飞机运输反馈选择： differential_integral 保持当前实飞方案；
+  # native_position_pid 复用 GeometricCtbrController 的位置 PID（仅 reference_cascade）。
+  # 两者互斥；native 模式不叠加下方差分积分，普通位置积分状态仍冻结。
+  transport_feedback_controller: native_position_pid
+  # 下列仅 native_position_pid 生效：Ki 和积分状态上限分别乘倍率，
+  # 沿用各机 independent_position/velocity_gain，保持 PD 倍率仍由上方两项控制。
+  transport_position_pid_integral_gain_scale: 3.0
+  transport_position_pid_integral_limit_scale: 3.3333333333333335
+  transport_position_pid_integral_gate_m: 0.23
+  # 运输 I 更新：I_dot = weight * e_v + 0.5 * e_p；0 仅积分位置，1 恢复原公式。
+  # 仅影响 native_position_pid 的 I 项，D 项仍使用 EKF 速度；省略时兼容旧值 1。
+  transport_position_pid_integral_velocity_weight: 1.0
+  transport_position_pid_force_limit_n: 0.06 # 只限制新增 I 力的三维范数，不限制整个 PID。
+  transport_position_pid_force_rate_limit_nps: 0.004 # 只限制新增 I 力变化率，N/s。
+  # 仅 reference_cascade：三机位置保持误差去除共同分量后，学习零和的世界系力偏置。
+  # 姿态/平动参考均完成且反馈有效、主机未限幅时更新；不解冻普通位置积分器。
+  transport_hold_integral_enabled: true
+  transport_hold_integral_gain_npm_s: 0.05 # N/(m*s)。
+  transport_hold_integral_force_limit_n: 0.04 # 每机三维力范数上限，N；0.03 实飞持续触边，本轮只增加力预算。
+  transport_hold_integral_rate_limit_nps: 0.002 # 学习期间每机力变化率范数上限，N/s。
   # 接管和运输的实测构型保护；达到实际间距边界立即受控降落。
   minimum_vehicle_distance_m: 0.30
   separation_prediction_s: 0.35
@@ -185,7 +213,7 @@ slung_payload:
   c1: 0.50
 
   # 负载姿态环：MATLAB 按负载惯量和目标带宽自动生成 kR/kOmega。
-  attitude_bandwidth_hz: [1.0, 1.0, 0.45]
+  attitude_bandwidth_hz: [1.5, 1.5, 0.7]
   # 本轮保持 0.90，单独验证绳向力限制器修复；不以阻尼比取代稳定性验证。
   attitude_damping_ratio: 0.90
   yaw_channel_enabled: true

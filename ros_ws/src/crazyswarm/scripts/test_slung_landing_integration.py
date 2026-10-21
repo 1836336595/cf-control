@@ -42,6 +42,21 @@ def test_landing_inherits_reference_gains_and_support_at_first_tick(tmp_path):
         manager.logger.close()
 
 
+def test_landing_reinitializes_profile_when_phase_exists_but_start_time_was_cleared(tmp_path):
+    _, manager = ready_manager(tmp_path)
+    try:
+        for vehicle in manager.vehicles:
+            vehicle.trajectory.begin_controlled_landing(
+                10., vehicle.latest_state['position'], 0., 'validation')
+        manager._transport_overrides(10.)
+        assert manager.payload_landing_profile is not None
+        manager.payload_landing_start_time = None
+        manager._transport_overrides(10.02)
+        assert manager.payload_landing_start_time == 10.02
+    finally:
+        manager.logger.close()
+
+
 def test_distance_fault_seeds_last_supported_force_for_independent_descent(tmp_path):
     module, manager = ready_manager(tmp_path)
     published = []

@@ -14,13 +14,18 @@ def _vector3(value, name):
 
 
 class SlungLandingProfile:
-    """Quintic reference preserving initial p/v/a and ending at rest on ground.
+    """Bounded C2 reference preserving initial p/v/a and ending on ground.
 
-    The endpoint holds the initial x/y position. Duration grows until sampled
-    full-vector speed/acceleration bounds hold and the vertical reference does
-    not cross below ground. If the initial reference already exceeds a bound,
-    that initial magnitude is the allowable ceiling; no instantaneous reset is
-    introduced to disguise it.
+    The endpoint holds the initial x/y position. A short, bounded search retains
+    a single quintic when feasible. Otherwise acceleration ramps continuously to
+    zero, velocity brakes to rest, and a rest-to-rest quintic returns from that
+    intermediate position to the endpoint. Full-vector limits and ground are
+    checked at polynomial extrema, rather than only at sampled points.
+
+    As before, an initial derivative exceeding a configured limit becomes its
+    ceiling, with no additional allowance. Some initial conditions cannot admit
+    a C2 bounded reference (for example outward acceleration at maximum speed).
+    Those and insufficient clearance for the chosen brake raise ValueError.
     """
 
     def __init__(self, start_position, start_velocity, start_acceleration,
@@ -43,44 +48,153 @@ class SlungLandingProfile:
         self.end_position = self.start_position.copy()
         self.end_position[2] = self.ground_z
         distance = float(np.linalg.norm(self.end_position - self.start_position))
-        speed_limit = max(float(max_speed_mps), float(np.linalg.norm(self.start_velocity)))
-        accel_limit = max(float(max_accel_mps2), float(np.linalg.norm(self.start_acceleration)))
+        speed = float(np.linalg.norm(self.start_velocity))
+        acceleration = float(np.linalg.norm(self.start_acceleration))
+        if not math.isfinite(speed) or not math.isfinite(acceleration):
+            raise ValueError('initial derivative magnitudes must be finite')
+        speed_limit = max(float(max_speed_mps), speed)
+        accel_limit = max(float(max_accel_mps2), acceleration)
+        if speed >= speed_limit and self.start_velocity @ self.start_acceleration > 0.:
+            raise ValueError('initial speed is at its ceiling with outward acceleration')
+        if self.start_position[2] <= self.ground_z:
+            if (self.start_velocity[2] < 0.
+                    or (self.start_velocity[2] == 0. and self.start_acceleration[2] < 0.)):
+                raise ValueError('initial ground boundary has downward velocity or acceleration')
         duration = max(float(min_duration_s), 1.875 * distance / speed_limit,
-                       math.sqrt(5.774 * distance / accel_limit))
-        for _ in range(80):
-            self.duration = duration
-            self._solve_coefficients()
-            samples = self._sample(np.linspace(0., 1., 1001))
-            position, velocity, acceleration = samples
-            if (np.max(np.linalg.norm(velocity, axis=1)) <= speed_limit + 1e-8
-                    and np.max(np.linalg.norm(acceleration, axis=1)) <= accel_limit + 1e-8
-                    and np.min(position[:, 2]) >= self.ground_z - 1e-9):
+                       math.sqrt((10. / math.sqrt(3.)) * distance / accel_limit))
+        # Duration is not monotone in feasibility when a0 != 0: the a0*T
+        # velocity contribution eventually grows. Never stretch indefinitely.
+        for _ in range(3):
+            coefficients = self._quintic_coefficients(
+                self.start_position, self.start_velocity, self.start_acceleration,
+                self.end_position, duration)
+            if self._within_limits(coefficients, duration, speed_limit, accel_limit):
+                self._set_segments([(duration, coefficients)])
                 return
             duration *= 1.15
-        raise ValueError('no bounded quintic landing satisfies the initial derivatives and ground constraint')
+        self._build_braking_descent(float(min_duration_s), speed_limit, accel_limit)
 
-    def _solve_coefficients(self):
-        duration = self.duration
-        # Solve in normalized time to retain conditioning for long descents.
-        self._coefficients = np.zeros((6, 3))
-        self._coefficients[0] = self.start_position
-        self._coefficients[1] = self.start_velocity * duration
-        self._coefficients[2] = .5 * self.start_acceleration * duration * duration
-        a0, a1, a2 = self._coefficients[:3]
-        rhs = np.array([self.end_position - a0 - a1 - a2,
-                        -a1 - 2 * a2, -2 * a2])
-        self._coefficients[3:] = np.linalg.solve(
-            np.array([[1., 1., 1.], [3., 4., 5.], [6., 12., 20.]]), rhs)
+    @staticmethod
+    def _quintic_coefficients(position, velocity, acceleration, endpoint, duration):
+        # Normalized segment time keeps both short brakes and long descents
+        # conditioned; the endpoint velocity and acceleration are zero.
+        delta = endpoint - position
+        vt, at2 = velocity * duration, acceleration * duration**2
+        return np.array([position, vt, .5 * at2,
+                         10. * delta - 6. * vt - 1.5 * at2,
+                         -15. * delta + 8. * vt + 1.5 * at2,
+                         6. * delta - 3. * vt - .5 * at2])
+
+    @staticmethod
+    def _critical_points(coefficients):
+        """Endpoints and all real roots of a polynomial on normalized [0, 1]."""
+        coefficients = np.trim_zeros(coefficients, 'b')
+        if len(coefficients) <= 1:
+            return np.array([0., 1.])
+        roots = np.polynomial.polynomial.polyroots(coefficients)
+        real = roots.real[(np.abs(roots.imag) <= 1e-7)
+                          & (roots.real >= -1e-9) & (roots.real <= 1. + 1e-9)]
+        return np.concatenate(([0., 1.], np.clip(real, 0., 1.)))
+
+    @classmethod
+    def _peak_norm(cls, coefficients):
+        squared = sum(np.convolve(axis, axis) for axis in coefficients.T)
+        critical = cls._critical_points(np.polynomial.polynomial.polyder(squared))
+        values = np.polynomial.polynomial.polyval(critical, coefficients)
+        return float(np.max(np.linalg.norm(values, axis=0)))
+
+    def _within_limits(self, coefficients, duration, speed_limit, accel_limit):
+        velocity = coefficients[1:] * np.arange(1, len(coefficients))[:, None] / duration
+        acceleration = velocity[1:] * np.arange(1, len(velocity))[:, None] / duration
+        if (self._peak_norm(velocity) > speed_limit + 1e-9
+                or self._peak_norm(acceleration) > accel_limit + 1e-9):
+            return False
+        heights = np.polynomial.polynomial.polyval(
+            self._critical_points(velocity[:, 2]), coefficients[:, 2])
+        return bool(np.min(heights) >= self.ground_z - 1e-9)
+
+    def _build_braking_descent(self, min_duration, speed_limit, accel_limit):
+        segments = []
+        position = self.start_position.copy()
+        velocity = self.start_velocity.copy()
+        acceleration = self.start_acceleration
+        anorm2 = float(acceleration @ acceleration)
+        if anorm2 > 0.:
+            # a(t)=a0*(1-t/T). Its velocity traces the line from v0 to
+            # v1=v0+a0*T/2, so the speed norm is bounded by those endpoints.
+            # Solve ||v1||<=V for the largest positive T, then keep margin.
+            dot = float(velocity @ acceleration)
+            margin = max(0., speed_limit**2 - float(velocity @ velocity))
+            discriminant = math.sqrt(dot**2 + anorm2 * margin)
+            if dot >= 0. and discriminant + dot > 0.:
+                max_ramp = 2. * margin / (discriminant + dot)
+            else:
+                max_ramp = 2. * (discriminant - dot) / anorm2
+            if max_ramp <= 0.:
+                raise ValueError('no bounded acceleration-ramp brake at the initial speed ceiling')
+            duration = min(.1, .5 * max_ramp)
+            coefficients = np.array([position, velocity * duration,
+                                     .5 * acceleration * duration**2,
+                                     -acceleration * duration**2 / 6.])
+            segments.append((duration, coefficients))
+            position = position + velocity * duration + acceleration * duration**2 / 3.
+            velocity = velocity + acceleration * duration / 2.
+        speed = float(np.linalg.norm(velocity))
+        if speed > 0.:
+            # v(u)=v1*(1-3u^2+2u^3). Speed decreases monotonically;
+            # peak acceleration is exactly 1.5*||v1||/T at u=1/2.
+            duration = 1.5 * speed / accel_limit
+            coefficients = np.array([position, velocity * duration, np.zeros(3),
+                                     -velocity * duration, .5 * velocity * duration])
+            segments.append((duration, coefficients))
+            position = position + .5 * velocity * duration
+        # The brake is allowed to drift; return from rest to the original XY.
+        # Along this straight segment, distance and the scalar quintic maxima
+        # give exact full-vector bounds, independent of initial derivatives.
+        distance = float(np.linalg.norm(self.end_position - position))
+        elapsed = sum(segment[0] for segment in segments)
+        duration = max(min_duration - elapsed, 1.875 * distance / speed_limit,
+                       math.sqrt((10. / math.sqrt(3.)) * distance / accel_limit), 1e-9)
+        segments.append((duration, self._quintic_coefficients(
+            position, np.zeros(3), np.zeros(3), self.end_position, duration)))
+        for duration, coefficients in segments:
+            if not self._within_limits(coefficients, duration, speed_limit, accel_limit):
+                raise ValueError('bounded braking transition cannot satisfy speed, acceleration and ground clearance')
+        self._set_segments(segments)
+
+    def _set_segments(self, segments):
+        self._segments = segments
+        self._segment_ends = np.cumsum([segment[0] for segment in segments])
+        self.duration = float(self._segment_ends[-1])
+
+    @staticmethod
+    def _sample_segment(progress, duration, coefficients):
+        progress = np.asarray(progress, dtype=float).reshape(-1)
+        powers = progress[:, None] ** np.arange(len(coefficients))[None, :]
+        position = powers @ coefficients
+        velocity = (powers[:, :-1] @ (
+            coefficients[1:] * np.arange(1, len(coefficients))[:, None])) / duration
+        acceleration = (powers[:, :-2] @ (
+            coefficients[2:] * (np.arange(2, len(coefficients))
+                                * np.arange(1, len(coefficients) - 1))[:, None])) / duration**2
+        return position, velocity, acceleration
 
     def _sample(self, progress):
         progress = np.asarray(progress, dtype=float).reshape(-1)
-        powers = progress[:, None] ** np.arange(6)[None, :]
-        position = powers @ self._coefficients
-        velocity = (powers[:, :5] @ (
-            self._coefficients[1:] * np.arange(1, 6)[:, None])) / self.duration
-        acceleration = (powers[:, :4] @ (
-            self._coefficients[2:] * np.array([2., 6., 12., 20.])[:, None])) / self.duration**2
-        return position, velocity, acceleration
+        elapsed = progress * self.duration
+        indices = np.minimum(np.searchsorted(self._segment_ends, elapsed, side='right'),
+                             len(self._segments) - 1)
+        result = tuple(np.empty((len(progress), 3)) for _ in range(3))
+        start = 0.
+        for index, (duration, coefficients) in enumerate(self._segments):
+            mask = indices == index
+            if np.any(mask):
+                values = self._sample_segment((elapsed[mask] - start) / duration,
+                                              duration, coefficients)
+                for destination, value in zip(result, values):
+                    destination[mask] = value
+            start = self._segment_ends[index]
+        return result
 
     def evaluate(self, now):
         now = float(now)

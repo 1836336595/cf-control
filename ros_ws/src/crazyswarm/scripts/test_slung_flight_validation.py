@@ -44,6 +44,21 @@ def test_deadline_starts_at_actual_handoff_and_is_one_shot(tmp_path):
         manager.logger.close()
 
 
+def test_validation_deadline_preempts_normal_trajectory_landing(tmp_path):
+    """A 30 s ordinary hover must not bypass the 60 s transport deadline."""
+    _, manager = manager_at_handoff(tmp_path)
+    try:
+        for vehicle in manager.vehicles:
+            vehicle.trajectory.phase = "landing"
+            vehicle.trajectory.phase_start_time = 29.0
+        assert manager._check_payload_flight_validation(30.0)
+        assert manager.payload_validation_landing_started_time == 30.0
+        assert manager.payload_validation_landing_stage == "payload_lowering"
+        assert all(v.trajectory.phase == "landing" for v in manager.vehicles)
+    finally:
+        manager.logger.close()
+
+
 @pytest.mark.parametrize("enabled,active,start", [(False, True, 20), (True, False, 20), (True, True, None)])
 def test_disabled_or_not_handed_off_never_starts_countdown(tmp_path, enabled, active, start):
     _, manager = manager_at_handoff(tmp_path, enabled)

@@ -43,6 +43,7 @@ ctbr_controller:
   # Path 话题由控制器根据 crazyflies.yaml 中每个 id 自动生成。
   path_frame_id: "world"                     # Path 坐标系。
   path_publish_interval_s: 0.1               # Path 发布周期，s。
+  path_max_poses: 1000                       # 保留最近 Path 点，避免长期发布无限增长消息。
 
   transport_mode: slung_load                  # circle/formation 或 slung_load。
   payload_rigid_body: "load"                 # NOKOV 负载刚体名称。
@@ -74,7 +75,7 @@ ctbr_trajectory:
   circle_entry_duration_s: 2.0                # 从起飞点平滑进入主轨迹时间，s。
   circle_ramp_duration_s: 1.5                 # 兼容旧配置，整圈 smoothstep 不使用。
   circle_max_tilt_deg: 10.0                   # 圆周/八字阶段最大倾角，deg。
-  hover_duration_s: 30.0                      # MATLAB 静态悬停测试时长，s；结束后进入降落。
+  hover_duration_s: 60.0                      # MATLAB 静态悬停测试时长，s；结束后进入降落。
   final_hover_s: 3.0                          # 主轨迹结束后的终点悬停时间，s。
   landing_duration_s: 4.0                    # 五次多项式降落最短时间，s。
   landing_max_speed_mps: 0.25                # 降落参考最大速度，m/s。

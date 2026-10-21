@@ -1,12 +1,108 @@
 """C2 payload landing references and robust measured touchdown confirmation."""
 
 import csv
+import json
 from pathlib import Path
+import time
 
 import numpy as np
 import pytest
 
 from slung_landing import PayloadTouchdownDetector, SlungLandingProfile
+
+
+def test_recorded_feasible_state_lands_without_stretching_initial_acceleration():
+    # This is the nearest earlier logged state reproducing the constructor
+    # failure, not the unlogged state at the actual exception.
+    p = np.array([.2703441689875301, .019401254937344334, .5975047200411108])
+    v = np.array([-.016109275473236755, -.007141530014222486, .007881279383302584])
+    a = np.array([-.06258183776592048, -.0008458236140853042, .05734148851088986])
+    ground = .03507010219448599
+    before = time.perf_counter()
+    profile = SlungLandingProfile(p, v, a, ground, 10., 4., .12, .15)
+    assert time.perf_counter() - before < .1  # CTBR command watchdog period.
+    assert 4. <= profile.duration < 30.
+    for actual, expected in zip(profile.evaluate(10.), (p, v, a)):
+        np.testing.assert_allclose(actual, expected, atol=1e-12)
+    values = profile._sample(np.linspace(0., 1., 10001))
+    position, velocity, acceleration = values
+    assert np.max(np.linalg.norm(velocity, axis=1)) <= .12 + 1e-9
+    assert np.max(np.linalg.norm(acceleration, axis=1)) <= .15 + 1e-9
+    assert np.min(position[:, 2]) >= ground - 1e-10
+    endpoint = np.array([p[0], p[1], ground])
+    for actual, expected in zip(profile.evaluate(10. + profile.duration),
+                                (endpoint, np.zeros(3), np.zeros(3))):
+        np.testing.assert_allclose(actual, expected, atol=1e-12)
+
+
+def test_speed_boundary_with_outward_acceleration_is_explicitly_infeasible():
+    with pytest.raises(ValueError, match='speed.*outward'):
+        SlungLandingProfile([0., 0., .6], [.12, 0., 0.], [.01, 0., 0.],
+                            .025, 0., 4.)
+
+
+def test_ground_boundary_with_downward_velocity_is_explicitly_infeasible():
+    with pytest.raises(ValueError, match='ground.*downward'):
+        SlungLandingProfile([0., 0., .025], [0., 0., -.01], [0., 0., 0.],
+                            .025, 0., 4.)
+
+
+def test_initial_acceleration_above_configured_cap_is_not_increased():
+    p, v, a = np.array([0., 0., .6]), np.array([.01, .02, 0.]), np.array([.5, 0., .4])
+    profile = SlungLandingProfile(p, v, a, .025, 0., 4.)
+    position, velocity, acceleration = profile._sample(np.linspace(0., 1., 10001))
+    np.testing.assert_allclose(acceleration[0], a, atol=1e-12)
+    assert np.max(np.linalg.norm(velocity, axis=1)) <= .12 + 1e-9
+    assert np.max(np.linalg.norm(acceleration, axis=1)) <= np.linalg.norm(a) + 1e-9
+    assert np.min(position[:, 2]) >= .025 - 1e-10
+
+
+def test_braking_and_descent_junctions_preserve_position_velocity_acceleration():
+    profile = SlungLandingProfile(
+        [.2703441689875301, .019401254937344334, .5975047200411108],
+        [-.016109275473236755, -.007141530014222486, .007881279383302584],
+        [-.06258183776592048, -.0008458236140853042, .05734148851088986],
+        .03507010219448599, 10., 4.)
+    assert len(profile._segments) > 1
+    for elapsed in profile._segment_ends[:-1]:
+        before = profile.evaluate(10. + elapsed - 1e-7)
+        at = profile.evaluate(10. + elapsed)
+        after = profile.evaluate(10. + elapsed + 1e-7)
+        for index, tolerance in enumerate((3e-8, 3e-8, 1e-6)):
+            np.testing.assert_allclose(before[index], at[index], atol=tolerance, rtol=0.)
+            np.testing.assert_allclose(after[index], at[index], atol=tolerance, rtol=0.)
+    # Verify approach to the initial and final p/v/a, not only the endpoint
+    # values returned by evaluate's endpoint guards.
+    for actual, expected in zip(profile.evaluate(10. + 1e-7), profile.evaluate(10.)):
+        np.testing.assert_allclose(actual, expected, atol=1e-6, rtol=0.)
+    end = 10. + profile.duration
+    for actual, expected in zip(profile.evaluate(end - 1e-7), profile.evaluate(end)):
+        np.testing.assert_allclose(actual, expected, atol=1e-7, rtol=0.)
+
+
+def test_speed_ceiling_with_inward_acceleration_can_brake_continuously():
+    profile = SlungLandingProfile([0., 0., .6], [.12, 0., 0.], [-.1, 0., 0.],
+                                  .025, 0., 4.)
+    _, velocity, acceleration = profile._sample(np.linspace(0., 1., 10001))
+    assert np.max(np.linalg.norm(velocity, axis=1)) <= .12 + 1e-9
+    assert np.max(np.linalg.norm(acceleration, axis=1)) <= .15 + 1e-9
+
+
+def test_recorded_last_second_states_have_bounded_landing_references():
+    path = (Path(__file__).parent /
+            'ctbr_logs/analysis_20261020_163110/landing_reproduction.json')
+    if not path.exists():
+        pytest.skip('local recorded landing diagnosis is not available')
+    states = json.loads(path.read_text())['last_second_constructor_results']
+    assert len(states) == 78
+    for row in states:
+        state = row['state']
+        profile = SlungLandingProfile(state['position'], state['velocity'],
+                                      state['acceleration'], state['ground_z'], 0., 4.)
+        position, velocity, acceleration = profile._sample(np.linspace(0., 1., 1001))
+        assert np.max(np.linalg.norm(velocity, axis=1)) <= max(.12, np.linalg.norm(state['velocity'])) + 1e-9
+        assert np.max(np.linalg.norm(acceleration, axis=1)) <= max(.15, np.linalg.norm(state['acceleration'])) + 1e-9
+        assert np.min(position[:, 2]) >= state['ground_z'] - 1e-9
 
 
 def test_landing_reference_is_c2_at_start_and_end():

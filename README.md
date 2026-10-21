@@ -9,9 +9,14 @@
 
 项目使用 ROS Noetic、Python 3、C++ Crazyswarm server 和 NOKOV 动捕。世界坐标采用 z 轴向上；MATLAB 参考代码中的 z 轴向下时，已在 Python 控制器和负载几何中转换。
 
-本页“当前吊运控制器设计”记录 **2026-10-18、尚未增加运输差分积分**的实现基线。
+本页“当前吊运控制器设计”记录 **2026-10-19、正式接入运输差分保持力积分**的实现。
 当前默认 `reference_cascade` 保留负载反馈和协同张力分配，同时使用三机位置保持，
-已经区别于原始完整吊运几何控制律。逐项公式、保留/修改/新增/未实现内容见
+新增有界、零和的差分力补偿，飞机普通位置积分在协同阶段仍冻结。
+2026-10-20 增加 `transport_feedback_controller: native_position_pid`，可将飞机反馈切换为
+复用单机几何控制器公式的位置 PID，使用独立的运输积分状态；默认仍为差分积分。
+两种 `reference_cascade` 飞机反馈现在共用可关闭的负载姿态参考修正，
+期望负载姿态保持 `[0,0,0]`，修正的是三机三维构型参考。
+2026-10-18 无运输积分的基线及其离线试验保留为历史记录。逐项公式和实现边界见
 [吊运控制器设计与原始推导对照](docs/slung_controller_design_comparison.md)。
 
 ## 目录和职责
@@ -27,10 +32,13 @@
 - `scripts/ctbr_controller.py`：多机同步、状态机、几何 CTBR、吊运接管、安全保护和 CSV 日志。
 - `scripts/slung_load_controller.py`：负载位置/姿态外环、绳方向控制和张力分配。
 - `scripts/slung_reference.py`：SO(3) 姿态和 S² 绳向的平滑参考及解析导数。
+- `scripts/slung_attitude_trim.py`：姿态误差到零和三维构型偏置的慢积分、平滑参考及限幅。
 - `scripts/slung_prelift_trajectory.py`：收绳、持续预抬、参考边界和接管偏差衔接。
 - `scripts/slung_link_calibration.py`：接管前一次性运行有效绳长校准。
 - `scripts/slung_landing.py`：负载下降轨迹和鲁棒接地确认。
 - `scripts/slung_transport_guard.py`：机间距/高度等检查及继承支撑力配平。
+- `scripts/slung_transport_integral.py`：ROS 无关的三机零和差分保持力积分及力/变化率约束。
+- `scripts/native_position_pid.py`：单机与运输模式共用的位置 PID 反馈公式。
 - `scripts/ctbr_trajectory.py`：五次平滑参考轨迹、圆周轨迹和三机连续八字轨迹。
 - `scripts/ctbr_visualization.py`：读取单机或合并 CSV，绘制飞机和负载轨迹、误差、姿态、速度、加速度及 CTBR 输出。
 - `scripts/ctbr_logs/`：控制器生成的飞行 CSV；实飞日志默认不提交到版本库。
@@ -64,15 +72,17 @@ roslaunch crazyswarm ctbr_controller.launch target_confirmed:=true
 只读话题命令。确认启动后，控制器仍会等待全机 NOKOV 状态、EKF 与 NOKOV 位置对齐，
 并完成电池电压预检。
 
-当前 `config/slung_payload.yaml` 默认开启首次实飞的短时验证：
+当前 `config/slung_payload.yaml` 默认开启实飞验证计时：
 
 ```yaml
 flight_validation_enabled: true
-flight_validation_transport_s: 20.0
+flight_validation_transport_s: 60.0
 ```
 
-预抬满足离地间隙后，进入 `TAUT_RAMP` 才开始计时。当前 20 秒包括 5 秒张力渐增和
-后续参考抬升；它不是起飞后的第 20 秒，也不是升至 0.60 m 后再等 20 秒。
+预抬满足离地间隙后，进入 `TAUT_RAMP` 才开始计时。当前 60 秒包括 5 秒张力渐增和
+后续 12 秒参考抬升；两类参考最晚在第 17 秒完成，留下最多 43 秒差分积分学习时间。
+学习还受状态、张力和上一周期主机限幅条件约束；这不是实飞 60 秒内调平的保证，
+也不是升至 0.60 m 后再等 60 秒。
 到时记录 `flight_validation_complete`，先保持协同控制放下负载；实测负载底面间隙
 相对起飞前地面基线满足 0.40 s 窗口检查，含 15 mm 高度容差、6 mm 中位数接触余量、
 12 mm 波动上限及 0.05 m/s 速度/斜率上限，连续证据不少于 0.30 s 后，先卸载 2 s，
@@ -82,9 +92,17 @@ flight_validation_transport_s: 20.0
 正常运输和预抬继续检查实际机间距；紧急退出分支并非全部采用相同的协同下降路径，
 其边界见设计对照文档，不能把计划下降验证推广到任意故障退出。
 
+下降参考保留实测起始位置、速度和加速度。单条五次曲线不可行时，先连续消退初始
+加速度、制动到静止，再用静止到静止的五次参考下降，终点 XY 仍为下降起点 XY。
+每段检查三维速度/加速度和最低高度，不再无限拉长总时长。
+规划失败会冻结运输积分并短时保持有效协同支撑，最多重试3次或0.3秒；仍失败则
+进入带支撑残差的故障下降。首次错误记录完整起始状态，CSV 的
+`payload_landing_planning_*` 字段记录失败次数、重试次数、原因和回退状态。
+数值异常在 fleet 边界处理，保留预检、状态新鲜度和机间距检查；状态失效仍由原保护处理。
+
 放载后的 `vehicle_descent` 使用独立降落 Z 积分：限幅 `2.0`、变化率上限 `0.5/s`、
 竖直反馈加速度上限 `8 m/s²`，不受 XY 积分门控影响。该修正只在放载后的飞机下降启用，
-没有给运输位置保持增加积分。实测落地高度容差仍为 `0.08 m`，因此停推后可能还有短距离
+与运输阶段新接入的差分保持力积分分别管理。实测落地高度容差仍为 `0.08 m`，因此停推后可能还有短距离
 下落；完成停推、确认接地和低冲击触地应分别检查。
 
 终端阶段显示“实飞验证结束/受控降落”；CSV 阶段依次为 `landing`、`landing_settle`、
@@ -98,13 +116,13 @@ flight_validation_transport_s: 20.0
 
 修改 Python/YAML 后重启 `ctbr_controller.launch` 即可生效。启动时应看到
 `[实飞验证] 已启用`，接管后到时应看到 `flight_validation_complete`。
-将 `flight_validation_enabled` 改为 `false` 只取消这条短时验证自动结束条件，
+将 `flight_validation_enabled` 改为 `false` 只取消这条验证自动结束条件，
 仍受普通任务时长和保护条件约束；`post_handoff_s: 60.0` 只决定离线长时间观察窗口，
 不决定实飞自动降落，也不表示实机无限悬停。
 
-默认 `simulate_slung_handoff.py` 也会运行这条短时降落流程；
+默认 `simulate_slung_handoff.py` 也会运行这条 60 秒验证后的降落流程；
 `--candidate simulation_configs/slung_70hz_candidate.yaml` 则显式关闭实飞计时器，
-用于完整接管后 60 秒仿真。两种结果使用不同的成功类别，短时落地不能当作完成 60 秒观察。
+用于完整接管后 60 秒悬停仿真。验证后降落与悬停观察使用不同的成功类别，仍需分别核对完整窗口。
 
 电池遥测现在按 2 Hz 重复发送，丢失第一包后仍有后续样本。每架机只需一个新鲜有效电压样本完成预检，推力缩放随后冻结。EKF/NOKOV 的位置误差须连续 1 秒不超过 0.05 m；速度滤波器重新预热不重置位置对齐计时，但起飞放行时 EKF 速度/加速度仍须有效。两项预检超时均为 10 秒，失败后保持零输出并锁定中止，检查后重启控制器才能重试。
 
@@ -240,7 +258,8 @@ payload_mocap_topic: "/load/mocap_state"
 `ramp_position_hold_gain_scale` 当前为 `2.0`，稳态
 `transport_position_hold_gain_scale` 为 `1.5`，在参考抬升期间平滑衔接。
 保持参考从接管实测构型出发，随后随负载姿态和静力平衡绳向一起变化，
-不是一直冻结在初始倾斜构型。保持项目前为 PD。
+不是一直冻结在初始倾斜构型。保持反馈为 PD，另有独立的世界系零和差分力积分，
+不复用协同阶段冻结的普通位置积分。
 
 `transport_force_mode: reference_cascade` 是当前默认模式，实际绳向反馈倍率强制为零。
 配置中的 `transport_link_gain_scale: 0.4` 和 `transport_link_steady_gain_scale: 0.4`
@@ -250,7 +269,7 @@ payload_mocap_topic: "/load/mocap_state"
 
 ## 当前吊运控制器设计
 
-以下内容对应 2026-10-18 的当前代码，供提交运输差分积分改动之前保存设计基线。
+以下内容对应 2026-10-19 的正式接入实现；2026-10-18 的无运输积分基线作为历史证据保留。
 当前运行的是**负载几何外环、三绳张力分配、三机平衡参考与位置保持、CTBR 姿态/角速度接口**
 组成的串级系统。负载反馈没有被删除；同时，这套 `reference_cascade` 也不是原笔记完整控制律的逐式复现。
 
@@ -265,7 +284,7 @@ flowchart TD
     C --> E["期望合力 Fd、力矩 Md"]
     E --> F["虚拟力分配、外张偏置、沿实测绳向单边投影"]
     D --> G["三机一致的期望位置、速度、加速度"]
-    H["飞机 NOKOV 位置/姿态与 EKF 运动学"] --> I["三机位置保持 PD"]
+    H["飞机 NOKOV 位置/姿态与 EKF 运动学"] --> I["三机位置保持 PD 与零和差分力积分"]
     G --> I
     F --> J["每机吊运力与期望挂点惯性补偿"]
     I --> K["接管混合、支撑配平、力限制和滤波"]
@@ -430,22 +449,74 @@ $$
 
 ### 位置保持、支撑配平和最终 CTBR
 
-当前飞机保持为 PD：
+新增共用姿态外层 `transport_attitude_trim_enabled`：参考建立完成、反馈有效、请求张力为有限
+正数且上一周期未发生主机输出限幅后，按目标坐标系下的SO(3)姿态误差慢调三机参考。
+正pitch使前方CF3参考升高、另外两机降低，yaw可生成XY修正；三机偏置总和为0。
+负载期望旋转仍为原目标，不能将学到的补偿角当成新的负载姿态目标。
+每段五次曲线同时给出偏置位置、速度、加速度；幅值/速率/加速度单独限制。
+配置项集中在 `slung_payload.yaml` 的 `transport_attitude_trim_*`，
+缺省开关为false以兼容旧配置，当前任务配置显式启用。此模块目前支持固定期望旋转；
+未来时变姿态轨迹需要额外处理坐标系运动及导数，不能直接在运行中跳变目标。
+
+临时反馈失效时停止学习并完成已有的小幅平滑段；下降时冻结学习，通过残差参考连续过渡到
+实测绳向保持构型，避免重复叠加已经存在于实测构型中的偏置。接地释放、任务重置和中止均清除状态。
+CSV末尾追加 `transport_attitude_trim_*` 误差、积分、实际参考偏置与导数、冻结/限幅状态；
+下降衔接残差另记为 `transport_attitude_trim_bridge_*`，不冒充受1 cm预算限制的学习偏置。
+完整公式及验证范围见[设计对照](docs/slung_controller_design_comparison.md#17-共用的姿态到三维构型参考修正2026-10-20)。
+
+飞机反馈通过 `config/slung_payload.yaml` 的 `transport_feedback_controller` 在启动时选择：
+
+| 参数值 | 飞机运输反馈 | 使用的积分参数 |
+|---|---|---|
+| `differential_integral`（默认） | 原位置保持 PD 加零和差分力积分 | `transport_hold_integral_*` |
+| `native_position_pid` | 共用单机位置 PID 反馈，另有运输专用积分状态 | `transport_position_pid_*` |
+
+`native_position_pid` 仅支持 `reference_cascade`，替换原保持反馈，不再叠加差分积分或第二份 PD。
+负载位置/姿态反馈、张力分配、惯性/重力前馈和支撑配平继续工作。当前实飞配置先只启用
+pitch 轴增益 `[0.0,0.05,0.0]`，避免在尚未验证的 roll/yaw 轴引入交叉耦合。
+当前候选为积分增益倍率 `3.0`、积分状态上限倍率 `3.3333333333333335`、位置门限
+`0.23 m`、新增积分力上限 `0.06 N`、变化率 `0.004 N/s`。
+运输积分速度权重现可单独配置：
+
+```yaml
+transport_position_pid_integral_velocity_weight: 0.0
+```
+
+更新律为 `I_dot = weight * e_v + 0.5 * e_p`。当前设0，仅累积位置误差；设1恢复原更新律。
+只影响 `native_position_pid` 的运输积分，D项继续使用EKF速度，独立起飞/预抬及差分积分使用各自原公式。
+省略参数时兼容旧值1；参数须为非负有限数。CSV新增
+`transport_full_pid_integral_velocity_weight`，记录实际使用的权重，修改后重启控制器生效。
+0.06 N和0.004 N/s只约束新增积分力，不限制整个PID；启动日志同时打印所选控制模式。
+完整公式、门控及验证范围见[设计对照中的运输位置 PID](docs/slung_controller_design_comparison.md#14-可选的完整位置-pid反馈2026-10-20)。
+
+2026-10-20 的 `163110` 实飞已使用差分积分增益 `0.05`，CF3在接管后36.254秒起
+持续达到0.03 N附加补偿上限，最后15秒pitch均值仍为4.65度。下一轮预算对照建议
+只将 `transport_hold_integral_force_limit_n` 从0.03增到0.04 N，保留增益0.05、
+变化率0.002 N/s及共同支撑参数；这与切换完整PID是两种独立对照。
+补偿仍应保留上限，目标是给剩余纠偏留余量，不以消除所有饱和为目标。
+当前普通 `ctbr_trajectory.hover_duration_s: 60` 配合验证期限60秒，
+可观察完整接管后60秒（参考建立约17秒，最多43秒学习）；`post_handoff_s` 只控制离线仿真窗口。
+
+当前飞机保持反馈为 PD：
 
 $$
 a_{\rm hold,i}=-\lambda(t)\left(K_{p,i}e_{p,i}+K_{v,i}e_{v,i}\right).
 $$
 
 $K_{p,i},K_{v,i}$ 使用各机独立控制的加速度增益，$\lambda$ 从2.0平滑衔接到1.5。
-`SlungSupportTrim` 继承预抬实际输出相对吊运模型的竖直差额 $b_i$，再按同一个负载高度误差
+`SlungSupportTrim` 继承预抬实际输出相对吊运模型的竖直差额 $b_{z,i}$，再按同一个负载高度误差
 有界更新。三机偏置初值可以不同，不能把它称为零和的差分位置误差补偿。
+新增的差分积分以独立世界系力状态 $b_{d,i}$ 补偿每机相对保持误差，定义和门控见下一节。
 
 在张力混合系数 $\beta$ 下，未限幅/滤波的合力为：
 
 $$
 F_{i,\rm raw}=(1-\beta)F_{i,h}
-+\beta\left(u_i+b_ie_3+m_ia_{\rm hold,i}\right).
++\beta\left(u_i+b_{z,i}e_3+m_ia_{\rm hold,i}+w(t)b_{d,i}\right).
 $$
+
+$w(t)$ 在空中为 1；计划负载下降期间保持已学偏置，实测负载触地后沿已有 2 秒五次
+smoothstep 卸载到零，随后复位差分积分。独立控制阶段不注入该补偿。
 
 合力经过竖直/倾角限制及当前5 ms一阶力滤波后，用其方向构造飞机期望姿态 $R_{ic}$。
 当前运输模式取 $\Omega_{ic}=0$，主机输出
@@ -459,7 +530,7 @@ $T_i^{\rm cmd}=\operatorname{clip}(\max(F_i^TR_ie_3,T_{\min}),0,T_{\max})$，
 主机没有直接输出原笔记的完整飞机力矩 $M_i$、有限时间滑模律，也未在运输分支发送解析 $\Omega_{ic}$ 前馈。
 `use_body_rate_feedforward: true` 不能覆盖该分支显式取零的行为。
 
-### 当前积分状态与后续改动边界
+### 当前积分状态与运输差分保持力积分
 
 | 状态 | 当前实现 | 作用范围 |
 |---|---|---|
@@ -469,12 +540,32 @@ $T_i^{\rm cmd}=\operatorname{clip}(\max(F_i^TR_ie_3,T_{\min}),0,T_{\max})$，
 | 放载后下降专用 Z 积分 | 已有；2.0 / 0.5 / 8 | 仅负载触地卸载后的 `vehicle_descent` |
 | 负载姿态积分/完整扰动力矩估计 | 未实现 | 当前为姿态PD与前馈 |
 | 绳向积分 | 参数存在，增益0；串级绳向环也关闭 | 不提供当前构型静差补偿 |
-| 运输每机位置保持/零和差分积分 | **实飞代码未实现** | 仅离线实验，后续单独改动 |
+| 运输每机位置保持/零和差分积分 | **2026-10-19 正式接入** | 仅 `reference_cascade`，条件满足时学习 |
 
-下降专用 Z 积分不会使运输保持获得积分。已有 `slung_payload.integral_gain` 调整负载位置环，
-也不能直接替代未实现的运输差分保持积分。
-离线差分积分候选使用独立世界系力状态、零和约束及力/变化率限制，未写入当前实飞配置；
-它不等于原笔记的完整逐项扰动估计器，也不能提前宣称恢复了论文的稳定性保证。
+当前默认配置为：
+
+```yaml
+transport_hold_integral_enabled: true
+transport_hold_integral_gain_npm_s: 0.02
+transport_hold_integral_force_limit_n: 0.03
+transport_hold_integral_rate_limit_nps: 0.002
+```
+
+以实际保持参考计算 $e_i=x_i-x_{i,\rm hold}$，每个世界坐标轴都减去三机误差均值：
+$\widetilde e_i=e_i-\frac13\sum_j e_j$，请求 $\dot b_{d,i}=-0.02\widetilde e_i$，
+增益单位为 $\mathrm{N/(m\,s)}$。整组三机使用共同缩放，使学到的偏置和学习变化率保持零和，
+每机分别满足 $\|b_{d,i}\|\le0.03\ \mathrm N$、$\|\dot b_{d,i}\|\le0.002\ \mathrm{N/s}$。
+这是三维向量范数限制；共同位置误差不会驱动它。
+达到力上限时，共同缩放会联动其他飞机的更新，因此不保证每机误差逐步单调减小。
+
+仅在 `reference_cascade`、两类参考完成后学习，起点为
+$\max(12,5+12)=17$ 秒；还要求动捕状态及 EKF/滤波导数有效、三绳的控制器带符号张力均为正，
+且上一周期主机的力、保持反馈、body-rate 和 collective 均未限幅。同一控制 tick 最多更新一次。
+条件失效或进入负载下降时停止学习并保留偏置，避免清零造成支撑力突变；确认负载触地后才卸载和复位。
+日志中的输出力及导数包含接管混合和卸载过程，学习变化率上限不约束触地卸载的衰减速度。
+
+负载位置积分、支撑 trim、普通位置积分和下降 Z 积分仍各有自己的状态与作用范围。
+新增差分补偿不等于原笔记的完整逐项扰动估计器，也不能据此宣称恢复了论文的稳定性保证。
 
 ### 时间、验证和已知边界
 
@@ -483,13 +574,22 @@ $T_i^{\rm cmd}=\operatorname{clip}(\max(F_i^TR_ie_3,T_{\min}),0,T_{\max})$，
 | 0–5 s | 从独立输出平滑建立协同力；姿态/绳向过渡已经开始 |
 | 0–12 s | 实测姿态和绳向过渡到水平静力平衡目标 |
 | 5–17 s | 负载位置参考平滑抬升到几何中心绝对高度0.60 m |
-| 20 s | 当前实飞短时验证结束，启动协同下降 |
+| 17–60 s | 参考完成且健康/张力/主机限幅门控通过时学习差分补偿 |
+| 60 s | 当前实飞验证结束，启动协同下降并冻结已学偏置 |
 | 接地确认后 | 先卸载2 s，再转三机独立下降，满足实测条件才停推 |
 
-12 s表示**目标参考到达端点**，不是实际负载已经水平；20 s也不是姿态误差收敛保证。
-当前静止参考只有约3秒观测时间。离线60秒悬停需关闭短时验证计时器，不能把默认20秒下降成功替代为60秒保持成功。
+12 s表示**姿态参考到达端点**，不是实际负载已经水平；60 s也不是姿态误差收敛保证。
+当前静止参考与可学习窗口最多约43秒。`post_handoff_s: 60.0` 的离线观察窗保持不变，
+独立于实飞验证计时器；完整悬停观察与到时下降应分别验证。
 
-2026-10-18最新20秒实飞中，16–20秒平均负载横滚/俯仰约5.0°/15.3°，目标均为0；
+2026-10-19 生产控制器的完整 60 秒 MuJoCo 对照中，名义模型最后 10 秒平均俯仰由 −3.18°
+降至 −0.12°；假设三机效率为 `[1,1.05,1.10]` 时，由 +20.63° 降至 +2.97°。
+有偏差模型仍未通过共同位置误差判据。相同扰动下积分开/关的计划下降都出现
+`touchdown_timeout`，没有实际走到触地卸载；不能把本次调平改善称为整段任务通过。
+本轮条件、数值和测试范围见[设计对照文档第 13 节](docs/slung_controller_design_comparison.md)。
+
+**2026-10-18 无运输差分积分基线（历史）：** 当时默认20秒实飞验证，参考完成后只剩约3秒。
+该轮16–20秒平均负载横滚/俯仰约5.0°/15.3°，目标均为0；
 机体增长振荡改善，但平衡构型存在厘米级误差。离线给三机设置不同升力系数后，也会出现
 平稳而倾斜的结果。名义仿真通过只覆盖模型假设；物理质心、刚体零位、实际挂点、逐机推力
 及完整机载EKF/radio仍有未辨识部分。当前代码没有证明实机完全调平。
@@ -545,9 +645,9 @@ python plot_slung_handoff_trace.py ctbr_logs/ekf_feedback_run/simulation_trace.c
 
 位姿/EKF/指令延迟和采样频率均可在参数文件设置；显式 `--pose-delay`、
 `--command-delay` 覆盖对应文件值。输出 `input_parameters.yaml` 的 `simulation_runtime`
-记录实际设置。关闭短时验证后，长时间悬停类别要求 `summary.json` 的
+记录实际设置。关闭实飞验证计时器后，长时间悬停类别要求 `summary.json` 的
 `observed_post_handoff_s` 覆盖配置的完整观察窗（当前 60 秒）；提前达到时间上限会报告
-`post_handoff_window_incomplete`。默认启用的 20 秒验证+下降属于另一种成功类别。
+`post_handoff_window_incomplete`。默认启用的 60 秒验证+下降属于另一种成功类别。
 
 绳向修正力的变化率限制只使用上一帧 `link_force`，运动学垂直绳补偿独立相加。
 CSV 增加 `raw_link_force_*`、`limited_link_force_*`、`kinematic_perpendicular_force_*`、
@@ -569,7 +669,7 @@ python plot_slung_handoff_trace.py ctbr_logs/link_force_check/simulation_trace.c
 
 这是控制周期波动测试，没有完整重现实飞持续的姿态偏差、质心偏差或电机差异；
 通过该测试不等同于实飞稳定。当前实飞配置仍启用 `flight_validation_enabled: true`，
-验证时长是 20 秒。历史 `slung_70hz_candidate.yaml` 还覆盖保持倍率为 `0.5`，
+验证时长是 60 秒。历史 `slung_70hz_candidate.yaml` 还覆盖保持倍率为 `0.5`，
 与当前实飞的 `1.5` 不一致；它不是当前配置的同参验证文件，加载前需查看完整覆盖项。
 
 绳长误差试验可单独设置 `simulation.physical_link_lengths_m`，让 MuJoCo 的物理绳长与
@@ -607,6 +707,10 @@ ros_ws/src/crazyswarm/scripts/ctbr_logs/
 - `payload_transport_force_mode`、`effective_transport_link_gain_scale`：本周期实际力构造模式和绳向倍率；
 - `position_hold_position_*`、`position_hold_velocity_*`、`position_hold_acceleration_*`：真正的飞机保持参考；
 - `transport_position_hold_force_*`、`transport_support_trim_n`：保持 PD 力和支撑配平力；
+- `transport_hold_integral_bias_*`、`transport_hold_integral_error_*`：来自本周期 target 的原始已学差分力偏置和去均值保持误差；
+- `transport_hold_integral_enabled`、`transport_hold_integral_learning`、`transport_hold_integral_freeze_reason`：来自 target 的启用、实际学习状态和冻结原因；
+- `transport_hold_integral_force_*`、`transport_hold_integral_force_dot_*`：来自 command，记录接管系数 $\beta$ 作用于卸载后偏置的力及其导数，可与原始 bias 区分；这是限幅、滤波、推力轴投影之前的注入贡献，不能当作单独测得的物理推力；
+- `force_limit_active`、`hold_feedback_limit_active`、`body_rate_limit_active`、`collective_limit_active`：主机力、保持反馈、机体速率和总推力限幅诊断，供下一周期学习门控使用；
 - `landing_vertical_integral_active`、`landing_vertical_integral_force_n`：放载后飞机下降 Z 积分状态及其力贡献。
 
 离线绘制指定 CSV：
@@ -674,7 +778,7 @@ MATLAB 参考实现位于 `MATLAB/Multi-UAV-Transportation-Simulation`；Python 
 2026 年论文的逐电机模型：50 ms 转速动态、2900 rad/s 增益、实测三次推力和
 气动力矩曲线，以及转子加减速反作用。`onboard_controller: mellinger` 或 `pid`
 选择机载控制器，二者使用相同电机模型；`legacy_quadratic` 保留旧的平方推力模型作对照。
-飞机和负载质量采用项目配置。默认运行的是当前 20 秒接管验证及下降；
+飞机和负载质量采用项目配置。默认运行的是当前 60 秒接管验证及下降；
 60 秒悬停观察需要另外关闭 `flight_validation_enabled`，并实际覆盖 `post_handoff_s`。
 
 ```bash

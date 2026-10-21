@@ -12,6 +12,8 @@ def tilted_manager(directory, enabled=True, equilibrium=False):
     module = _controller_module()
     manager, anchors = _slung_manager(module, directory, {
         "slung_payload": {"transport_force_mode": "coupled",
+                          "transport_attitude_trim_enabled": False,
+                          "transport_feedback_controller": "differential_integral",
                           "transport_attitude_reference_enabled": enabled,
                           "transport_equilibrium_reference_enabled": equilibrium,
                           "transport_attitude_reference_s": 12.0}})

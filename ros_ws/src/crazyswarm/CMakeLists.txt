@@ -210,8 +210,11 @@ target_link_libraries(mocap_helper
 ## in contrast to setup.py, you can choose the destination
 install(PROGRAMS
   scripts/ctbr_controller.py
+  scripts/native_position_pid.py
   scripts/slung_load_controller.py
   scripts/slung_reference.py
+  scripts/slung_attitude_trim.py
+  scripts/slung_transport_integral.py
   scripts/ctbr_trajectory.py
   scripts/ctbr_visualization.py
   scripts/cf_arm.py

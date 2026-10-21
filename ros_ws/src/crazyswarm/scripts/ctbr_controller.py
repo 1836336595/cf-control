@@ -49,9 +49,13 @@ import rospy
 from crazyswarm.msg import CTBR, CTBRTiming, GenericLogData, MocapState
 from slung_prelift_trajectory import SlungPreliftTrajectory, handoff_references
 from slung_transport_guard import SlungTransportGuard, SlungSupportTrim
+from slung_transport_integral import SlungDifferentialHoldIntegral
+from native_position_pid import (position_integral_step, position_pid_feedback,
+                                 validate_integral_velocity_weight)
 from slung_landing import SlungLandingProfile, PayloadTouchdownDetector
 from slung_link_calibration import SlungLinkCalibrator
 from slung_reference import attachment_rotation_reference, cable_direction_reference
+from slung_attitude_trim import SlungAttitudeReferenceTrim
 from ctbr_trajectory import (
     CircularFlightTrajectory,
     CircularTrajectoryConfig,
@@ -618,11 +622,133 @@ class GeometricCtbrController:
         位置积分保留为各飞机自身的悬停/推力偏差补偿。
         """
         self.position_integral = np.zeros(3)
+        self.reset_transport_position_pid()
         self.attitude_integral = np.zeros(3)
         self.previous_computed_rotation = None
         self.previous_heading = None
         self.previous_transport_body_rate_command = None
         self.previous_transport_force = None
+
+    def reset_transport_position_pid(self):
+        """Clear the transport-only native I without losing independent trim."""
+        self.transport_position_integral = np.zeros(3)
+        self.transport_full_pid_force_previous = np.zeros(3)
+        self._transport_position_pid_tick = None
+        self._transport_position_pid_signature = None
+        self._transport_position_pid_cached = None
+        self._transport_position_pid_reset_tick = None
+
+    def _native_transport_feedback(self, state, target, dt, derivatives_ready,
+                                   measured_velocity, position_gain,
+                                   velocity_gain, integral_gain):
+        """Evaluate shared native feedback once per integral/budget time step."""
+        tick = target.get("transport_full_pid_tick")
+        integral_velocity_weight = validate_integral_velocity_weight(
+            target.get("transport_full_pid_integral_velocity_weight", 1.0))
+        if (target.get("transport_full_pid_reset", False) and
+                (tick is None or tick != self._transport_position_pid_reset_tick)):
+            self.reset_transport_position_pid()
+            self._transport_position_pid_reset_tick = tick
+        same_tick = tick is not None and tick == self._transport_position_pid_tick
+        ep = state["position"] - np.asarray(
+            target.get("position_hold_position", target["position"]), dtype=float)
+        ev = (measured_velocity - np.asarray(
+            target.get("position_hold_velocity", target["velocity"]), dtype=float)
+              if derivatives_ready else np.zeros(3))
+        reference_acceleration = np.asarray(target.get("position_hold_acceleration",
+            target.get("acceleration", np.zeros(3))), dtype=float)
+        acceleration = np.asarray(state.get("control_acceleration",
+            state.get("filtered_acceleration", state.get("acceleration", reference_acceleration))), dtype=float)
+        if not derivatives_ready or not np.all(np.isfinite(acceleration)):
+            acceleration = reference_acceleration.copy()
+        beta = float(np.clip(target.get("transport_blend", 1.), 0., 1.))
+        scale = float(target.get("ramp_position_hold_gain_scale", 0.) if beta < 1.
+                      else target.get("transport_position_hold_gain_scale", 0.))
+        if not math.isfinite(scale) or scale < 0.:
+            scale = 0.
+        scale_dot = float(target.get("transport_position_hold_gain_scale_dot", 0.)) if beta >= 1. else 0.
+        if not math.isfinite(scale_dot):
+            scale_dot = 0.
+        # Match the offline matched-scale derivative at a zero hold gain.
+        if scale <= 0.:
+            scale_dot = 0.
+        gate = float(target.get("transport_full_pid_integral_gate_m", .23))
+        limit_value = target.get("transport_full_pid_integral_limit")
+        if limit_value is None:
+            limit_value = getattr(self.config, "independent_integral_limit", None)
+            if limit_value is None:
+                limit_value = self.config.integral_limit
+            limit_value = np.asarray(limit_value, dtype=float) * (10. / 3.)
+        integral_limit = np.asarray(limit_value, dtype=float).reshape(3)
+        ki = integral_gain * float(target.get("transport_full_pid_integral_gain_scale", 3.))
+        feedback_limit = getattr(self.config, "independent_max_feedback_acceleration", None)
+        feedback_limit = (np.full(3, np.inf) if feedback_limit is None
+                          else np.asarray(feedback_limit, dtype=float).reshape(3))
+        force_limit = float(target.get("transport_full_pid_force_limit_n", .06))
+        force_rate = float(target.get("transport_full_pid_force_rate_limit_nps", .004))
+        force_hold = bool(target.get("transport_full_pid_force_hold", False))
+        reason = str(target.get("transport_full_pid_freeze_reason", ""))
+        learning = (bool(target.get("transport_full_pid_learning", False))
+                    and derivatives_ready and not reason and not force_hold)
+        signature = (learning, reason, force_hold, scale, scale_dot, gate,
+            integral_velocity_weight, force_limit, force_rate,
+            *(tuple(np.asarray(value).reshape(-1)) for value in
+              (ep, ev, acceleration, reference_acceleration, position_gain, velocity_gain,
+               ki, integral_limit, feedback_limit)))
+        if same_tick and signature == self._transport_position_pid_signature:
+            result = {key: (value.copy() if isinstance(value, np.ndarray) else value)
+                      for key, value in self._transport_position_pid_cached.items()}
+            result.update(learning=False, duplicate_tick=True,
+                          freeze_reason=reason or "duplicate_tick")
+            return result
+        previous_integral = self.transport_position_integral.copy()
+        self.transport_position_integral, integral_rate, gate_open = position_integral_step(
+            previous_integral, ep, ev, dt, gate, integral_limit,
+            learning=learning and not same_tick, velocity_weight=integral_velocity_weight)
+        pd, pd_dot, _ = position_pid_feedback(ep, ev, position_gain, velocity_gain,
+            np.zeros(3), np.zeros(3), feedback_limit, acceleration-reference_acceleration,
+            gain_scale=scale, gain_scale_dot=scale_dot)
+        pid, pid_dot, unclamped = position_pid_feedback(ep, ev, position_gain, velocity_gain,
+            ki, self.transport_position_integral, feedback_limit,
+            acceleration-reference_acceleration, integral_rate,
+            gain_scale=scale, gain_scale_dot=scale_dot)
+        native_i = self.config.mass * (pid-pd)
+        previous_force = self.transport_full_pid_force_previous.copy()
+        force_norm = float(np.linalg.norm(native_i))
+        limited = native_i * min(1., force_limit/max(force_norm, 1.e-30))
+        force_limited = not np.allclose(limited, native_i, rtol=0., atol=1.e-14)
+        delta = limited-previous_force
+        max_step = 0. if same_tick or force_hold else force_rate*dt
+        bias = previous_force + delta * min(1., max_step/max(float(np.linalg.norm(delta)), 1.e-30))
+        rate_limited = not np.allclose(bias, limited, rtol=0., atol=1.e-14)
+        # fixed_force offline budgeting always uses the actual bounded force step.
+        # Only the explicitly unbounded native law uses its analytic I derivative.
+        bias_dot = (np.zeros(3) if force_hold else
+                    (bias-previous_force)/dt if math.isfinite(force_limit) or math.isfinite(force_rate)
+                    else self.config.mass * (pid_dot-pd_dot))
+        self.transport_full_pid_force_previous = bias.copy()
+        result = dict(pd_force=self.config.mass*pd, pd_force_dot=self.config.mass*pd_dot,
+            feedback_force=self.config.mass*pd+bias,
+            feedback_force_dot=self.config.mass*pd_dot+bias_dot,
+            native_pid_force=self.config.mass*pid, native_pid_force_dot=self.config.mass*pid_dot,
+            native_extra_i=native_i, integral_force=bias, integral_force_dot=bias_dot,
+            integral_state=self.transport_position_integral.copy(),
+            integral_state_delta=self.transport_position_integral-previous_integral,
+            integral_state_limit=integral_limit.copy(), integral_gain=ki.copy(),
+            integral_gate_m=gate, integral_velocity_weight=integral_velocity_weight,
+            native_gate_open=gate_open,
+            integral_state_limit_active=bool(np.any(np.abs(self.transport_position_integral)>=integral_limit-1.e-12)),
+            feedback_clamp_active=bool(np.any(np.abs(unclamped)>=feedback_limit)),
+            force_budget_limited=force_limited, rate_budget_limited=rate_limited,
+            learning=learning and not same_tick, duplicate_tick=same_tick, force_hold=force_hold,
+            freeze_reason=reason or ("vehicle_derivatives" if not derivatives_ready else
+                "force_hold" if force_hold else "duplicate_tick" if same_tick else
+                "learning" if learning else "external_freeze"),
+            hold_gain_scale=scale)
+        self._transport_position_pid_tick = tick
+        self._transport_position_pid_signature = signature
+        self._transport_position_pid_cached = result
+        return result
 
     def compute(self, state, target, dt):
         """计算一个 CTBR 命令。
@@ -657,6 +783,10 @@ class GeometricCtbrController:
 
         independent_mode = bool(target.get("independent_mode", False))
         transport_mode = bool(target.get("transport_mode", False))
+        native_transport_pid = (transport_mode and not independent_mode and
+            target.get("transport_feedback_controller", "differential_integral") == "native_position_pid")
+        if not native_transport_pid:
+            self.reset_transport_position_pid()
         prelift_vertical_integral = independent_mode and bool(
             target.get("prelift_vertical_integral_active", False)
         )
@@ -682,13 +812,10 @@ class GeometricCtbrController:
                 else self.config.integral_limit,
                 dtype=float,
             ).reshape(3)
-            if np.linalg.norm(position_error) < independent_integral_gate:
-                self.position_integral += dt * independent_integral_rate
-                self.position_integral = clamp_vector(
-                    self.position_integral,
-                    -independent_integral_limit,
-                    independent_integral_limit,
-                )
+            self.position_integral, _, gate_open = position_integral_step(
+                self.position_integral, position_error, velocity_error, dt,
+                independent_integral_gate, independent_integral_limit)
+            if gate_open:
                 position_integral_rate = independent_integral_rate
             else:
                 # Match MATLAB's anti-windup gate during the large SLACK/TAKEUP move.
@@ -814,14 +941,10 @@ class GeometricCtbrController:
                     )
                     if not winds_up:
                         self.position_integral[2] = candidate[2]
-            feedback_acceleration = (
-                -independent_position_gain * position_error
-                -independent_velocity_gain * velocity_error
-                -independent_integral_gain * self.position_integral
-            )
-            feedback_acceleration = clamp_vector(
-                feedback_acceleration, -max_feedback, max_feedback
-            )
+            feedback_acceleration, _, _ = position_pid_feedback(
+                position_error, velocity_error, independent_position_gain,
+                independent_velocity_gain, independent_integral_gain,
+                self.position_integral, max_feedback)
             raw_desired_force = self.config.mass * (
                 feedback_acceleration + target_acceleration +
                 np.array([0.0, 0.0, self.config.gravity])
@@ -831,12 +954,47 @@ class GeometricCtbrController:
         # ROS world 系按 z 向上处理：F = m(g e3 + a_d) - Kp ep - Kv ev - Ki ei。
         hold_acceleration = np.zeros(3)
         hold_acceleration_dot = np.zeros(3)
+        hold_feedback_limit_active = False
+        transport_integral_force = np.zeros(3)
+        transport_integral_force_dot = np.zeros(3)
+        transport_full_pid_force = np.zeros(3)
+        transport_full_pid_force_dot = np.zeros(3)
+        transport_full_pid_pd_force = np.zeros(3)
+        transport_full_pid_pd_force_dot = np.zeros(3)
+        native_pid_info = None
         blend_force_delta = np.zeros(3)
         force_override = target.get("desired_force_override")
         if independent_mode:
             pass
         elif force_override is not None:
             transport_force = np.asarray(force_override, dtype=float).reshape(3)
+            if native_transport_pid:
+                native_pid_info = self._native_transport_feedback(
+                    state, target, dt, derivatives_ready,
+                    measured_velocity if derivatives_ready else np.zeros(3),
+                    independent_position_gain, independent_velocity_gain,
+                    independent_integral_gain)
+                transport_full_pid_force = native_pid_info["integral_force"]
+                transport_full_pid_force_dot = native_pid_info["integral_force_dot"]
+                weight = float(np.clip(target.get("transport_full_pid_weight", 1.), 0., 1.))
+                weight_dot = float(target.get("transport_full_pid_weight_dot", 0.))
+                if not math.isfinite(weight_dot):
+                    weight_dot = 0.
+                transport_full_pid_force_dot = (
+                    weight * transport_full_pid_force_dot + weight_dot * transport_full_pid_force)
+                transport_full_pid_force = weight * transport_full_pid_force
+                transport_full_pid_pd_force = native_pid_info["pd_force"]
+                transport_full_pid_pd_force_dot = native_pid_info["pd_force_dot"]
+                transport_force = transport_force + transport_full_pid_pd_force + transport_full_pid_force
+                hold_feedback_limit_active = native_pid_info["feedback_clamp_active"]
+            elif transport_mode:
+                transport_integral_force = as_vector(
+                    target.get("transport_hold_integral_force", np.zeros(3)),
+                    "transport_hold_integral_force")
+                transport_integral_force_dot = as_vector(
+                    target.get("transport_hold_integral_force_dot", np.zeros(3)),
+                    "transport_hold_integral_force_dot")
+                transport_force = transport_force + transport_integral_force
             independent_force = (
                 self.config.mass * (
                     target_acceleration + np.array([0.0, 0.0, self.config.gravity])
@@ -870,7 +1028,7 @@ class GeometricCtbrController:
                 hold_scale = float(target.get(
                     "transport_position_hold_gain_scale", 0.0
                 ))
-            if (transport_blend > 0.0 and math.isfinite(hold_scale) and
+            if (not native_transport_pid and transport_blend > 0.0 and math.isfinite(hold_scale) and
                     hold_scale > 0.0):
                 hold_position_error = state["position"] - np.asarray(
                     target.get("position_hold_position", target["position"]), dtype=float
@@ -901,6 +1059,7 @@ class GeometricCtbrController:
                 if max_feedback is not None:
                     max_feedback = np.asarray(max_feedback, dtype=float).reshape(3)
                     unsaturated = np.abs(hold_acceleration) < max_feedback
+                    hold_feedback_limit_active = bool(np.any(np.abs(hold_acceleration) >= max_feedback))
                     hold_acceleration = clamp_vector(hold_acceleration, -max_feedback, max_feedback)
                     hold_acceleration_dot = np.where(
                         unsaturated, hold_acceleration_dot, 0.0
@@ -922,10 +1081,13 @@ class GeometricCtbrController:
         if independent_mode:
             raw_desired_force_dot = self.config.mass * target_jerk
             raw_desired_force_dot[2] += float(target.get("landing_support_trim_dot_nps", 0.0))
-        elif force_dot_override is not None:
+        elif force_dot_override is not None or native_pid_info is not None:
             transport_force_dot = np.asarray(
-                force_dot_override, dtype=float
-            ).reshape(3)
+                np.zeros(3) if force_dot_override is None else force_dot_override, dtype=float
+            ).reshape(3) + transport_integral_force_dot
+            if native_pid_info is not None:
+                transport_force_dot = (transport_force_dot + transport_full_pid_pd_force_dot
+                                       + transport_full_pid_force_dot)
             independent_force_dot = (
                 self.config.mass * target_jerk
                 - position_gain * velocity_error
@@ -965,6 +1127,9 @@ class GeometricCtbrController:
             self.config.max_command_thrust,
             max_tilt_rad,
         )
+        # Check the limiter itself, before the intentional force filter lag.
+        force_limit_active = not np.allclose(
+            raw_desired_force, desired_force, rtol=0.0, atol=1.0e-10)
         force_filter_tau = float(getattr(self.config, "transport_force_filter_tau_s", 0.0))
         if transport_mode and force_filter_tau > 0.0:
             force_filter_reset = bool(target.get("transport_filter_reset", False))
@@ -1139,6 +1304,7 @@ class GeometricCtbrController:
                 self.config.independent_max_body_rate, dtype=float
             ).reshape(3)
         raw_body_rate_command = np.asarray(body_rate_command, dtype=float).copy()
+        body_rate_limit_active = bool(np.any(np.abs(raw_body_rate_command) >= body_rate_limit))
         filter_tau = float(getattr(self.config, "transport_body_rate_filter_tau_s", 0.0))
         filter_reset = bool(target.get("transport_filter_reset", False))
         if transport_mode and filter_tau > 0.0:
@@ -1154,6 +1320,7 @@ class GeometricCtbrController:
             body_rate_command = raw_body_rate_command
             if not transport_mode:
                 self.previous_transport_body_rate_command = None
+        body_rate_limit_active |= bool(np.any(np.abs(body_rate_command) >= body_rate_limit))
         body_rate_command = clamp_vector(
             body_rate_command, -body_rate_limit, body_rate_limit
         )
@@ -1161,8 +1328,12 @@ class GeometricCtbrController:
         # 在起飞阶段可施加最小总推力，克服地面静摩擦和小幅估计误差；其他阶段不使用
         # 该下限，特别是降落阶段必须允许推力降低。
         minimum_thrust = float(target.get("min_collective_thrust", 0.0))
+        projected_thrust = float(desired_force @ rotation[:, 2])
+        collective_limit_active = (
+            projected_thrust <= max(0.0, minimum_thrust)
+            or projected_thrust >= self.config.max_command_thrust)
         collective_thrust = float(np.clip(
-            max(desired_force @ rotation[:, 2], minimum_thrust),
+            max(projected_thrust, minimum_thrust),
             0.0, self.config.max_command_thrust
         ))
         return {
@@ -1181,8 +1352,59 @@ class GeometricCtbrController:
             # 诊断用：记录本周期积分器状态，便于区分推力标定误差和积分器被重置。
             "position_integral": self.position_integral.copy(),
             "transport_mode": transport_mode,
+            "independent_mode": independent_mode,
+            "transport_feedback_controller": target.get(
+                "transport_feedback_controller", "differential_integral"),
+            "force_limit_active": force_limit_active,
+            "hold_feedback_limit_active": hold_feedback_limit_active,
+            "body_rate_limit_active": body_rate_limit_active,
+            "collective_limit_active": collective_limit_active,
+            "transport_hold_integral_force": transport_blend * transport_integral_force,
+            "transport_hold_integral_force_dot": (
+                transport_blend * transport_integral_force_dot
+                + (transport_blend_dot if math.isfinite(transport_blend_dot) else 0.0)
+                * transport_integral_force),
+            "transport_full_pid_force": transport_blend * transport_full_pid_force,
+            "transport_full_pid_force_dot": (
+                transport_blend * transport_full_pid_force_dot
+                + (transport_blend_dot if math.isfinite(transport_blend_dot) else 0.) * transport_full_pid_force),
+            "transport_full_pid_pd_force": transport_blend * transport_full_pid_pd_force,
+            "transport_full_pid_pd_force_dot": (
+                transport_blend * transport_full_pid_pd_force_dot
+                + (transport_blend_dot if math.isfinite(transport_blend_dot) else 0.) * transport_full_pid_pd_force),
+            "transport_full_pid_feedback_force": (
+                transport_blend * (transport_full_pid_pd_force + transport_full_pid_force)),
+            "transport_full_pid_feedback_force_dot": (
+                transport_blend * (transport_full_pid_pd_force_dot + transport_full_pid_force_dot)
+                + (transport_blend_dot if math.isfinite(transport_blend_dot) else 0.)
+                * (transport_full_pid_pd_force + transport_full_pid_force)),
+            "transport_full_pid_native_force": (
+                transport_blend * native_pid_info["native_pid_force"]
+                if native_pid_info is not None else np.zeros(3)),
+            "transport_full_pid_info": native_pid_info,
+            "transport_full_pid_integral_state": self.transport_position_integral.copy(),
+            "transport_full_pid_integral_state_delta": (
+                native_pid_info["integral_state_delta"] if native_pid_info is not None else np.zeros(3)),
+            "transport_full_pid_integral_state_limit": (
+                native_pid_info["integral_state_limit"] if native_pid_info is not None else np.zeros(3)),
+            "transport_full_pid_integral_gain": (
+                native_pid_info["integral_gain"] if native_pid_info is not None else np.zeros(3)),
+            "transport_full_pid_integral_velocity_weight": (
+                native_pid_info["integral_velocity_weight"] if native_pid_info is not None else 0.),
+            "transport_full_pid_learning": bool(native_pid_info and native_pid_info["learning"]),
+            "transport_full_pid_freeze_reason": (
+                native_pid_info["freeze_reason"] if native_pid_info is not None else "inactive"),
+            "transport_full_pid_duplicate_tick": bool(native_pid_info and native_pid_info["duplicate_tick"]),
+            "transport_full_pid_integral_gate_m": (
+                native_pid_info["integral_gate_m"] if native_pid_info is not None else 0.),
+            "transport_full_pid_gate_open": bool(native_pid_info and native_pid_info["native_gate_open"]),
+            "transport_full_pid_integral_limit_active": bool(native_pid_info and native_pid_info["integral_state_limit_active"]),
+            "transport_full_pid_feedback_limit_active": bool(native_pid_info and native_pid_info["feedback_clamp_active"]),
+            "transport_full_pid_force_budget_limited": bool(native_pid_info and native_pid_info["force_budget_limited"]),
+            "transport_full_pid_rate_budget_limited": bool(native_pid_info and native_pid_info["rate_budget_limited"]),
             "transport_position_hold_force": (
-                transport_blend * self.config.mass * hold_acceleration
+                transport_blend * (transport_full_pid_pd_force
+                                   if native_pid_info is not None else self.config.mass * hold_acceleration)
             ),
             "prelift_vertical_integral_active": prelift_vertical_integral and derivatives_ready,
             "prelift_vertical_integral_force_n": (
@@ -1307,6 +1529,8 @@ class FlightCsvLogger:
         "flight_validation_landing_stage",
         "payload_ground_reference_z_m", "payload_landing_duration_s",
         "payload_landing_touchdown_confirmed", "payload_landing_unloading",
+        "payload_landing_planning_failure_count", "payload_landing_planning_retry_count",
+        "payload_landing_planning_failure_reason", "payload_landing_planning_fallback",
         "transport_support_requested_trim_n", "transport_support_trim_limit_n",
         "transport_support_initialization_clipped", "effective_transport_link_gain_scale",
         "raw_link_force_x", "raw_link_force_y", "raw_link_force_z",
@@ -1330,6 +1554,44 @@ class FlightCsvLogger:
         "payload_transport_force_mode",
         "kinematic_specific_acceleration_x", "kinematic_specific_acceleration_y", "kinematic_specific_acceleration_z",
         "landing_vertical_integral_active", "landing_vertical_integral_force_n",
+        "transport_hold_integral_enabled", "transport_hold_integral_learning",
+        "transport_hold_integral_freeze_reason",
+        "transport_hold_integral_bias_x", "transport_hold_integral_bias_y", "transport_hold_integral_bias_z",
+        "transport_hold_integral_error_x", "transport_hold_integral_error_y", "transport_hold_integral_error_z",
+        "transport_hold_integral_force_x", "transport_hold_integral_force_y", "transport_hold_integral_force_z",
+        "transport_hold_integral_force_dot_x", "transport_hold_integral_force_dot_y", "transport_hold_integral_force_dot_z",
+        "transport_feedback_controller", "transport_full_pid_learning", "transport_full_pid_freeze_reason",
+        "transport_full_pid_duplicate_tick", "transport_full_pid_integral_gate_m", "transport_full_pid_gate_open",
+        "transport_full_pid_integral_limit_active", "transport_full_pid_feedback_limit_active",
+        "transport_full_pid_force_budget_limited", "transport_full_pid_rate_budget_limited",
+        "transport_full_pid_integral_state_x", "transport_full_pid_integral_state_y", "transport_full_pid_integral_state_z",
+        "transport_full_pid_integral_state_delta_x", "transport_full_pid_integral_state_delta_y", "transport_full_pid_integral_state_delta_z",
+        "transport_full_pid_integral_state_limit_x", "transport_full_pid_integral_state_limit_y", "transport_full_pid_integral_state_limit_z",
+        "transport_full_pid_integral_gain_x", "transport_full_pid_integral_gain_y", "transport_full_pid_integral_gain_z",
+        "transport_full_pid_force_x", "transport_full_pid_force_y", "transport_full_pid_force_z",
+        "transport_full_pid_force_dot_x", "transport_full_pid_force_dot_y", "transport_full_pid_force_dot_z",
+        "transport_full_pid_pd_force_x", "transport_full_pid_pd_force_y", "transport_full_pid_pd_force_z",
+        "transport_full_pid_pd_force_dot_x", "transport_full_pid_pd_force_dot_y", "transport_full_pid_pd_force_dot_z",
+        "transport_full_pid_feedback_force_x", "transport_full_pid_feedback_force_y", "transport_full_pid_feedback_force_z",
+        "transport_full_pid_feedback_force_dot_x", "transport_full_pid_feedback_force_dot_y", "transport_full_pid_feedback_force_dot_z",
+        "force_limit_active", "hold_feedback_limit_active", "body_rate_limit_active", "collective_limit_active",
+        "independent_mode", "transport_mode",
+        "transport_full_pid_integral_velocity_weight",
+        "transport_attitude_trim_enabled", "transport_attitude_trim_learning",
+        "transport_attitude_trim_freeze_reason", "transport_attitude_trim_limit_active",
+        "transport_attitude_trim_rate_limit_active", "transport_attitude_trim_acceleration_limit_active",
+        "transport_attitude_trim_error_x", "transport_attitude_trim_error_y", "transport_attitude_trim_error_z",
+        "transport_attitude_trim_integral_x", "transport_attitude_trim_integral_y", "transport_attitude_trim_integral_z",
+        "transport_attitude_trim_position_x", "transport_attitude_trim_position_y", "transport_attitude_trim_position_z",
+        "transport_attitude_trim_velocity_x", "transport_attitude_trim_velocity_y", "transport_attitude_trim_velocity_z",
+        "transport_attitude_trim_acceleration_x", "transport_attitude_trim_acceleration_y", "transport_attitude_trim_acceleration_z",
+        "transport_attitude_trim_bridge_active",
+        "transport_attitude_trim_bridge_position_x", "transport_attitude_trim_bridge_position_y", "transport_attitude_trim_bridge_position_z",
+        "transport_attitude_trim_bridge_velocity_x", "transport_attitude_trim_bridge_velocity_y", "transport_attitude_trim_bridge_velocity_z",
+        "transport_attitude_trim_bridge_acceleration_x", "transport_attitude_trim_bridge_acceleration_y", "transport_attitude_trim_bridge_acceleration_z",
+        "transport_attitude_trim_bridge_hold_position_x", "transport_attitude_trim_bridge_hold_position_y", "transport_attitude_trim_bridge_hold_position_z",
+        "transport_attitude_trim_bridge_hold_velocity_x", "transport_attitude_trim_bridge_hold_velocity_y", "transport_attitude_trim_bridge_hold_velocity_z",
+        "transport_attitude_trim_bridge_hold_acceleration_x", "transport_attitude_trim_bridge_hold_acceleration_y", "transport_attitude_trim_bridge_hold_acceleration_z",
     ]
 
     def __init__(self, directory, prefix):
@@ -1859,10 +2121,13 @@ class CtbrControllerNode:
         self.path_publish_interval_s = float(
             self.params.global_param("path_publish_interval_s", 0.1)
         )
+        self.path_max_poses = int(self.params.global_param("path_max_poses", 1000))
         if not self.path_frame_id:
             raise rospy.ROSInitException("path_frame_id 不能为空")
         if self.path_publish_interval_s <= 0.0:
             raise rospy.ROSInitException("path_publish_interval_s 必须为正数")
+        if self.path_max_poses <= 0:
+            raise rospy.ROSInitException("path_max_poses 必须为正整数")
         self.path_publisher = rospy.Publisher(
             rospy.get_param("~path_topic", self.prefix + "/path"),
             Path,
@@ -2666,6 +2931,8 @@ class CtbrControllerNode:
         pose.pose.orientation.w = 1.0
         self.path_message.header.stamp = pose.header.stamp
         self.path_message.poses.append(pose)
+        if len(self.path_message.poses) > self.path_max_poses:
+            del self.path_message.poses[:-self.path_max_poses]
         now = time.monotonic()
         if now - self.last_path_publish_time >= self.path_publish_interval_s:
             self.last_path_publish_time = now
@@ -2897,8 +3164,12 @@ class CtbrControllerNode:
                       "effective_transport_link_gain_scale"):
             row[field] = float(target.get(field, math.nan))
         for field in ("payload_landing_touchdown_confirmed", "payload_landing_unloading",
-                      "transport_support_initialization_clipped"):
+                      "transport_support_initialization_clipped", "payload_landing_planning_fallback"):
             row[field] = int(bool(target.get(field, False)))
+        for field in ("payload_landing_planning_failure_count", "payload_landing_planning_retry_count"):
+            row[field] = int(target.get(field, 0))
+        row["payload_landing_planning_failure_reason"] = str(
+            target.get("payload_landing_planning_failure_reason", ""))
         row["payload_ground_clearance_m"] = float(
             target.get("payload_ground_clearance_m", math.nan)
         )
@@ -2963,6 +3234,49 @@ class CtbrControllerNode:
         row["payload_attitude_reference_progress"] = float(
             target.get("payload_attitude_reference_progress", math.nan))
         row["payload_transport_force_mode"] = str(target.get("payload_transport_force_mode", ""))
+        for field in ("transport_hold_integral_enabled", "transport_hold_integral_learning"):
+            row[field] = int(bool(target.get(field, False)))
+        row["transport_hold_integral_freeze_reason"] = str(
+            target.get("transport_hold_integral_freeze_reason", "inactive"))
+        for prefix in ("transport_hold_integral_bias", "transport_hold_integral_error"):
+            self._with_xyz(row, prefix, target.get(prefix, np.zeros(3)))
+        for prefix in ("transport_hold_integral_force", "transport_hold_integral_force_dot"):
+            self._with_xyz(row, prefix, command.get(prefix, np.zeros(3)))
+        row["transport_feedback_controller"] = str(command.get(
+            "transport_feedback_controller", "differential_integral"))
+        row["transport_full_pid_freeze_reason"] = str(command.get(
+            "transport_full_pid_freeze_reason", "inactive_mode"))
+        row["transport_full_pid_integral_gate_m"] = float(command.get(
+            "transport_full_pid_integral_gate_m", math.nan))
+        row["transport_full_pid_integral_velocity_weight"] = float(command.get(
+            "transport_full_pid_integral_velocity_weight", math.nan))
+        for field in ("transport_attitude_trim_enabled", "transport_attitude_trim_learning",
+                      "transport_attitude_trim_limit_active", "transport_attitude_trim_rate_limit_active",
+                      "transport_attitude_trim_acceleration_limit_active", "transport_attitude_trim_bridge_active"):
+            row[field] = int(bool(target.get(field, False)))
+        row["transport_attitude_trim_freeze_reason"] = str(
+            target.get("transport_attitude_trim_freeze_reason", "inactive"))
+        for prefix in ("transport_attitude_trim_error", "transport_attitude_trim_integral",
+                       "transport_attitude_trim_position", "transport_attitude_trim_velocity",
+                       "transport_attitude_trim_acceleration", "transport_attitude_trim_bridge_position",
+                       "transport_attitude_trim_bridge_velocity", "transport_attitude_trim_bridge_acceleration",
+                       "transport_attitude_trim_bridge_hold_position", "transport_attitude_trim_bridge_hold_velocity",
+                       "transport_attitude_trim_bridge_hold_acceleration"):
+            self._with_xyz(row, prefix, target.get(prefix, np.zeros(3)))
+        for field in ("transport_full_pid_learning", "transport_full_pid_duplicate_tick",
+                      "transport_full_pid_gate_open", "transport_full_pid_integral_limit_active",
+                      "transport_full_pid_feedback_limit_active", "transport_full_pid_force_budget_limited",
+                      "transport_full_pid_rate_budget_limited"):
+            row[field] = int(bool(command.get(field, False)))
+        for prefix in ("transport_full_pid_integral_state", "transport_full_pid_integral_state_delta",
+                       "transport_full_pid_integral_state_limit", "transport_full_pid_integral_gain",
+                       "transport_full_pid_force", "transport_full_pid_force_dot",
+                       "transport_full_pid_pd_force", "transport_full_pid_pd_force_dot",
+                       "transport_full_pid_feedback_force", "transport_full_pid_feedback_force_dot"):
+            self._with_xyz(row, prefix, command.get(prefix, np.zeros(3)))
+        for field in ("force_limit_active", "hold_feedback_limit_active", "body_rate_limit_active",
+                      "collective_limit_active", "independent_mode", "transport_mode"):
+            row[field] = int(bool(command.get(field, False)))
         if "kinematic_specific_acceleration" in target:
             self._with_xyz(row, "kinematic_specific_acceleration", target["kinematic_specific_acceleration"])
         self._with_xyz(
@@ -3149,6 +3463,16 @@ class MultiCtbrControllerNode:
         self.payload_ground_center_z = math.nan
         self.payload_ground_clearance_reference_m = 0.0
         self.payload_landing_profile = None
+        self.payload_landing_failure_count = 0
+        self.payload_landing_failure_reason = ""
+        self.payload_landing_failure_snapshot = None
+        self.payload_landing_retry_since = None
+        self.payload_landing_retry_count = 0
+        self.payload_landing_retry_tick = None
+        self.fleet_numerical_fault_reason = ""
+        self.fleet_numerical_fault_since = None
+        self.fleet_tick_completed_vehicles = set()
+        self.fleet_tick_initial_commands = {}
         self.payload_last_reference = None
         self.payload_landing_gain_snapshot = None
         self.payload_landing_rope_directions = None
@@ -3181,6 +3505,17 @@ class MultiCtbrControllerNode:
         self.payload_transport_steady_link_gain_scale = 1.0
         self.payload_ramp_position_hold_gain_scale = 2.0
         self.payload_transport_position_hold_gain_scale = 0.0
+        self.payload_transport_feedback_controller = "differential_integral"
+        self.payload_transport_pid_integral_gain_scale = 1.0
+        self.payload_transport_pid_integral_limit_scale = 1.0
+        self.payload_transport_pid_integral_gate_m = 0.20
+        self.payload_transport_pid_integral_velocity_weight = 1.0
+        self.payload_transport_pid_force_limit_n = 0.06
+        self.payload_transport_pid_force_rate_limit_nps = 0.004
+        self.payload_attitude_trim_enabled = False
+        self.payload_attitude_trim_parameters = {}
+        self.payload_attitude_trim = None
+        self.payload_attitude_trim_landing_bridge = None
         self.payload_yaw_enabled = True
         self.payload_velocity_limit_mps = np.ones(3)
         self.payload_velocity_jump_limit_mps = np.ones(3)
@@ -3221,6 +3556,9 @@ class MultiCtbrControllerNode:
         self.payload_handoff_forces = None
         self.payload_transport_guard = SlungTransportGuard()
         self.payload_support_trim = SlungSupportTrim()
+        self.payload_transport_integral = SlungDifferentialHoldIntegral()
+        self.payload_transport_integral_enabled = False
+        self.payload_transport_integral_last_time = None
         self.payload_safety_reason = ""
         self.payload_minimum_vehicle_distance_m = math.nan
         self.payload_predicted_vehicle_distance_m = math.nan
@@ -3243,9 +3581,13 @@ class MultiCtbrControllerNode:
         self.payload_path_last_publish_time = 0.0
         self.payload_path_publish_interval_s = float(rospy.get_param(
             GLOBAL_CTBR_PARAMETER_ROOT + "/path_publish_interval_s", 0.1))
+        self.payload_path_max_poses = int(rospy.get_param(
+            GLOBAL_CTBR_PARAMETER_ROOT + "/path_max_poses", 1000))
         if (not math.isfinite(self.payload_path_publish_interval_s)
                 or self.payload_path_publish_interval_s <= 0):
             raise rospy.ROSInitException("path_publish_interval_s 必须为正的有限数")
+        if self.payload_path_max_poses <= 0:
+            raise rospy.ROSInitException("path_max_poses 必须为正整数")
         if self.transport_mode == "slung_load":
             try:
                 payload = rospy.get_param(PAYLOAD_PARAMETER_ROOT)
@@ -3497,6 +3839,40 @@ class MultiCtbrControllerNode:
                 self.payload_transport_position_hold_gain_scale = float(
                     payload.get("transport_position_hold_gain_scale", 0.0)
                 )
+                self.payload_transport_feedback_controller = str(payload.get(
+                    "transport_feedback_controller", "differential_integral"))
+                if self.payload_transport_feedback_controller not in (
+                        "differential_integral", "native_position_pid"):
+                    raise ValueError(
+                        "transport_feedback_controller 必须为 differential_integral 或 native_position_pid")
+                if (self.payload_transport_feedback_controller == "native_position_pid"
+                        and load_cfg.transport_force_mode != "reference_cascade"):
+                    raise ValueError("native_position_pid 仅支持 reference_cascade")
+                self.payload_transport_pid_integral_gain_scale = float(payload.get(
+                    "transport_position_pid_integral_gain_scale", 1.0))
+                self.payload_transport_pid_integral_limit_scale = float(payload.get(
+                    "transport_position_pid_integral_limit_scale", 1.0))
+                self.payload_transport_pid_integral_gate_m = float(payload.get(
+                    "transport_position_pid_integral_gate_m", 0.20))
+                integral_velocity_weight = payload.get(
+                    "transport_position_pid_integral_velocity_weight", 1.0)
+                if (isinstance(integral_velocity_weight, (bool, np.bool_))
+                        or not isinstance(integral_velocity_weight, (int, float, np.integer, np.floating))
+                        or not math.isfinite(float(integral_velocity_weight))
+                        or integral_velocity_weight < 0.0):
+                    raise ValueError("transport_position_pid_integral_velocity_weight 必须为非负的有限数")
+                self.payload_transport_pid_integral_velocity_weight = float(integral_velocity_weight)
+                self.payload_transport_pid_force_limit_n = float(payload.get(
+                    "transport_position_pid_force_limit_n", 0.06))
+                self.payload_transport_pid_force_rate_limit_nps = float(payload.get(
+                    "transport_position_pid_force_rate_limit_nps", 0.004))
+                if any(not math.isfinite(v) or v <= 0.0 for v in (
+                        self.payload_transport_pid_integral_gain_scale,
+                        self.payload_transport_pid_integral_limit_scale,
+                        self.payload_transport_pid_integral_gate_m,
+                        self.payload_transport_pid_force_limit_n,
+                        self.payload_transport_pid_force_rate_limit_nps)):
+                    raise ValueError("transport native position PID 参数必须为正的有限数")
                 self.payload_attitude_reference_enabled = payload.get(
                     "transport_attitude_reference_enabled", False)
                 self.payload_equilibrium_reference_enabled = payload.get(
@@ -3514,6 +3890,25 @@ class MultiCtbrControllerNode:
                              or self.payload_ramp_position_hold_gain_scale <= 0.0
                              or self.payload_transport_position_hold_gain_scale <= 0.0)):
                     raise ValueError("reference_cascade 需要启用姿态/平衡构型参考以及正的位置保持增益")
+                self.payload_attitude_trim_enabled = payload.get("transport_attitude_trim_enabled", False)
+                if not isinstance(self.payload_attitude_trim_enabled, bool):
+                    raise ValueError("transport_attitude_trim_enabled 必须为布尔值")
+                if (self.payload_attitude_trim_enabled
+                        and load_cfg.transport_force_mode != "reference_cascade"):
+                    raise ValueError("transport_attitude_trim 仅支持 reference_cascade")
+                self.payload_attitude_trim_parameters = dict(
+                    gain_per_s=payload.get("transport_attitude_trim_gain_per_s", [.05, .05, .02]),
+                    max_offset_m=payload.get("transport_attitude_trim_limit_m", .01),
+                    max_rate_mps=payload.get("transport_attitude_trim_rate_limit_mps", .001),
+                    max_acceleration_mps2=payload.get("transport_attitude_trim_acceleration_limit_mps2", .001),
+                    adaptation_interval_s=payload.get("transport_attitude_trim_interval_s", 1.),
+                )
+                try:
+                    self.payload_attitude_trim = SlungAttitudeReferenceTrim(
+                        load_cfg.attachment_points_m, enabled=self.payload_attitude_trim_enabled,
+                        **self.payload_attitude_trim_parameters)
+                except (TypeError, ValueError) as error:
+                    raise ValueError("transport_attitude_trim 参数无效：%s" % error) from error
                 self.payload_transport_guard = SlungTransportGuard(
                     min_distance_m=float(payload.get("minimum_vehicle_distance_m", 0.30)),
                     prediction_s=float(payload.get("separation_prediction_s", 0.35)),
@@ -3525,6 +3920,17 @@ class MultiCtbrControllerNode:
                     integral_gain=float(payload.get("transport_support_integral_gain_npm_s", 0.20)),
                     rate_limit_nps=float(payload.get("transport_support_trim_rate_nps", 0.03)),
                 )
+                self.payload_transport_integral_enabled = payload.get("transport_hold_integral_enabled", False)
+                if not isinstance(self.payload_transport_integral_enabled, bool):
+                    raise ValueError("transport_hold_integral_enabled must be boolean")
+                try:
+                    self.payload_transport_integral = SlungDifferentialHoldIntegral(
+                        gain_npm_s=payload.get("transport_hold_integral_gain_npm_s", .02),
+                        limit_n=payload.get("transport_hold_integral_force_limit_n", .03),
+                        rate_limit_nps=payload.get("transport_hold_integral_rate_limit_nps", .002),
+                    )
+                except ValueError as error:
+                    raise ValueError("transport_hold_integral: %s" % error) from error
                 self.payload_landing_max_speed_mps = float(payload.get("landing_payload_max_speed_mps", .12))
                 self.payload_landing_max_acceleration_mps2 = float(payload.get("landing_payload_max_acceleration_mps2", .15))
                 self.payload_landing_gain_transition_s = float(payload.get("landing_gain_transition_s", 2.0))
@@ -3638,6 +4044,17 @@ class MultiCtbrControllerNode:
             len(self.vehicles), self.logger.path,
         )
         if self.transport_mode == "slung_load":
+            rospy.loginfo(
+                "吊运飞机反馈：%s；native I 增益倍率 %.3f、状态上限倍率 %.3f、"
+                "门限 %.3f m、积分速度权重 %.3f、附加 I 力上限 %.3f N、变化率 %.3f N/s。",
+                self.payload_transport_feedback_controller,
+                self.payload_transport_pid_integral_gain_scale,
+                self.payload_transport_pid_integral_limit_scale,
+                self.payload_transport_pid_integral_gate_m,
+                self.payload_transport_pid_integral_velocity_weight,
+                self.payload_transport_pid_force_limit_n,
+                self.payload_transport_pid_force_rate_limit_nps,
+            )
             if self.payload_flight_validation_enabled:
                 rospy.loginfo(
                     "[实飞验证] 已启用：从进入 TAUT_RAMP 开始计时 %.2f s 后受控降落"
@@ -3836,6 +4253,8 @@ class MultiCtbrControllerNode:
             pose.pose.orientation.w = 1.0
         self.payload_path_message.header.stamp = pose.header.stamp
         self.payload_path_message.poses.append(pose)
+        if len(self.payload_path_message.poses) > self.payload_path_max_poses:
+            del self.payload_path_message.poses[:-self.payload_path_max_poses]
         self.payload_path_last_publish_time = now
         self.payload_path_publisher.publish(self.payload_path_message)
 
@@ -4282,6 +4701,123 @@ class MultiCtbrControllerNode:
             0.0,
         )
 
+    @staticmethod
+    def _finite_supported_command(command):
+        if not command:
+            return False
+        try:
+            force = np.asarray(command["desired_force"], dtype=float)
+            rates = np.asarray(command.get("body_rate_command", np.zeros(3)), dtype=float)
+            thrust = float(command["collective_thrust"])
+            return (force.shape == (3,) and rates.shape == (3,)
+                    and np.all(np.isfinite(force)) and np.all(np.isfinite(rates))
+                    and math.isfinite(thrust) and thrust > 0. and force[2] > 0.)
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _finite_transport_override(target):
+        vectors = ("position", "velocity", "acceleration", "position_hold_position",
+                   "position_hold_velocity", "position_hold_acceleration",
+                   "desired_force_override", "desired_force_dot_override",
+                   "kinematic_specific_acceleration")
+        scalars = ("transport_blend", "transport_blend_dot", "max_tilt_rad",
+                   "transport_position_hold_gain_scale")
+        try:
+            return (target.get("transport_mode", False)
+                    and all(np.asarray(target[key]).shape == (3,)
+                            and np.all(np.isfinite(target[key])) for key in vectors)
+                    and all(math.isfinite(float(target[key])) for key in scalars)
+                    and all(np.all(np.isfinite(value)) for value in target.values()
+                            if isinstance(value, np.ndarray)))
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    def _payload_planning_hold(self, now):
+        """Freeze a complete supported reference for the bounded retry window."""
+        overrides = {}
+        for index, vehicle in enumerate(self.vehicles):
+            previous = self.last_transport_overrides.get(id(vehicle), {})
+            if self._finite_transport_override(previous):
+                target = dict(previous)
+            else:
+                command = getattr(vehicle, "last_control_command", None)
+                references = self.payload_transport_vehicle_start_positions
+                if (not self._finite_supported_command(command) or references is None
+                        or not np.all(np.isfinite(references[index]))):
+                    return {}
+                # A last valid actuator command is the support source when a
+                # complete cooperative target has not yet been cached.
+                target = dict(transport_mode=True, independent_mode=False,
+                    transport_blend=1., position=references[index].copy(),
+                    position_hold_position=references[index].copy(),
+                    desired_force_override=command["desired_force"].copy(),
+                    transport_position_hold_gain_scale=0.,
+                    max_tilt_rad=vehicle.controller.config.max_tilt_rad,
+                    kinematic_specific_acceleration=np.zeros(3))
+            for key in ("velocity", "acceleration", "position_hold_velocity",
+                        "position_hold_acceleration", "desired_force_dot_override",
+                        "transport_hold_integral_force_dot"):
+                target[key] = np.zeros(3)
+            target.update(transport_blend_dot=0., transport_position_hold_gain_scale_dot=0.,
+                transport_hold_integral_learning=False,
+                transport_hold_integral_freeze_reason="landing_planner_retry",
+                transport_full_pid_learning=False,
+                transport_full_pid_freeze_reason="landing_planner_retry",
+                transport_full_pid_tick=float(now), transport_full_pid_force_hold=True,
+                transport_full_pid_weight_dot=0., transport_filter_reset=False)
+            if not self._finite_transport_override(target):
+                return {}
+            overrides[id(vehicle)] = target
+        self._refresh_cached_attitude_trim(now, overrides, "landing_planner_retry", freeze_base_derivatives=True)
+        return overrides
+
+    def _exit_payload_planning_fault(self, now, reason, source="landing_planner"):
+        """Finish a failed retry window using the existing supported descent."""
+        reason = source + ": " + str(reason)
+        self.payload_controlled_exit_reason = "payload_load: " + reason
+        if not all(self._finite_supported_command(getattr(v, "last_control_command", None))
+                   for v in self.vehicles):
+            self._set_abort(reason + "; no finite supported fleet command")
+            return
+        # Disable the cooperative planner before selecting the independent
+        # emergency path, so recovery cannot immediately invoke it again.
+        self.payload_transport_active = False
+        self._begin_payload_emergency_landing(now, reason)
+        self._reset_payload_handoff()
+        self.payload_validation_landing_stage = "planning_fault_descent"
+
+    def _payload_landing_planning_failed(self, now, error, payload_state):
+        if self.payload_landing_retry_tick != float(now):
+            self.payload_landing_retry_tick = float(now)
+            self.payload_landing_failure_count += 1
+            self.payload_landing_retry_count += 1
+            if self.payload_landing_retry_since is None:
+                self.payload_landing_retry_since = float(now)
+            self.payload_landing_failure_reason = "%s: %s" % (type(error).__name__, error)
+            if self.payload_landing_failure_snapshot is None:
+                self.payload_landing_failure_snapshot = {
+                    "start_position": np.asarray(payload_state["position"]).tolist(),
+                    "start_velocity": np.asarray(payload_state.get("velocity", np.zeros(3))).tolist(),
+                    "start_acceleration": np.asarray(payload_state.get("acceleration", np.zeros(3))).tolist(),
+                    "ground_z": (self.payload_ground_center_z if math.isfinite(self.payload_ground_center_z)
+                                 else .5 * float(self.payload_height_m)),
+                    "now": float(now),
+                    "min_duration_s": float(self.vehicles[0].trajectory_config.landing_duration_s),
+                    "max_speed_mps": self.payload_landing_max_speed_mps,
+                    "max_accel_mps2": self.payload_landing_max_acceleration_mps2,
+                    "reason": self.payload_landing_failure_reason,
+                }
+                rospy.logerr("负载下降规划失败，暂时保留协同支撑并有界重试：%s", self.payload_landing_failure_snapshot)
+        self.payload_landing_profile = None
+        self.payload_landing_start_time = None
+        held = self._payload_planning_hold(now)
+        if (self.payload_landing_retry_count >= 3
+                or now - self.payload_landing_retry_since >= .3 or not held):
+            self._exit_payload_planning_fault(now, self.payload_landing_failure_reason)
+            return {}
+        return held
+
     def _transport_overrides(self, now):
         if self.transport_mode != "slung_load" or not self.slung_controller:
             return {}
@@ -4291,6 +4827,7 @@ class MultiCtbrControllerNode:
             payload_state = dict(self.latest_payload_state)
         targets = []
         vehicle_states = []
+        control_states = []
         for vehicle in self.vehicles:
             with vehicle.lock:
                 state = vehicle.latest_state
@@ -4303,6 +4840,7 @@ class MultiCtbrControllerNode:
                     "landing_settle"):
                 return {}
             control_state = vehicle._build_ekf_control_state(state, now)
+            control_states.append(control_state)
             vehicle_states.append({
                 "position": state["position"],
                 "velocity": control_state.get("control_velocity", np.zeros(3)),
@@ -4323,8 +4861,15 @@ class MultiCtbrControllerNode:
         landing = any(target.get("flight_phase") in ("landing", "landing_settle")
                       for target in targets)
         if landing:
-            if self.payload_landing_profile is None:
-                self.payload_landing_start_time = float(now)
+            if self.payload_landing_retry_tick == float(now):
+                return self._payload_planning_hold(now)
+            # A normal trajectory can enter landing before the validation
+            # deadline.  Validation then clears the start timestamp while an
+            # old profile may still exist; rebuild both pieces together so a
+            # landing tick can never subtract ``None`` or reuse a pre-deadline
+            # reference.
+            if (self.payload_landing_profile is None
+                    or self.payload_landing_start_time is None):
                 # The landing profile must start at the current measured load
                 # state.  Reusing payload_last_reference can point above the
                 # load after the validation timer has elapsed.
@@ -4336,19 +4881,21 @@ class MultiCtbrControllerNode:
                 )
                 ground_z = (self.payload_ground_center_z if math.isfinite(self.payload_ground_center_z)
                             else .5 * float(self.payload_height_m))
-                self.payload_landing_profile = SlungLandingProfile(
-                    initial[0], initial[1], initial[2], ground_z, now,
-                    float(self.vehicles[0].trajectory_config.landing_duration_s),
-                    self.payload_landing_max_speed_mps, self.payload_landing_max_acceleration_mps2)
-                self.payload_landing_start_position = np.asarray(initial[0]).copy()
+                try:
+                    profile = SlungLandingProfile(
+                        initial[0], initial[1], initial[2], ground_z, now,
+                        float(self.vehicles[0].trajectory_config.landing_duration_s),
+                        self.payload_landing_max_speed_mps, self.payload_landing_max_acceleration_mps2)
+                except (ValueError, ArithmeticError, np.linalg.LinAlgError) as error:
+                    return self._payload_landing_planning_failed(now, error, payload_state)
                 previous = next(iter(self.last_transport_overrides.values()), {})
-                self.payload_landing_gain_snapshot = (
+                gains = (
                     float(previous.get("transport_position_hold_gain_scale", self.payload_ramp_position_hold_gain_scale)),
                     float(previous.get("effective_transport_link_gain_scale", self.payload_transport_link_gain_scale)),
                     float(previous.get("transport_max_tilt_rad", self.vehicles[0].controller.config.max_tilt_rad)),
                     float(previous.get("transport_blend", initial[3])),
                 )
-                self.payload_touchdown_detector = PayloadTouchdownDetector(
+                detector = PayloadTouchdownDetector(
                     ground_clearance_m=self.payload_ground_clearance_reference_m,
                     **self.payload_touchdown_parameters)
                 attachment_points = self.slung_controller.config.attachment_points_m
@@ -4362,26 +4909,41 @@ class MultiCtbrControllerNode:
                 )
                 relative = measured_attachments - measured_positions.T
                 measured_distances = np.linalg.norm(relative, axis=0)
+                directions = distances = None
                 if (np.all(np.isfinite(relative)) and
                         np.all(measured_distances > 1.0e-6)):
-                    self.payload_landing_rope_directions = (
+                    directions = (
                         relative / measured_distances[None, :]
                     )
                     # Preserve a measured overrun rather than pulling an
                     # aircraft inward to the shorter nominal length.
-                    self.payload_landing_rope_distances = np.maximum(
+                    distances = np.maximum(
                         measured_distances,
                         np.asarray(self.slung_controller.config.link_lengths_m, dtype=float),
                     )
+                self.payload_landing_profile = profile
+                self.payload_landing_start_time = float(now)
+                self.payload_landing_start_position = np.asarray(initial[0]).copy()
+                self.payload_landing_gain_snapshot = gains
+                self.payload_touchdown_detector = detector
+                self.payload_landing_rope_directions = directions
+                self.payload_landing_rope_distances = distances
                 rospy.loginfo("负载受控下降参考 %.2f s，速度上限 %.3f m/s，加速度上限 %.3f m/s²。",
                               self.payload_landing_profile.duration, self.payload_landing_max_speed_mps,
                               self.payload_landing_max_acceleration_mps2)
             blend_profile = smoothstep5_profile(now - self.payload_landing_start_time,
                                                self.payload_landing_gain_transition_s)
             initial_blend = self.payload_landing_gain_snapshot[3]
-            payload_reference = (*self.payload_landing_profile.evaluate(now),
-                                 initial_blend + (1-initial_blend)*blend_profile[0],
-                                 (1-initial_blend)*blend_profile[1])
+            try:
+                payload_reference = (*self.payload_landing_profile.evaluate(now),
+                                     initial_blend + (1-initial_blend)*blend_profile[0],
+                                     (1-initial_blend)*blend_profile[1])
+                if not all(np.all(np.isfinite(value)) for value in payload_reference):
+                    raise ValueError("landing evaluation returned nonfinite references")
+            except (ValueError, ArithmeticError, np.linalg.LinAlgError) as error:
+                return self._payload_landing_planning_failed(now, error, payload_state)
+            self.payload_landing_retry_since = None
+            self.payload_landing_retry_count = 0
         else:
             desired_payload_position = np.mean(
                 [vehicle.trajectory.takeoff_position for vehicle in self.vehicles],
@@ -4687,6 +5249,16 @@ class MultiCtbrControllerNode:
                 "transport_position_hold_gain_scale": (
                     transport_hold_scale
                 ),
+                "transport_feedback_controller": self.payload_transport_feedback_controller,
+                "transport_full_pid_integral_gate_m": self.payload_transport_pid_integral_gate_m,
+                "transport_full_pid_integral_velocity_weight": self.payload_transport_pid_integral_velocity_weight,
+                "transport_full_pid_integral_limit": (
+                    np.asarray(vehicle.controller.config.independent_integral_limit, dtype=float)
+                    * self.payload_transport_pid_integral_limit_scale
+                ),
+                "transport_full_pid_integral_gain_scale": self.payload_transport_pid_integral_gain_scale,
+                "transport_full_pid_force_limit_n": self.payload_transport_pid_force_limit_n,
+                "transport_full_pid_force_rate_limit_nps": self.payload_transport_pid_force_rate_limit_nps,
                 "payload_landing_rope_preserving": bool(
                     landing and self.payload_landing_rope_directions is not None
                 ),
@@ -4711,7 +5283,305 @@ class MultiCtbrControllerNode:
                 overrides[id(vehicle)]["handoff_force"] = self.payload_handoff_forces[index].copy()
             if transport_blend < 1.0:
                 overrides[id(vehicle)]["flight_phase"] = "tension_ramp"
+        try:
+            self._apply_attitude_reference_trim(now, payload_state, control_states,
+                                               overrides, landing)
+        except (ValueError, ArithmeticError, np.linalg.LinAlgError) as error:
+            if landing:
+                return self._payload_landing_planning_failed(now, error, payload_state)
+            raise
+        self._apply_transport_hold_integral(now, payload_state, vehicle_states,
+                                            control_states, overrides, landing)
+        if not all(self._finite_transport_override(target) for target in overrides.values()):
+            raise ValueError("cooperative controller returned nonfinite command references")
         return overrides
+
+    def _transport_learning_reason(self, now, payload_state, control_states,
+                                   overrides, landing, enabled, supported):
+        """Use one fleet health gate for the slow reference and force learners."""
+        elapsed = float(now) - float(self.payload_transport_start_time)
+        reference_end = max(
+            self.payload_attitude_reference_s if self.payload_attitude_reference_enabled else 0.,
+            self.payload_tension_ramp_s + self.payload_reference_lift_s)
+        reason = ""
+        if not enabled:
+            reason = "disabled"
+        elif not supported:
+            reason = "unsupported_force_mode"
+        elif self.global_abort_reason:
+            reason = "global_abort"
+        elif landing or self.payload_validation_landing_stage or self.payload_controlled_exit_reason:
+            reason = "landing"
+        elif not self.payload_transport_active:
+            reason = "inactive"
+        elif elapsed < reference_end:
+            reason = "reference_moving"
+        elif (self.payload_flight_validation_enabled
+              and elapsed >= self.payload_flight_validation_transport_s):
+            reason = "validation_due"
+        if not reason:
+            try:
+                source_age = float(rospy.Time.now().to_sec()) - float(payload_state["sample_time"])
+            except (AttributeError, KeyError, TypeError, ValueError):
+                source_age = math.nan
+            future_tolerance = float(getattr(self.vehicles[0], "mocap_timestamp_future_tolerance_s", 0.))
+            if (not self._payload_ready(now) or not math.isfinite(source_age)
+                    or not -future_tolerance <= source_age <= self.vehicles[0].state_timeout):
+                reason = "payload_feedback"
+            elif any(not state.get("ekf_state_valid", False)
+                     or state.get("ekf_kinematics_held", False)
+                     or not math.isfinite(float(state.get("ekf_kinematics_weight_effective", 0.)))
+                     or state.get("ekf_kinematics_weight_effective", 0.) <= 0.
+                     or not state.get("derivatives_valid", False)
+                     or not state.get("filter_derivatives_valid", state.get("derivatives_valid", False))
+                     for state in control_states):
+                reason = "vehicle_feedback"
+            elif any(not math.isfinite(float(overrides[id(vehicle)].get("desired_tension_signed", 0.)))
+                     or overrides[id(vehicle)].get("desired_tension_signed", 0.) <= 0.
+                     for vehicle in self.vehicles):
+                reason = "nonpositive_tension"
+            elif any(any(bool((getattr(vehicle, "last_control_command", None) or {}).get(key, False))
+                         for key in ("force_limit_active", "hold_feedback_limit_active",
+                                     "body_rate_limit_active", "collective_limit_active"))
+                     for vehicle in self.vehicles):
+                reason = "host_command_limited"
+        return reason
+
+    def _attitude_trim_metadata(self, overrides, offsets, reason):
+        trim = getattr(self, "payload_attitude_trim", None)
+        enabled = bool(getattr(self, "payload_attitude_trim_enabled", False)
+                       and trim is not None
+                       and self.slung_controller.config.transport_force_mode == "reference_cascade")
+        for index, vehicle in enumerate(self.vehicles):
+            overrides[id(vehicle)].update(
+                transport_attitude_trim_enabled=enabled,
+                transport_attitude_trim_learning=enabled and not reason and bool(trim.learning),
+                transport_attitude_trim_freeze_reason=reason,
+                transport_attitude_trim_error=(trim.error if enabled else np.zeros(3)),
+                transport_attitude_trim_integral=(trim.integral if enabled else np.zeros(3)),
+                transport_attitude_trim_position=offsets[0][index].copy(),
+                transport_attitude_trim_velocity=offsets[1][index].copy(),
+                transport_attitude_trim_acceleration=offsets[2][index].copy(),
+                transport_attitude_trim_limit_active=enabled and bool(trim.saturation),
+                transport_attitude_trim_rate_limit_active=enabled and bool(trim.rate_limited),
+                transport_attitude_trim_acceleration_limit_active=enabled and bool(trim.acceleration_limited))
+
+    @staticmethod
+    def _evaluate_attitude_trim_bridge(bridge, now):
+        elapsed = max(0., float(now) - bridge["start_time"])
+        shape = bridge["segments"][0][1].shape[1:]
+        for duration, coefficients in bridge["segments"]:
+            if elapsed < duration:
+                u = elapsed / duration
+                p = np.polynomial.polynomial.polyval(u, coefficients)
+                v = np.polynomial.polynomial.polyval(u,
+                    coefficients[1:] * np.arange(1, len(coefficients))[:, None, None]) / duration
+                a = np.polynomial.polynomial.polyval(u,
+                    coefficients[2:] * (np.arange(2, len(coefficients))
+                    * np.arange(1, len(coefficients)-1))[:, None, None]) / duration**2
+                return p, v, a
+            elapsed -= duration
+        return tuple(np.zeros(shape) for _ in range(3))
+
+    def _make_attitude_trim_landing_bridge(self, now, overrides):
+        """Bridge the old command into measured rope geometry exactly once.
+
+        The measured rope snapshot already includes achieved trim. A residual
+        from the previous complete command preserves its p/v/a without adding
+        that trim again. A normalized quintic removes the residual; difficult
+        initial derivatives first use a C2 acceleration ramp and velocity brake.
+        """
+        previous = self.last_transport_overrides
+        if not all(self._finite_transport_override(previous.get(id(v), {})) for v in self.vehicles):
+            return None
+        old = {key: dict(value) for key, value in previous.items()}
+        self._refresh_cached_attitude_trim(now, old, "landing")
+        names = (("position", "velocity", "acceleration"),
+                 ("position_hold_position", "position_hold_velocity", "position_hold_acceleration"))
+        p, v, a = [np.asarray([old[id(vehicle)][fields[order]]
+                    - overrides[id(vehicle)][fields[order]]
+                    for fields in names for vehicle in self.vehicles]) for order in range(3)]
+        distance = float(np.max(np.linalg.norm(p, axis=1)))
+        speed_limit = max(self.payload_landing_max_speed_mps,
+                          float(np.max(np.linalg.norm(v, axis=1))))
+        acceleration_limit = max(self.payload_landing_max_acceleration_mps2,
+                                 float(np.max(np.linalg.norm(a, axis=1))))
+        minimum = max(float(self.payload_landing_gain_transition_s), 1.e-6)
+        duration = max(minimum, 1.875 * distance / speed_limit,
+                       math.sqrt((10. / math.sqrt(3.)) * distance / acceleration_limit))
+        segments = []
+        for _ in range(3):
+            coefficients = SlungLandingProfile._quintic_coefficients(p, v, a, np.zeros_like(p), duration)
+            velocity = coefficients[1:] * np.arange(1, 6)[:, None, None] / duration
+            acceleration = velocity[1:] * np.arange(1, 5)[:, None, None] / duration
+            if all(SlungLandingProfile._peak_norm(velocity[:, i]) <= speed_limit + 1.e-9
+                   and SlungLandingProfile._peak_norm(acceleration[:, i]) <= acceleration_limit + 1.e-9
+                   for i in range(len(p))):
+                segments = [(duration, coefficients)]
+                break
+            duration *= 1.15
+        if not segments:
+            # Keep every aircraft's inherited speed ceiling while ramping its
+            # acceleration to zero. An outward acceleration at that ceiling
+            # has no C2 feasible ramp and must use the supported retry path.
+            ramp = .1
+            if np.any(a):
+                for initial_v, initial_a in zip(v, a):
+                    anorm2 = float(initial_a @ initial_a)
+                    if anorm2 == 0.:
+                        continue
+                    dot = float(initial_v @ initial_a)
+                    margin = max(0., speed_limit**2 - float(initial_v @ initial_v))
+                    discriminant = math.sqrt(dot**2 + anorm2*margin)
+                    maximum = (2.*margin/(discriminant+dot) if dot >= 0. and discriminant+dot > 0.
+                               else 2.*(discriminant-dot)/anorm2)
+                    if maximum <= 0.:
+                        raise ValueError("attitude trim landing bridge has outward acceleration at its speed ceiling")
+                    ramp = min(ramp, .5*maximum)
+                coefficients = np.asarray([p, v*ramp, .5*a*ramp**2,
+                                           -a*ramp**2/6.])
+                segments.append((ramp, coefficients))
+                p = p + v*ramp + a*ramp**2/3.
+                v = v + .5*a*ramp
+            else:
+                ramp = 0.
+            brake = max(1.e-9, 1.5 * float(np.max(np.linalg.norm(v, axis=1))) / acceleration_limit)
+            segments.append((brake, np.asarray([p, v*brake, np.zeros_like(p),
+                                                -v*brake, .5*v*brake])))
+            p = p + .5*brake*v
+            distance = float(np.max(np.linalg.norm(p, axis=1)))
+            duration = max(1.e-9, minimum-ramp-brake, 1.875*distance/speed_limit,
+                           math.sqrt((10./math.sqrt(3.))*distance/acceleration_limit))
+            segments.append((duration, SlungLandingProfile._quintic_coefficients(
+                p, np.zeros_like(p), np.zeros_like(p), np.zeros_like(p), duration)))
+        return {"start_time": float(now), "duration": sum(segment[0] for segment in segments),
+                "segments": segments}
+
+    def _apply_attitude_reference_trim(self, now, payload_state, control_states,
+                                       overrides, landing):
+        trim = getattr(self, "payload_attitude_trim", None)
+        enabled = bool(getattr(self, "payload_attitude_trim_enabled", False) and trim is not None)
+        supported = self.slung_controller.config.transport_force_mode == "reference_cascade"
+        reason = self._transport_learning_reason(now, payload_state, control_states,
+                                                overrides, landing, enabled, supported)
+        offsets = tuple(np.zeros((len(self.vehicles), 3)) for _ in range(3))
+        if enabled and supported:
+            goal = self.payload_transport_goal_rotation
+            if goal is None:
+                goal = next(iter(overrides.values()))["payload_target_rotation"]
+            if landing:
+                trim.freeze()
+            offsets = trim.update(payload_state["rotation"], goal, now, learning=not reason)
+        self._attitude_trim_metadata(overrides, offsets, reason)
+        if landing and enabled and supported and trim.initialized:
+            if self.payload_attitude_trim_landing_bridge is None:
+                self.payload_attitude_trim_landing_bridge = self._make_attitude_trim_landing_bridge(now, overrides)
+            bridge = self.payload_attitude_trim_landing_bridge
+            applied = (self._evaluate_attitude_trim_bridge(bridge, now) if bridge is not None else
+                       tuple(np.zeros((2*len(self.vehicles), 3)) for _ in range(3)))
+        else:
+            applied = tuple(np.concatenate((value, value), axis=0) for value in offsets)
+        count = len(self.vehicles)
+        for index, vehicle in enumerate(self.vehicles):
+            item = overrides[id(vehicle)]
+            for hold, fields in enumerate((("position", "velocity", "acceleration"),
+                    ("position_hold_position", "position_hold_velocity", "position_hold_acceleration"))):
+                row = index + hold*count
+                for derivative, field in enumerate(fields):
+                    item[field] = item[field] + applied[derivative][row]
+            item["_attitude_trim_applied"] = np.asarray([value[index] for value in applied])
+            item["_attitude_trim_hold_applied"] = np.asarray([value[index+count] for value in applied])
+            item["_attitude_trim_landing"] = bool(landing)
+            item["transport_attitude_trim_bridge_active"] = bool(landing and enabled and supported and trim.initialized
+                and self.payload_attitude_trim_landing_bridge is not None
+                and now < self.payload_attitude_trim_landing_bridge["start_time"] + self.payload_attitude_trim_landing_bridge["duration"])
+            for hold, prefix in enumerate(("transport_attitude_trim_bridge_", "transport_attitude_trim_bridge_hold_")):
+                for derivative, name in enumerate(("position", "velocity", "acceleration")):
+                    item[prefix+name] = applied[derivative][index+hold*count].copy() if landing else np.zeros(3)
+
+    def _refresh_cached_attitude_trim(self, now, overrides, reason, freeze_base_derivatives=False):
+        """Finish bounded motion across a feedback gap without learning stale pose."""
+        trim = getattr(self, "payload_attitude_trim", None)
+        enabled = bool(getattr(self, "payload_attitude_trim_enabled", False)
+                       and trim is not None
+                       and self.slung_controller.config.transport_force_mode == "reference_cascade")
+        if not enabled:
+            return
+        offsets = trim.update(None, None, now, learning=False)
+        bridge = getattr(self, "payload_attitude_trim_landing_bridge", None)
+        if bridge is not None and any(t.get("_attitude_trim_landing", False) for t in overrides.values()):
+            applied = self._evaluate_attitude_trim_bridge(bridge, now)
+        else:
+            applied = tuple(np.concatenate((value, value), axis=0) for value in offsets)
+        count = len(self.vehicles)
+        for index, vehicle in enumerate(self.vehicles):
+            item = overrides[id(vehicle)]
+            for hold, (fields, key) in enumerate(((("position", "velocity", "acceleration"), "_attitude_trim_applied"),
+                    (("position_hold_position", "position_hold_velocity", "position_hold_acceleration"), "_attitude_trim_hold_applied"))):
+                old = np.asarray(item.get(key, np.zeros((3, 3))))
+                row = index+hold*count
+                for derivative, field in enumerate(fields):
+                    base = (np.zeros(3) if freeze_base_derivatives and derivative else item[field]-old[derivative])
+                    item[field] = base + applied[derivative][row]
+                item[key] = np.asarray([value[row] for value in applied])
+                prefix = "transport_attitude_trim_bridge_hold_" if hold else "transport_attitude_trim_bridge_"
+                for derivative, name in enumerate(("position", "velocity", "acceleration")):
+                    item[prefix+name] = applied[derivative][row].copy() if item.get("_attitude_trim_landing", False) else np.zeros(3)
+            item["transport_attitude_trim_bridge_active"] = bool(bridge is not None and item.get("_attitude_trim_landing", False)
+                and now < bridge["start_time"]+bridge["duration"])
+        self._attitude_trim_metadata(overrides, offsets, reason)
+
+    def _apply_transport_hold_integral(self, now, payload_state, vehicle_states,
+                                       control_states, overrides, landing):
+        """Learn differential world forces only from steady, healthy transport.
+
+        Keep learned forces through temporary feedback gaps and load lowering.
+        Touchdown releases them with the same profile as the support trim.
+        All limits freeze the fleet together, preserving its zero force sum.
+        """
+        native_pid = self.payload_transport_feedback_controller == "native_position_pid"
+        enabled = native_pid or self.payload_transport_integral_enabled
+        supported = self.slung_controller.config.transport_force_mode == "reference_cascade"
+        reason = self._transport_learning_reason(now, payload_state, control_states,
+                                                overrides, landing, enabled, supported)
+        learning = not reason
+        duplicate = self.payload_transport_integral_last_time == float(now)
+        errors = np.asarray([
+            state["position"] - overrides[id(vehicle)]["position_hold_position"]
+            for vehicle, state in zip(self.vehicles, vehicle_states)])
+        dt = float(np.clip(getattr(self, "payload_control_dt", 1. / self.rate_hz), .001, .05))
+        if native_pid:
+            bias = np.zeros((3, 3))
+            rate = np.zeros((3, 3))
+        else:
+            bias, rate = self.payload_transport_integral.update(
+                errors, dt, learning=learning and not duplicate)
+            self.payload_transport_integral_last_time = float(now)
+        # Disabled/legacy branches cannot apply a previous mode's state.
+        force = bias.copy() if enabled and supported and not native_pid else np.zeros_like(bias)
+        force_dot = rate.copy() if enabled and supported and not native_pid else np.zeros_like(rate)
+        integral_weight, integral_weight_dot = 1., 0.
+        if landing and self.payload_unload_start_time is not None:
+            unload = smoothstep5_profile(now - self.payload_unload_start_time, self.payload_landing_unload_s)
+            integral_weight, integral_weight_dot = 1. - unload[0], -unload[1]
+            force = integral_weight * force
+            force_dot = integral_weight_dot * bias if enabled and supported else np.zeros_like(rate)
+        for index, vehicle in enumerate(self.vehicles):
+            overrides[id(vehicle)].update(
+                transport_hold_integral_enabled=enabled and not native_pid,
+                transport_hold_integral_learning=learning and not duplicate and not native_pid,
+                transport_hold_integral_freeze_reason=("replaced_by_native_position_pid" if native_pid
+                    else reason or ("duplicate_tick" if duplicate else "learning")),
+                transport_hold_integral_bias=bias[index].copy(),
+                transport_hold_integral_error=self.payload_transport_integral.differential_error_m[index].copy(),
+                transport_hold_integral_force=force[index].copy(),
+                transport_hold_integral_force_dot=force_dot[index].copy(),
+                transport_feedback_controller=self.payload_transport_feedback_controller,
+                transport_full_pid_learning=native_pid and learning,
+                transport_full_pid_freeze_reason=reason if native_pid else "inactive_mode",
+                transport_full_pid_tick=float(now),
+                transport_full_pid_weight=integral_weight,
+                transport_full_pid_weight_dot=integral_weight_dot)
 
     def _transport_phase_active(self, now):
         if self.transport_mode != "slung_load":
@@ -4828,7 +5698,7 @@ class MultiCtbrControllerNode:
                 or self.global_abort_reason):
             return False
         if any(v.trajectory is None or v.trajectory.phase in (
-                "emergency_landing", "landing", "landing_settle", "landed", "aborted")
+                "emergency_landing", "landing_settle", "landed", "aborted")
                for v in self.vehicles):
             return False
         elapsed = max(0.0, float(now) - self.payload_transport_start_time)
@@ -5008,6 +5878,9 @@ class MultiCtbrControllerNode:
         return True
 
     def _reset_payload_handoff(self):
+        if getattr(self, "payload_attitude_trim", None) is not None:
+            self.payload_attitude_trim.reset()
+        self.payload_attitude_trim_landing_bridge = None
         self.payload_transport_active = False
         self.payload_ready_since = None
         self.payload_transport_start_time = None
@@ -5033,6 +5906,10 @@ class MultiCtbrControllerNode:
         self.payload_handoff_reference_positions = None
         self.payload_handoff_forces = None
         self.payload_support_trim.reset()
+        self.payload_transport_integral.reset()
+        self.payload_transport_integral_last_time = None
+        for vehicle in self.vehicles:
+            vehicle.controller.reset_transport_position_pid()
         self.payload_transport_guard.reset()
         self.payload_takeup_taut_latched = False
         self.payload_takeup_diagnostic_last_time = None
@@ -5070,9 +5947,112 @@ class MultiCtbrControllerNode:
         if self.global_abort_reason:
             return
         self.global_abort_reason = str(reason)
+        if getattr(self, "payload_attitude_trim", None) is not None:
+            self.payload_attitude_trim.reset()
+        self.payload_attitude_trim_landing_bridge = None
+        self.payload_transport_integral.reset()
+        self.payload_transport_integral_last_time = None
         for vehicle in self.vehicles:
+            vehicle.controller.reset_transport_position_pid()
             vehicle.set_global_abort(self.global_abort_reason)
         rospy.logerr("多机 CTBR 全局中止：%s；所有飞机发送零推力", reason)
+
+    def _payload_emergency_override(self, vehicle, now):
+        if (vehicle.trajectory is None or vehicle.trajectory.phase != "emergency_landing"
+                or id(vehicle) not in self.payload_emergency_support):
+            return {}
+        started, initial_trim = self.payload_emergency_support[id(vehicle)]
+        duration = max(2., float(vehicle.trajectory.active_landing_duration_s))
+        fade = smoothstep5_profile(now - started, duration)
+        return dict(independent_mode=True, transport_mode=False,
+            independent_position_gain_scale=self.payload_prelift_parameters["position_gain_scale"],
+            independent_velocity_gain_scale=self.payload_prelift_parameters["velocity_gain_scale"],
+            max_tilt_rad=self.payload_prelift_parameters["max_tilt_rad"],
+            landing_support_trim_n=(1 - fade[0]) * initial_trim,
+            landing_support_trim_dot_nps=-fade[1] * initial_trim)
+
+    @staticmethod
+    def _finite_recovery_state(vehicle, now):
+        try:
+            if not vehicle._state_ready(now):
+                return False
+            with vehicle.lock:
+                state = vehicle.latest_state
+            control = vehicle._build_ekf_control_state(state, now)
+            return (np.asarray(state["position"]).shape == (3,)
+                    and np.asarray(state["rotation"]).shape == (3, 3)
+                    and all(np.all(np.isfinite(value)) for value in (
+                        state["position"], state["rotation"], state.get("body_rate", np.zeros(3)),
+                        control.get("control_velocity", np.zeros(3)),
+                        control.get("control_acceleration", np.zeros(3)))))
+        except (ValueError, ArithmeticError, np.linalg.LinAlgError):
+            return False
+
+    def _recover_fleet_numerical_fault(self, now, error):
+        """Contain numerical faults without bypassing arming or state freshness."""
+        if not self.fleet_numerical_fault_reason:
+            self.fleet_numerical_fault_reason = "%s: %s" % (type(error).__name__, error)
+            self.fleet_numerical_fault_since = float(now)
+            rospy.logerr("多机控制数值故障，转入有支撑受控退出：%s", self.fleet_numerical_fault_reason)
+        now = max(float(now), float(time.monotonic()))
+        self.last_tick = now
+        healthy = all(self._finite_recovery_state(v, now) for v in self.vehicles)
+        if self.fleet_gate_open and not healthy:
+            self._set_abort("fleet_numerical: invalid or stale vehicle state")
+        armed = (self.fleet_gate_open and healthy and not self.global_abort_reason
+                 and all(v.preflight_voltage_ready and not v.preflight_voltage_failed
+                         and v.trajectory is not None for v in self.vehicles))
+        if armed:
+            try:
+                if self.payload_validation_landing_stage != "planning_fault_descent":
+                    self._exit_payload_planning_fault(now, self.fleet_numerical_fault_reason,
+                                                     source="fleet_numerical")
+                # Fresh measured separation and height diagnostics still run;
+                # the failed cooperative planner is never called here.
+                self._check_payload_physical_safety(now)
+            except (ValueError, ArithmeticError, np.linalg.LinAlgError) as guard_error:
+                self._set_abort("fleet_numerical: fault descent/guard failed: %s" % guard_error)
+        for vehicle in self.vehicles:
+            # The vehicle latches last_control_command after publication and
+            # before CSV conversion. A logging failure must not actuate the
+            # same vehicle again merely because its callback did not return.
+            already_published = (id(vehicle) in self.fleet_tick_initial_commands
+                and getattr(vehicle, "last_control_command", None)
+                is not self.fleet_tick_initial_commands[id(vehicle)])
+            if id(vehicle) in self.fleet_tick_completed_vehicles or already_published:
+                continue
+            command_now = max(now, float(time.monotonic()))
+            if not armed or self.global_abort_reason:
+                vehicle.last_tick = command_now
+                vehicle._publish_zero()
+                continue
+            try:
+                vehicle._timer_callback(None, now=command_now,
+                    transport_override=self._payload_emergency_override(vehicle, command_now))
+            except (ValueError, ArithmeticError, np.linalg.LinAlgError) as control_error:
+                if (id(vehicle) in self.fleet_tick_initial_commands
+                        and getattr(vehicle, "last_control_command", None)
+                        is not self.fleet_tick_initial_commands[id(vehicle)]):
+                    # Publication completed before a diagnostic conversion
+                    # failed. Do not compute or publish its command twice.
+                    self.fleet_tick_completed_vehicles.add(id(vehicle))
+                    continue
+                # A finite previously published command may bridge only the
+                # short watchdog window if the independent core also fails.
+                # It cannot become an indefinite open-loop force command.
+                supported = self._finite_supported_command(getattr(vehicle, "last_control_command", None))
+                if (supported and command_now - self.fleet_numerical_fault_since <= .3
+                        and self._finite_recovery_state(vehicle, command_now)):
+                    vehicle.last_tick = command_now
+                    vehicle._publish_command(dict(vehicle.last_control_command))
+                else:
+                    self._set_abort("fleet_numerical: vehicle control failed: %s" % control_error)
+                    vehicle._publish_zero()
+            self.fleet_tick_completed_vehicles.add(id(vehicle))
+        try:
+            self.logger.flush()
+        except (ValueError, OSError) as logging_error:
+            rospy.logwarn_throttle(1., "控制退出命令已发布，CSV 刷新失败：%s", logging_error)
 
     def _timer_callback(self, _event):
         now = time.monotonic()
@@ -5082,8 +6062,14 @@ class MultiCtbrControllerNode:
             vehicle.fleet_tick_interval_s = now - self.last_tick
             vehicle.previous_fleet_cycle_wall_s = getattr(self, "previous_fleet_cycle_wall_s", math.nan)
             vehicle.previous_fleet_cycle_control_time_s = previous_start - vehicle.start_time
+        self.fleet_tick_completed_vehicles = set()
+        self.fleet_tick_initial_commands = {
+            id(vehicle): getattr(vehicle, "last_control_command", None)
+            for vehicle in self.vehicles}
         try:
             return MultiCtbrControllerNode._run_fleet_tick(self, _event, now)
+        except (ValueError, ArithmeticError, np.linalg.LinAlgError) as error:
+            return self._recover_fleet_numerical_fault(now, error)
         finally:
             self.previous_fleet_cycle_wall_s = time.perf_counter() - wall_start
             self.previous_fleet_cycle_started_time = now
@@ -5097,6 +6083,7 @@ class MultiCtbrControllerNode:
         if self.global_abort_reason:
             for vehicle in self.vehicles:
                 vehicle._timer_callback(None, now=now)
+                self.fleet_tick_completed_vehicles.add(id(vehicle))
             self._log_terminal_mission_stage()
             self.logger.flush()
             return
@@ -5105,6 +6092,7 @@ class MultiCtbrControllerNode:
             for vehicle in self.vehicles:
                 vehicle.set_fleet_gate(False)
                 vehicle._timer_callback(None, now=now)
+                self.fleet_tick_completed_vehicles.add(id(vehicle))
             failed = [
                 vehicle for vehicle in self.vehicles
                 if vehicle.preflight_voltage_failed or vehicle.ekf_alignment_failed
@@ -5239,7 +6227,17 @@ class MultiCtbrControllerNode:
                 # Keep the last complete MATLAB force command across a short
                 # load-mocap gap; this avoids a thrust step at the exact moment
                 # a single rigid-body frame is lost.
-                transport_overrides = self.last_transport_overrides
+                transport_overrides = {
+                    key: dict(value, transport_hold_integral_learning=False,
+                              transport_hold_integral_freeze_reason="payload_cached_hold",
+                              transport_hold_integral_force_dot=np.zeros(3),
+                              transport_full_pid_learning=False,
+                              transport_full_pid_freeze_reason="payload_cached_hold",
+                              transport_full_pid_tick=float(now),
+                              transport_full_pid_force_hold=True,
+                              transport_full_pid_weight_dot=0.)
+                    for key, value in self.last_transport_overrides.items()}
+                self._refresh_cached_attitude_trim(now, transport_overrides, "payload_cached_hold")
             elif (not transport_overrides and self.payload_fault_since is not None and
                   now - self.payload_fault_since > self.payload_emergency_land_after_s):
                 self._begin_payload_emergency_landing(
@@ -5260,6 +6258,12 @@ class MultiCtbrControllerNode:
             transport_overrides = self._transport_overrides(now)
             self.last_transport_overrides = transport_overrides
             takeup_overrides = {}
+        # The fleet tick's ``now`` is captured before path publication and
+        # before the per-vehicle callbacks.  Use one refreshed timestamp for
+        # all callbacks so a freshly received EKF sample cannot appear to be
+        # from the future merely because an earlier callback spent time
+        # publishing a growing Path message.
+        vehicle_control_now = max(float(now), float(time.monotonic()))
         for vehicle_index, vehicle in enumerate(self.vehicles):
             with self.payload_lock:
                 payload_diagnostics = (
@@ -5271,21 +6275,10 @@ class MultiCtbrControllerNode:
             target_override = transport_overrides.get(id(vehicle))
             if target_override is None:
                 target_override = takeup_overrides.get(id(vehicle))
-            if (vehicle.trajectory is not None
-                    and vehicle.trajectory.phase == "emergency_landing"
-                    and id(vehicle) in self.payload_emergency_support):
-                started, initial_trim = self.payload_emergency_support[id(vehicle)]
-                duration = max(2., float(vehicle.trajectory.active_landing_duration_s))
-                fade = smoothstep5_profile(now - started, duration)
+            emergency_override = self._payload_emergency_override(vehicle, now)
+            if emergency_override:
                 target_override = dict(target_override or {})
-                target_override.update(
-                    independent_mode=True, transport_mode=False,
-                    independent_position_gain_scale=self.payload_prelift_parameters["position_gain_scale"],
-                    independent_velocity_gain_scale=self.payload_prelift_parameters["velocity_gain_scale"],
-                    max_tilt_rad=self.payload_prelift_parameters["max_tilt_rad"],
-                    landing_support_trim_n=(1 - fade[0]) * initial_trim,
-                    landing_support_trim_dot_nps=-fade[1] * initial_trim,
-                )
+                target_override.update(emergency_override)
             if (self.payload_validation_landing_stage == "vehicle_descent"
                     and vehicle.trajectory is not None
                     and vehicle.trajectory.phase in ("landing", "landing_settle", "landed")):
@@ -5333,6 +6326,11 @@ class MultiCtbrControllerNode:
                     "payload_landing_touchdown_confirmed": (self.payload_touchdown_detector is not None
                                                             and self.payload_touchdown_detector.detected),
                     "payload_landing_unloading": self.payload_unload_start_time is not None,
+                    "payload_landing_planning_failure_count": self.payload_landing_failure_count,
+                    "payload_landing_planning_retry_count": self.payload_landing_retry_count,
+                    "payload_landing_planning_failure_reason": self.payload_landing_failure_reason,
+                    "payload_landing_planning_fallback": (self.payload_landing_retry_since is not None
+                        or self.payload_validation_landing_stage == "planning_fault_descent"),
                     "flight_validation_elapsed_s": (
                         max(0.0, (self.payload_validation_landing_started_time
                                   if self.payload_validation_landing_started_time is not None else now)
@@ -5353,9 +6351,10 @@ class MultiCtbrControllerNode:
                 )
             vehicle._timer_callback(
                 None,
-                now=now,
+                now=vehicle_control_now,
                 transport_override=target_override,
             )
+            self.fleet_tick_completed_vehicles.add(id(vehicle))
         self._log_terminal_mission_stage()
         self.logger.flush()
 
