@@ -142,6 +142,20 @@ class CtbrParameterResolver:
     def vehicle_param(self, name, default=_PARAMETER_MISSING):
         return self._read(self.vehicle_root, name, default)
 
+    def formation_param(self, name, default=_PARAMETER_MISSING):
+        """Read a formation gain from the per-CF block, then the global block.
+
+        Formation gains live in ``/ctbr_controller_cf<ID>`` so each vehicle can
+        be tuned independently, exactly like ``position_gain``.  The global
+        ``/ctbr_controller`` block keeps working as a shared default, so an
+        existing configuration that only sets the global value still applies to
+        every vehicle.
+        """
+        path = self._path(self.vehicle_root, name)
+        if self._has_param(path):
+            return self._get_param(path)
+        return self._read(GLOBAL_CTBR_PARAMETER_ROOT, name, default)
+
 
 def as_vector(value, name):
     """把 ROS 参数或消息字段转成长度为 3 的有限浮点向量。"""
@@ -154,6 +168,39 @@ def as_vector(value, name):
 def clamp_vector(vector, lower, upper):
     """逐元素限幅；所有积分器、角速度和推力相关向量均通过此函数防止发散。"""
     return np.minimum(np.maximum(vector, lower), upper)
+
+
+def as_gain_vector(value, name, minimum=0.0):
+    """Parse a scalar or 3-element gain into a length-3 world-xyz array.
+
+    A scalar is broadcast across x/y/z, which keeps every existing configuration
+    valid; a 3-element list gives independent per-axis gains exactly like
+    ``position_gain`` / ``velocity_gain``.  ``minimum`` rejects values that would
+    make the closed loop non-passive (negative or non-finite gains).
+    """
+    vector = np.asarray(value, dtype=float).reshape(-1)
+    if vector.size == 1:
+        vector = np.repeat(vector, 3)
+    if vector.size != 3 or not np.all(np.isfinite(vector)):
+        raise ValueError("%s 必须是标量或 3 个有限数值" % name)
+    if np.any(vector < float(minimum)):
+        raise ValueError("%s 不能小于 %g" % (name, minimum))
+    return vector
+
+
+def as_pinning_weight(value):
+    """Parse the scalar MATLAB virtual-center pinning weight ``b_i``.
+
+    ``b_i`` scales that vehicle's virtual-center pinning terms (``kbl``/``kvl``/
+    ``kil``).  It is a single scalar rather than a world-xyz vector because
+    MATLAB defines it per vehicle, not per axis; accepting a 3-element list here
+    would silently diverge from the reference law.  ``b_i <= 0`` effectively
+    disables pinning for that vehicle, leaving only the graph-relative terms.
+    """
+    scalar = float(value)
+    if not math.isfinite(scalar) or scalar < 0.0:
+        raise ValueError("formation_bl 必须是大于等于 0 的有穷数")
+    return scalar
 
 
 class SecondOrderVelocityFilter:
@@ -463,6 +510,34 @@ def _limit_force_with_derivative(force, force_dot, max_command_thrust, max_tilt_
         limited[:2] = scale * horizontal
         limited_dot[:2] = scale_dot * horizontal + scale * horizontal_dot
     return limited, limited_dot
+
+
+def _limit_acceleration_with_derivative(acceleration, acceleration_dot, max_acceleration):
+    """Uniformly scale a desired-acceleration vector to a magnitude ceiling.
+
+    Unlike :func:`_limit_force_with_derivative`, every component (and its time
+    derivative) is scaled by the *same* factor, so the vector direction never
+    changes.  That keeps ``b3 = F/||F||`` exactly on the control law's intent,
+    which is what the MATLAB ``leader_follower`` implementation relies on: it
+    builds ``b3c = -A/||A||`` from an unlimited ``A`` and only clips the scalar
+    collective thrust afterwards.
+
+    A non-positive or non-finite ``max_acceleration`` disables the ceiling and
+    returns the input unchanged, which is the MATLAB-faithful default.
+    """
+    acceleration = np.asarray(acceleration, dtype=float).reshape(3)
+    acceleration_dot = np.asarray(acceleration_dot, dtype=float).reshape(3)
+    limit = float(max_acceleration)
+    if not math.isfinite(limit) or limit <= 0.0:
+        return acceleration.copy(), acceleration_dot.copy()
+    norm = float(np.linalg.norm(acceleration))
+    if norm <= limit or norm < 1e-12:
+        return acceleration.copy(), acceleration_dot.copy()
+    scale = limit / norm
+    # s = L/||u|| => s_dot = -L * (u . u_dot) / ||u||^3
+    norm_dot = float(acceleration @ acceleration_dot) / norm
+    scale_dot = -limit * norm_dot / (norm ** 2)
+    return scale * acceleration, scale_dot * acceleration + scale * acceleration_dot
 
 
 def analytic_omega_c(computed_rotation, desired_force, desired_force_dot, target, config):
@@ -1948,6 +2023,9 @@ class CtbrControllerNode:
                 figure_eight_angular_speed_radps=float(
                     trajectory_param("figure_eight_angular_speed_radps", 0.55)
                 ),
+                figure_eight_heading=str(
+                    trajectory_param("figure_eight_heading", "velocity")
+                ),
             )
             # 这里先做一次无起点构造，尽早报告参数错误；实际圆心/编队质心到第一帧后才解析。
             CircularFlightTrajectory(self.trajectory_config)
@@ -1988,6 +2066,12 @@ class CtbrControllerNode:
         self.preflight_raw_scale_max = float(
             self.params.vehicle_param("preflight_raw_scale_max")
         )
+        # 每机推力标定修正系数。它独立于电压补偿：电压补偿只跟踪电池电压，
+        # 而这个系数补偿电机/螺旋桨/推力曲线本身的偏差（悬停实测 k = 实际推力/指令推力，
+        # 修正量取 1/sqrt(k)）。分开保存便于诊断，也避免把电压参考值当成标定旋钮。
+        self.thrust_scale_correction = float(
+            self.params.vehicle_param("thrust_scale_correction", 1.0)
+        )
         if (self.preflight_voltage_samples_required < 1 or
                 self.preflight_voltage_timeout_s <= 0.0 or
                 self.preflight_battery_max_age_s <= 0.0 or
@@ -1995,9 +2079,11 @@ class CtbrControllerNode:
                 self.preflight_voltage_reference_v <= 0.0 or
                 self.preflight_raw_scale_exponent <= 0.0 or
                 self.preflight_raw_scale_min <= 0.0 or
-                self.preflight_raw_scale_max < self.preflight_raw_scale_min):
+                self.preflight_raw_scale_max < self.preflight_raw_scale_min or
+                not math.isfinite(self.thrust_scale_correction) or
+                self.thrust_scale_correction <= 0.0):
             raise rospy.ROSInitException(
-                "预起飞电压采样、阈值和 raw 推力缩放参数必须有效"
+                "预起飞电压采样、阈值、raw 推力缩放和推力标定修正参数必须有效"
             )
 
         # max_total_thrust 是物理标定上限（120 gf）；max_command_thrust 是本次控制器
@@ -2173,6 +2259,8 @@ class CtbrControllerNode:
         # 轨迹模块在第一帧有效状态后创建；latest_* 由 ROS 回调线程写入，必须受锁保护。
         self.trajectory = None
         self.last_trajectory_phase = None
+        # 编队积分状态的只读副本，仅用于 CSV 诊断。
+        self.formation_integral_state = np.zeros(3)
         self.flight_phase = "waiting_for_state"
         self.preflight_voltage_started_time = None
         self.preflight_voltage_v = math.nan
@@ -2528,6 +2616,8 @@ class CtbrControllerNode:
             raw_scale = (self.preflight_voltage_reference_v / preflight_voltage_v) ** (
                 self.preflight_raw_scale_exponent
             )
+            # 电压补偿之后再叠加每机推力标定修正。两者相乘但分开校验：范围检查
+            # 只针对电压补偿，避免标定修正被误判成电压异常。
             if (raw_scale < self.preflight_raw_scale_min or
                     raw_scale > self.preflight_raw_scale_max):
                 self._fail_preflight_voltage(
@@ -2539,12 +2629,14 @@ class CtbrControllerNode:
                 return self._preflight_hold_target(state, "preflight_voltage_failed")
 
             self.preflight_voltage_v = preflight_voltage_v
-            self.thrust_raw_scale = raw_scale
+            self.thrust_raw_scale = raw_scale * self.thrust_scale_correction
             self.preflight_voltage_ready = True
             self.controller.reset()
             rospy.loginfo(
-                "电压预检完成：中位数 %.3f V，冻结 raw 推力缩放 %.3f（参考 %.3f V）",
-                self.preflight_voltage_v, self.thrust_raw_scale,
+                "电压预检完成：中位数 %.3f V，电压 raw 缩放 %.3f，"
+                "推力标定修正 %.3f，合计 %.3f（参考 %.3f V）",
+                self.preflight_voltage_v, raw_scale,
+                self.thrust_scale_correction, self.thrust_raw_scale,
                 self.preflight_voltage_reference_v,
             )
             return None
@@ -2931,8 +3023,6 @@ class CtbrControllerNode:
         pose.pose.orientation.w = 1.0
         self.path_message.header.stamp = pose.header.stamp
         self.path_message.poses.append(pose)
-        if len(self.path_message.poses) > self.path_max_poses:
-            del self.path_message.poses[:-self.path_max_poses]
         now = time.monotonic()
         if now - self.last_path_publish_time >= self.path_publish_interval_s:
             self.last_path_publish_time = now
@@ -2971,6 +3061,9 @@ class CtbrControllerNode:
             "position_error": state["position"] - target["position"],
             "velocity_error": measured_velocity - target["velocity"],
             "desired_force": np.zeros(3),
+            "formation_acceleration": np.zeros(3),
+            "formation_acceleration_dot": np.zeros(3),
+            "formation_law_active": False,
             "computed_rotation": state["rotation"],
             "computed_body_rate": np.zeros(3),
             "omega_c_method": "zero",
@@ -3061,6 +3154,7 @@ class CtbrControllerNode:
             "preflight_voltage_ready": int(self.preflight_voltage_ready),
             "preflight_voltage_failed": int(self.preflight_voltage_failed),
             "thrust_raw_scale": self.thrust_raw_scale,
+            "thrust_scale_correction": self.thrust_scale_correction,
         }
 
     def _battery_log_fields(self, now):
@@ -3282,6 +3376,11 @@ class CtbrControllerNode:
         self._with_xyz(
             row, "position_integral", command.get("position_integral", np.zeros(3))
         )
+        row["formation_law_active"] = int(
+            bool(command.get("formation_law_active", False))
+        )
+        # 编队积分状态由多机管理器推进，这里只记录本周期生效的值。
+        self._with_xyz(row, "formation_integral", self.formation_integral_state)
         self._with_xyz(row, "attitude_error", command["attitude_error"])
         self._with_xyz(row, "computed_rate", command.get("computed_body_rate", np.zeros(3)))
         self._with_xyz(row, "command_rate", command["body_rate_command"])
@@ -5927,6 +6026,46 @@ class MultiCtbrControllerNode:
         self.last_transport_overrides = {}
         if self.slung_controller is not None:
             self.slung_controller.reset()
+
+    def _read_formation_gains(self, vehicle):
+        """Read one vehicle's formation gains, falling back to the global block.
+
+        Each gain accepts a scalar (identical on x/y/z, the historical form) or a
+        3-element list for independent world-xyz tuning like ``position_gain``.
+        The scalar ``c1`` / ``limit`` entries are shared with the other vehicles
+        because they define the integrator's own time constant, not a per-axis
+        control authority.
+
+        ``formation_bl`` is the MATLAB pinning weight ``b_i``: it scales how
+        strongly this vehicle is anchored to the virtual center.  It lives in
+        the per-CF block so it is bound by CF ID rather than by the order
+        vehicles appear in ``crazyflies.yaml``.
+        """
+        reader = vehicle.params.formation_param
+        return {
+            "kf": as_gain_vector(reader("formation_kf", [4.0] * 3), "formation_kf"),
+            "kvf": as_gain_vector(
+                reader("formation_kvf", [2.1] * 3), "formation_kvf"
+            ),
+            "kbl": as_gain_vector(
+                reader("formation_kbl", [4.0] * 3), "formation_kbl"
+            ),
+            "kvl": as_gain_vector(
+                reader("formation_kvl", [1.6] * 3), "formation_kvl"
+            ),
+            "kil": as_gain_vector(
+                reader("formation_kil", [0.0] * 3), "formation_kil"
+            ),
+            "integral_c1": as_gain_vector(
+                reader("formation_integral_c1", 0.35),
+                "formation_integral_c1",
+            ),
+            "integral_limit_m": as_gain_vector(
+                reader("formation_integral_limit_m", 0.30),
+                "formation_integral_limit_m",
+            ),
+            "bl": as_pinning_weight(reader("formation_bl", 1.0)),
+        }
 
     def _all_states_ready(self, now):
         return all(vehicle._state_ready(now) for vehicle in self.vehicles)

@@ -7,7 +7,7 @@ ctbr_controller:
   target_confirmed: $(arg target_confirmed)   # 必须为 true 才允许真实飞行。
   takeoff_vehicle_count: 3                    # 本次任务必须同时起飞的 ctbr_enabled 数量。
   control_rate_hz: 70.0                       # 单 Crazyradio 多机 CTBR 控制循环频率，Hz；为外部定位和 EKF 日志预留链路容量。
-  state_timeout: 0.8                          # 动捕状态最大允许年龄，s。
+  state_timeout: 0.5                          # 动捕状态最大允许年龄，s。
   mocap_timestamp_future_tolerance_s: 0.020   # 允许 header.stamp 比本机当前 ROS 时间略超前的调度容差，s。
   max_abs_position_m: 10.0                    # 动捕位置工作空间边界，m。
   max_mocap_velocity_mps: 1.0                 # 动捕速度限幅，m/s。
@@ -31,6 +31,56 @@ ctbr_controller:
   ekf_velocity_filter_max_dt: 0.05           # EKF 固件日志时间间隔上限，s。
   trajectory_pause_abort_s: 1.0               # 状态连续失效超过此时长后中止轨迹，s。
 
+  # MATLAB/formation 的分布式编队控制律，仅在三机 figure_eight_triangle 主轨迹
+  # 阶段启用。该阶段复现带虚拟中心积分项的 leader_follower 控制律：
+  #   u_i = p̈_c - kf*Σa_ij*e_ij - kvf*Σa_ij*(η_i-η_j)
+  #         - kl*b_i*e_i - kvl*b_i*η_i - kil*b_i*e_ic
+  #   F_i = m_i(u_i + g*e3)
+  # 其中 e_ij = (p_i-p_j)-(r_i-r_j)  相对编队误差，
+  #      e_i  = p_i - p_c - r_i        相对虚拟中心位置误差，
+  #      η_i  = v_i - ṗ_c              相对虚拟中心速度误差，
+  #      e_ic = ∫(η_i + c1*e_i)dτ      积分项，用于消除推力标定/风阻等稳态偏差。
+  # 编队阶段只使用编队增益，不再叠加每架飞机的 position_gain、velocity_gain 和
+  # integral_gain；那些 PID 增益只服务于起飞、入轨、悬停和降落等安全阶段。
+  #
+  # 【增益放在哪里】kf / kvf / kbl / kvl / kil / c1 / limit / bl 全部下沉到每架的
+  # ctbr_controller_cf<ID> 块里逐机声明，本块不再提供全局默认值。原因：这些键
+  # 一旦在本机块里漏写，就会静默继承到全局值而不报错（例如 kil 全局是 0.2，
+  # 而三架实际用 [6.0, 6.0, 1.5]，相差 30 倍），三架很容易拿到不一致的增益。
+  # bl 原本是全局的位置数组（按下标对应启动顺序），调换 crazyflies.yaml 里的
+  # 飞机顺序就会静默串位，因此改成逐机声明、按 CF ID 索引。
+  # 参数解析仍保留"先本机块、后全局块"的顺序，两者都没有时落到代码里的标称值；
+  # 因此新增飞机时必须在本机块中显式写出这些键，test_vehicle_config.py 会校验。
+  # adjacency 描述机间通信图，属全局参数，不逐机覆盖。
+  #
+  # 【维度】所有增益都支持标量（xyz 相同）或 3 元列表（world xyz 逐轴独立），
+  # 与 position_gain 的写法一致。各轴是解耦的：增益只作用于本轴的分量，而目标
+  # 相对几何由 r_i（offset）决定、不会被缩放，所以某轴增益不同只改变该轴的刚度
+  # 与收敛速度，不改变编队最终收敛到的形状。
+  #
+  # 编队阶段不使用倾角锥限制：MATLAB 直接由未限幅的 A 构造 b3c = -A/||A||，
+  # 只对集体推力做标量裁剪。若在此处限制水平力，其上限会依赖逐机不同的竖直力，
+  # 导致三架飞机饱和程度不一致并拉开队形。
+  formation_control_mode: leader_follower   # MATLAB 虚拟中心 leader-follower 控制律。
+  # MATLAB a(i,j) 通信图。a[i][j] > 0 表示第 i 架把第 j 架当作邻居，数值即它在
+  # 相对项求和 Σ a_ij 里的权重；0 表示互不通信。矩阵本身不必对称，但通常取对称。
+  #
+  # 【重要】行列下标 = crazyflies.yaml 中 ctbr_enabled 条目出现的顺序，不是 CF ID。
+  # 当前启用顺序为 [2, 4, 5]，所以下标 0/1/2 分别是 CF2/CF4/CF5：
+  #              j=0(CF2) j=1(CF4) j=2(CF5)
+  #     i=0 CF2   [  0.0      1.0      1.0  ]   ← 第 0 行第 1 列的 1 = 2↔4 通信
+  #     i=1 CF4   [  1.0      0.0      1.0  ]   ← 4↔2、4↔5
+  #     i=2 CF5   [  1.0      1.0      0.0  ]   ← 5↔2、5↔4
+  # 即全连接：三架都能直接拿到另外两架的相对位置和相对速度。
+  # 对角线（自己与自己）必须为 0，代码在启动时会强制置 0。
+  #
+  # ⚠ 调换 crazyflies.yaml 里飞机的顺序，会让本矩阵静默错位到别的飞机上
+  #   （和 bl 之前的问题一样）。test_vehicle_config.py 会校验这里的下标顺序
+  #   与实际启用顺序一致，顺序变了必须同步修改矩阵和上面这段说明。
+  formation_adjacency: [[0.0, 1.0, 1.0],
+                        [1.0, 0.0, 1.0],
+                        [1.0, 1.0, 0.0]]
+
   # 电压预检的共同准入条件；电压-raw 推力标定在每架飞机块中。
   require_preflight_voltage: true             # 是否必须完成起飞前电压预检。
   preflight_voltage_samples: 1                # 电池按 2 Hz 重复采样；预检只需一个新鲜有效样本。
@@ -40,7 +90,8 @@ ctbr_controller:
 
   gravity_mps2: 9.80665                       # 世界坐标重力常数，m/s^2。
   log_directory: "$(find crazyswarm)/scripts/ctbr_logs" # CSV 输出目录。
-  # Path 话题由控制器根据 crazyflies.yaml 中每个 id 自动生成。
+  # Path 话题由控制器根据 crazyflies.yaml 中每个 id 自动生成；只用于 RViz 显示，
+  # 不限制历史长度，也不参与“飞完一圈后降落”的任务时序。
   path_frame_id: "world"                     # Path 坐标系。
   path_publish_interval_s: 0.1               # Path 发布周期，s。
   path_max_poses: 1000                       # 保留最近 Path 点，避免长期发布无限增长消息。
@@ -63,7 +114,11 @@ ctbr_trajectory:
   circle_start_angle_rad: 0.0                 # 公共基准起始角，rad；每机 phase 叠加。
   formation_side_length_m: 0.8                # 八字模式等边三角形边长，m。
   figure_eight_radius_m: 1.5                  # 每个叶瓣相对交点的 x 向最大范围，m。
-  figure_eight_angular_speed_radps: 0.55      # 保持原两叶总时长的速度参数，rad/s。
+  figure_eight_angular_speed_radps: 0.40      # 保持原两叶总时长的速度参数，rad/s。
+  # 八字阶段机头朝向。velocity = MATLAB 的 b1d（水平速度方向，机头随切线旋转，
+  # 全程约转 288° 且入轨瞬间有 45° 跳变）；center = 始终指向虚拟编队中心，
+  # 航向恒定、yaw_rate 恒为 0，姿态环负担最小，且入轨无航向跳变。
+  figure_eight_heading: center                # center 或 velocity。
 
   reference_hold_s: 2.0                       # 锁定起点后保持时间，s。
   takeoff_height_m: 1.0                       # 负载目标相对起点高度，m；吊运模式飞机最终参考会自动加绳长。

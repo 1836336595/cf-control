@@ -1270,6 +1270,8 @@ def test_preflight_keeps_initial_one_shot_battery_sample():
         preflight_raw_scale_exponent=0.0,
         preflight_raw_scale_min=0.9,
         preflight_raw_scale_max=1.12,
+        # Static per-vehicle thrust calibration offset; 1.0 means "no correction".
+        thrust_scale_correction=1.0,
         preflight_voltage_samples=deque([(10.0, 4.0)], maxlen=10),
         preflight_voltage_sample_count=0,
         preflight_voltage_v=math.nan,

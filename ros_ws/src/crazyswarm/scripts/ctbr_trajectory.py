@@ -139,6 +139,11 @@ class CircularTrajectoryConfig:
     figure_eight_radius_m: float = 0.8
     # Peak angular speed of each smoothstep lobe, rad/s.
     figure_eight_angular_speed_radps: float = 0.55
+    # 八字阶段机头指向。``velocity`` 复现 MATLAB 的 b1d = 水平速度方向，机头随切线
+    # 旋转；``center`` 让机头始终指向运动中的虚拟编队中心。由于每架的编队偏移是恒定
+    # 向量，指向虚拟中心等价于朝向 -offset，因此该模式下航向恒定、yaw_rate 为零，
+    # 既减小姿态环负担，也避免入轨瞬间的航向跳变。
+    figure_eight_heading: str = "velocity"
 
 
 class CircularFlightTrajectory:
@@ -211,6 +216,8 @@ class CircularFlightTrajectory:
             _as_vector(cfg.circle_center_offset_xy, "circle_center_offset_xy", size=2)
         if cfg.circle_center_xy is not None:
             _as_vector(cfg.circle_center_xy, "circle_center_xy", size=2)
+        if str(cfg.figure_eight_heading).strip().lower() not in ("velocity", "center"):
+            raise ValueError("figure_eight_heading 必须是 velocity 或 center")
         if not math.isfinite(float(cfg.orbit_phase_rad)):
             raise ValueError("orbit_phase_rad 必须是有限数")
         for name in ("independent_takeoff_height_m", "independent_takeoff_duration_s",
@@ -549,6 +556,32 @@ class CircularFlightTrajectory:
         )
         return self._yaw_toward(position, center)
 
+    def _formation_center_heading(self):
+        """Return the constant body-x heading that points at the virtual center.
+
+        Every vehicle keeps a *constant* formation offset, and the virtual
+        center travels with the centroid, so the bearing from the vehicle to the
+        center is simply ``-formation_offset``.  That bearing never changes, so
+        the reference yaw is constant and ``yaw_rate`` is exactly zero.  This is
+        both easier for the attitude loop to track and free of the grazing
+        singularity that an instantaneous center bearing would have.
+        """
+        if self.formation_offset is None:
+            return 0.0
+        offset_x = float(self.formation_offset[0])
+        offset_y = float(self.formation_offset[1])
+        if abs(offset_x) < 1e-12 and abs(offset_y) < 1e-12:
+            # Vehicle sits exactly on the center: the bearing is undefined, so
+            # keep the previous heading instead of introducing a jump.
+            return float(self.start_yaw)
+        return _wrap_angle(math.atan2(-offset_y, -offset_x))
+
+    def _formation_heading(self):
+        """Return ``(yaw, yaw_rate)`` for the figure-eight/main phase."""
+        if str(self.config.figure_eight_heading).strip().lower() == "center":
+            return self._formation_center_heading(), 0.0
+        return None
+
     def _entry_target(self, elapsed):
         cfg = self.config
         position_scale, velocity_scale, acceleration_scale, jerk_scale = _smoothstep5_with_jerk(
@@ -560,7 +593,19 @@ class CircularFlightTrajectory:
             else self.circle_entry_start_position
         )
         displacement = self.circle_start_position - entry_start
-        target_yaw = self._inward_yaw(self.circle_start_position)
+        # The MATLAB formation reference points the body x-axis along the
+        # horizontal velocity.  At the beginning of the Gerono trajectory the
+        # velocity is +x, so transition to yaw=0 here instead of introducing a
+        # 180-degree yaw jump from the inward-facing entry heading.
+        if self.trajectory_mode != "figure_eight_triangle":
+            target_yaw = self._inward_yaw(self.circle_start_position)
+        else:
+            # 入轨必须终止在八字阶段的同一个航向上，否则阶段切换会出现航向跳变。
+            # ``center`` 模式下该航向恒为指向虚拟中心的方向。
+            main_heading = self._formation_heading()
+            target_yaw = (
+                0.0 if main_heading is None else main_heading[0]
+            )
         yaw_displacement = _wrap_angle(target_yaw - self.start_yaw)
         return {
             "position": entry_start + position_scale * displacement,
@@ -671,6 +716,23 @@ class CircularFlightTrajectory:
         """Return the exact end point used by hover and landing references."""
         return self._circle_target(self.circle_duration_s)
 
+    @staticmethod
+    def _velocity_heading(velocity, acceleration, fallback=0.0):
+        """Return MATLAB formation reference heading and its time derivative.
+
+        The MATLAB formation reference points ``b1d`` along horizontal velocity.
+        At a stationary endpoint the heading is held at the supplied fallback.
+        """
+        velocity = np.asarray(velocity, dtype=float).reshape(3)
+        acceleration = np.asarray(acceleration, dtype=float).reshape(3)
+        vx, vy = float(velocity[0]), float(velocity[1])
+        speed_squared = vx * vx + vy * vy
+        if speed_squared <= 1.0e-12:
+            return _wrap_angle(fallback), 0.0
+        yaw = math.atan2(vy, vx)
+        yaw_rate = (vx * float(acceleration[1]) - vy * float(acceleration[0])) / speed_squared
+        return _wrap_angle(yaw), float(yaw_rate)
+
     def _figure_eight_target(self, elapsed):
         """返回中心不断速的连续 Gerono 八字刚性编队参考。
 
@@ -722,15 +784,26 @@ class CircularFlightTrajectory:
              + cos_double_angle * angular_jerk),
         ])
         position = centroid_position + self.formation_offset
+        # MATLAB formation_figure_eight_reference uses the horizontal velocity
+        # as b1d.  The Python spatial curve is the same curve because
+        # r*sin(theta)*cos(theta) == (r/2)*sin(2*theta); only the requested
+        # radius and timing remain owned by the Python configuration.
+        center_heading = self._formation_heading()
+        if center_heading is None:
+            target_yaw, target_yaw_rate = self._velocity_heading(
+                centroid_velocity, centroid_acceleration, fallback=0.0
+            )
+        else:
+            # 机头固定指向虚拟中心：航向恒定，且完全跳过速度方向在 |v|→0 时的
+            # 退化处理，因此入轨瞬间也没有 45° 跳变。
+            target_yaw, target_yaw_rate = center_heading
         return {
             "position": position,
             "velocity": centroid_velocity,
             "acceleration": centroid_acceleration,
             "jerk": np.array([jerk_xy[0], jerk_xy[1], 0.0]),
-            # Each vehicle has a constant body-to-centroid bearing because the
-            # triangular formation only translates; hence yaw_rate is zero.
-            "yaw": self._yaw_toward(position, centroid_position),
-            "yaw_rate": 0.0,
+            "yaw": target_yaw,
+            "yaw_rate": target_yaw_rate,
             "flight_phase": "figure_eight",
             "max_tilt_rad": self.config.circle_max_tilt_rad,
             "min_collective_thrust": self.config.airborne_min_collective_thrust,
