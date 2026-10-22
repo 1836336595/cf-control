@@ -18,6 +18,7 @@
 #include "crazyswarm/SetGroupMask.h"
 #include "crazyswarm/FullState.h"
 #include "crazyswarm/CTBR.h"
+#include "crazyswarm/CTBRTiming.h"
 #include "crazyswarm/MocapState.h"
 #include "crazyswarm/Position.h"
 #include "crazyswarm/VelocityWorld.h"
@@ -57,6 +58,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <wordexp.h> // tilde expansion
 
 /*
@@ -394,6 +396,10 @@ public:
     m_subscribeCmdStop = n.subscribe(m_tf_prefix + "/cmd_stop", 1, &CrazyflieROS::cmdStop, this);
     m_subscribeCmdCtbr = n.subscribe(m_tf_prefix + "/cmd_ctbr", 1, &CrazyflieROS::cmdCtbrChanged, this);
     m_pubCtbrRawThrust = n.advertise<std_msgs::UInt16>(m_tf_prefix + "/ctbr_raw_thrust", 10);
+    // Host timing only: this ROS diagnostic adds no Crazyradio packet. Only
+    // accepted CTBR commands and the initial unlock packet are reported.
+    m_pubCtbrTiming = n.advertise<crazyswarm::CTBRTiming>(
+      m_tf_prefix + "/ctbr_timing", 10);
     m_pubMocapState = n.advertise<crazyswarm::MocapState>(m_tf_prefix + "/mocap_state", 10);
     m_ctbrWatchdogTimer = n.createTimer(
       ros::Duration(0.02), &CrazyflieROS::ctbrWatchdogCallback, this);
@@ -688,6 +694,8 @@ public:
 
   void cmdCtbrChanged(const crazyswarm::CTBR::ConstPtr& msg)
   {
+    const ros::Time callbackReceived = ros::Time::now();
+    const auto callbackStart = std::chrono::steady_clock::now();
     const double thrust = msg->collective_thrust;
     const double rollRate = msg->body_rates.x;
     const double pitchRate = msg->body_rates.y;
@@ -731,11 +739,15 @@ public:
 
     // The legacy commander requires a zero-thrust packet before thrust is accepted.
     if (!m_ctbrThrustUnlocked) {
+      const auto sendStart = std::chrono::steady_clock::now();
       m_cf.sendSetpoint(0.0f, 0.0f, 0.0f, 0);
+      const auto sendEnd = std::chrono::steady_clock::now();
       std_msgs::UInt16 rawThrustMessage;
       rawThrustMessage.data = 0;
       m_pubCtbrRawThrust.publish(rawThrustMessage);
       m_ctbrThrustUnlocked = true;
+      publishCtbrTiming(
+        *msg, 0, true, true, callbackReceived, callbackStart, sendStart, sendEnd);
       return;
     }
 
@@ -763,16 +775,48 @@ public:
 
     // The CTBR message is expressed as body rates. yaw is pre-inverted here
     // because the Crazyflie legacy RPYT decoder inverts yaw-rate internally.
+    const auto sendStart = std::chrono::steady_clock::now();
     m_cf.sendSetpoint(
       static_cast<float>(m_ctbrRollSign * radToDeg(clampedRollRate)),
       static_cast<float>(m_ctbrPitchSign * radToDeg(clampedPitchRate)),
       static_cast<float>(m_ctbrYawSign * radToDeg(clampedYawRate)),
       rawThrust);
+    const auto sendEnd = std::chrono::steady_clock::now();
     std_msgs::UInt16 rawThrustMessage;
     rawThrustMessage.data = rawThrust;
     m_pubCtbrRawThrust.publish(rawThrustMessage);
     m_ctbrLastCommand = now;
     m_ctbrCommandActive = true;
+    publishCtbrTiming(
+      *msg, rawThrust, true, false, callbackReceived, callbackStart, sendStart, sendEnd);
+  }
+
+  void publishCtbrTiming(
+    const crazyswarm::CTBR& command,
+    uint16_t rawThrust,
+    bool accepted,
+    bool unlockPacket,
+    const ros::Time& callbackReceived,
+    const std::chrono::steady_clock::time_point& callbackStart,
+    const std::chrono::steady_clock::time_point& sendStart,
+    const std::chrono::steady_clock::time_point& sendEnd)
+  {
+    crazyswarm::CTBRTiming timing;
+    timing.header = command.header;
+    timing.command_seq = command.header.seq;
+    timing.command_age_s = command.header.stamp.isZero()
+      ? std::numeric_limits<double>::quiet_NaN()
+      : (callbackReceived - command.header.stamp).toSec();
+    const auto callbackEnd = std::chrono::steady_clock::now();
+    timing.callback_duration_s = std::chrono::duration<double>(
+      callbackEnd - callbackStart).count();
+    // Includes mutex acquisition, USB/radio transport, retransmission and ACK
+    // wait in sendSetpoint(); it does not measure firmware/motor response.
+    timing.send_duration_s = std::chrono::duration<double>(sendEnd - sendStart).count();
+    timing.raw_thrust = rawThrust;
+    timing.command_accepted = accepted;
+    timing.unlock_packet = unlockPacket;
+    m_pubCtbrTiming.publish(timing);
   }
 
   void cmdPositionSetpoint(
@@ -1142,6 +1186,7 @@ private:
   ros::Subscriber m_subscribeCmdStop;
   ros::Subscriber m_subscribeCmdCtbr;
   ros::Publisher m_pubCtbrRawThrust;
+  ros::Publisher m_pubCtbrTiming;
 
   ros::Subscriber m_subscribeCmdHover; // Hover vel subscriber
 
@@ -1759,12 +1804,36 @@ public:
     , m_serviceTakeoff()
     , m_serviceLand()
     , m_serviceGoTo()
+    , m_serviceUpdateParams()
+    , m_pubPointCloud()
+    , m_pubPayloadMocapState()
+    , m_payloadRigidBodyName()
+    , m_payloadMocapTopic()
+    , m_payloadMocapStateEstimator(0.2f, 0.1f, 10.0f)
+    , m_payloadBr()
+    , m_groups()
+    , m_subscribeVirtualInteractiveObject()
     , m_lastInteractiveObjectPosition(-10, -10, 1)
     , m_broadcastingNumRepeats(15)
     , m_broadcastingDelayBetweenRepeatsMs(1)
   {
     ros::NodeHandle nh;
     nh.setCallbackQueue(&m_queue);
+
+    ros::NodeHandle privateNh("~");
+    privateNh.param<std::string>("payload_rigid_body", m_payloadRigidBodyName, "load");
+    privateNh.param<std::string>(
+      "payload_mocap_topic", m_payloadMocapTopic, "/load/mocap_state");
+    double derivativeAlpha = 0.2;
+    double maxDt = 0.1;
+    double maxAbsPosition = 10.0;
+    privateNh.param("mocap_state_derivative_alpha", derivativeAlpha, derivativeAlpha);
+    privateNh.param("mocap_state_max_dt", maxDt, maxDt);
+    privateNh.param(
+      "mocap_state_max_abs_position_m", maxAbsPosition, maxAbsPosition);
+    m_payloadMocapStateEstimator.configure(
+      static_cast<float>(derivativeAlpha), static_cast<float>(maxDt),
+      static_cast<float>(maxAbsPosition));
 
     m_serviceEmergency = nh.advertiseService("emergency", &CrazyflieServer::emergency, this);
     m_serviceStartTrajectory = nh.advertiseService("start_trajectory", &CrazyflieServer::startTrajectory, this);
@@ -1775,6 +1844,8 @@ public:
     m_serviceUpdateParams = nh.advertiseService("update_params", &CrazyflieServer::updateParams, this);
 
     m_pubPointCloud = nh.advertise<sensor_msgs::PointCloud>("pointCloud", 1);
+    m_pubPayloadMocapState = nh.advertise<crazyswarm::MocapState>(
+      m_payloadMocapTopic, 10, true);
 
     m_subscribeVirtualInteractiveObject = nh.subscribe("virtual_interactive_object", 1, &CrazyflieServer::virtualInteractiveObjectCallback, this);
   }
@@ -2075,7 +2146,8 @@ public:
           }
         }
 
-        if (useMotionCaptureObjectTracking || !interactiveObject.empty()) {
+        if (useMotionCaptureObjectTracking || !interactiveObject.empty() ||
+            !m_payloadRigidBodyName.empty()) {
           // get mocap rigid bodies
           mocapRigidBodies = mocap->rigidBodies();
           if (interactiveObject == "virtual") {
@@ -2087,6 +2159,37 @@ public:
                     quat));
           }
         }
+
+        // Publish the raw load rigid-body pose on its own MocapState topic.
+        // The NOKOV origin is the top-surface center; geometric-center
+        // conversion belongs to the CTBR payload controller, where the YAML
+        // dimensions are available.  Invalid/lost load states are explicitly
+        // published so the controller can keep all aircraft at zero thrust.
+        crazyswarm::MocapState payloadMsg;
+        payloadMsg.header.stamp = ros::Time::now();
+        payloadMsg.header.frame_id = "world";
+        const auto payloadIt = mocapRigidBodies.find(m_payloadRigidBodyName);
+        if (payloadIt != mocapRigidBodies.end()) {
+          m_payloadMocapStateEstimator.update(
+            payloadIt->second,
+            std::chrono::steady_clock::now(),
+            payloadMsg);
+          const auto& payloadRigidBody = payloadIt->second;
+          tf::Transform payloadTransform;
+          payloadTransform.setOrigin(tf::Vector3(
+            payloadRigidBody.position().x(),
+            payloadRigidBody.position().y(),
+            payloadRigidBody.position().z()));
+          const auto& payloadRotation = payloadRigidBody.rotation();
+          payloadTransform.setRotation(tf::Quaternion(
+            payloadRotation.x(), payloadRotation.y(),
+            payloadRotation.z(), payloadRotation.w()));
+          m_payloadBr.sendTransform(tf::StampedTransform(
+            payloadTransform, ros::Time::now(), "world", m_payloadRigidBodyName));
+        } else {
+          m_payloadMocapStateEstimator.invalidate(payloadMsg);
+        }
+        m_pubPayloadMocapState.publish(payloadMsg);
 
         auto startRunGroups = std::chrono::high_resolution_clock::now();
         std::vector<std::future<void> > handles;
@@ -2344,7 +2447,11 @@ private:
   ros::ServiceServer m_serviceUpdateParams;
 
   ros::Publisher m_pubPointCloud;
-  // tf::TransformBroadcaster m_br;
+  ros::Publisher m_pubPayloadMocapState;
+  std::string m_payloadRigidBodyName;
+  std::string m_payloadMocapTopic;
+  MocapStateEstimator m_payloadMocapStateEstimator;
+  tf::TransformBroadcaster m_payloadBr;
 
   std::vector<CrazyflieGroup*> m_groups;
 

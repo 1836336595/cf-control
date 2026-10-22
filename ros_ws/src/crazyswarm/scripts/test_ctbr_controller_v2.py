@@ -13,6 +13,7 @@ import tempfile
 import threading
 import types
 from collections import deque
+from copy import deepcopy
 from pathlib import Path
 
 import numpy as np
@@ -37,7 +38,7 @@ def _install_ros_import_stubs():
 
     crazyswarm = types.ModuleType("crazyswarm")
     crazyswarm_msg = types.ModuleType("crazyswarm.msg")
-    for name in ("CTBR", "GenericLogData", "MocapState"):
+    for name in ("CTBR", "CTBRTiming", "GenericLogData", "MocapState"):
         setattr(crazyswarm_msg, name, type(name, (), {}))
     crazyswarm.msg = crazyswarm_msg
     sys.modules["crazyswarm"] = crazyswarm
@@ -170,6 +171,9 @@ def _configure_controller_node_ros(module, roots):
 
 def _controller_parameter_roots():
     roots = yaml.safe_load(CONTROLLER_CONFIG_PATH.read_text())
+    roots.update(yaml.safe_load(
+        (CONTROLLER_CONFIG_PATH.parent / "ctbr_vehicle.yaml").read_text()
+    ))
     roots["ctbr_controller"]["target_confirmed"] = True
     return roots
 
@@ -187,7 +191,7 @@ def test_controller_node_reads_cf_specific_calibration_from_absolute_namespace()
     _configure_controller_node_ros(module, roots)
 
     cf2 = module.CtbrControllerNode(
-        vehicle_config={"id": 2, "uri": "radio://0/80/2M/E7E7E7E702"},
+        vehicle_config={"id": 3, "uri": "radio://0/80/2M/E7E7E7E703"},
         logger=_node_logger(), auto_timer=False, register_shutdown=False,
     )
     cf4 = module.CtbrControllerNode(
@@ -200,8 +204,16 @@ def test_controller_node_reads_cf_specific_calibration_from_absolute_namespace()
     assert np.allclose(cf4.controller.config.position_gain, [0.8, 0.8, 0.5])
     expected_rate = float(roots["ctbr_controller"]["control_rate_hz"])
     assert cf2.rate_hz == cf4.rate_hz == expected_rate
-    assert cf2.trajectory_config.trajectory_mode == "figure_eight_triangle"
-    assert cf4.trajectory_config.trajectory_mode == "figure_eight_triangle"
+    assert cf2.trajectory_config.trajectory_mode == "hover"
+    assert cf4.trajectory_config.trajectory_mode == "hover"
+    assert math.isclose(
+        cf2.takeoff_position_gain_scale,
+        float(roots["ctbr_controller"]["takeoff_position_gain_scale"]),
+    )
+    assert math.isclose(
+        cf4.takeoff_velocity_gain_scale,
+        float(roots["ctbr_controller"]["takeoff_velocity_gain_scale"]),
+    )
 
 
 def test_controller_node_rejects_missing_cf_specific_parameter_block():
@@ -295,6 +307,600 @@ def test_analytic_omega_c_forwards_target_yaw_rate_without_attitude_error():
 
     assert np.allclose(command["computed_body_rate"], [0.0, 0.0, 0.6], atol=1e-10)
     assert np.allclose(command["body_rate_command"], [0.0, 0.0, 0.6], atol=1e-10)
+
+
+def test_transport_force_override_bypasses_single_vehicle_position_pid():
+    """MATLAB transport force must not be changed by the independent PID terms."""
+    module = _controller_module()
+    config = _config(module)
+    controller = module.GeometricCtbrController(config)
+    state = _state()
+    state["position"] = np.array([1.0, -0.5, 0.2])
+    state["filter_derivatives_valid"] = True
+    state["filtered_velocity"] = np.zeros(3)
+    state["filtered_acceleration"] = np.zeros(3)
+    target = _target()
+    target.update({
+        "transport_mode": True,
+        "desired_force_override": np.array([0.0, 0.0, config.mass * config.gravity]),
+        "desired_force_dot_override": np.zeros(3),
+        "transport_attitude_gain": np.array([240.0, 240.0, 120.0]),
+        "transport_rate_gain": np.array([4.0, 4.0, 4.0]),
+    })
+    command = controller.compute(state, target, 0.01)
+    assert np.allclose(command["desired_force"], [0.0, 0.0, config.mass * config.gravity])
+    assert np.allclose(command["position_integral"], np.zeros(3))
+    assert command["transport_mode"] is True
+
+
+def test_transport_body_rate_filter_smooths_a_step_and_resets_at_handoff():
+    """The optional transport command filter damps a step without filtering thrust."""
+    module = _controller_module()
+    config = _config(module, transport_body_rate_filter_tau_s=0.02)
+    controller = module.GeometricCtbrController(config)
+    state = _state()
+    state["body_rate"] = np.zeros(3)
+    target = _target()
+    target.update(
+        transport_mode=True,
+        transport_blend=1.0,
+        desired_force_override=np.array([0.0, 0.0, 0.8]),
+        desired_force_dot_override=np.zeros(3),
+        transport_attitude_gain=np.array([12.0, 12.0, 6.0]),
+        transport_rate_gain=np.array([1.0, 1.0, 0.5]),
+    )
+    first = controller.compute(state, target, 1 / 70)
+    angle = math.radians(20.0)
+    state["rotation"] = np.array([
+        [math.cos(angle), 0.0, math.sin(angle)],
+        [0.0, 1.0, 0.0],
+        [-math.sin(angle), 0.0, math.cos(angle)],
+    ])
+    second = controller.compute(state, target, 1 / 70)
+    assert abs(second["body_rate_command"][1]) < abs(second["raw_body_rate_command"][1])
+    assert np.allclose(second["desired_force"], [0.0, 0.0, 0.8])
+    target["transport_filter_reset"] = True
+    reset = controller.compute(state, target, 1 / 70)
+    assert np.allclose(reset["body_rate_command"], reset["raw_body_rate_command"])
+
+
+def test_transport_force_filter_keeps_force_and_attitude_direction_consistent():
+    module = _controller_module()
+    config = _config(module, transport_force_filter_tau_s=0.02)
+    controller = module.GeometricCtbrController(config)
+    state = _state()
+    target = _target()
+    target.update(
+        transport_mode=True, transport_blend=1.0,
+        desired_force_override=np.array([0.0, 0.0, 0.8]),
+        desired_force_dot_override=np.zeros(3),
+        transport_attitude_gain=np.array([6.0, 6.0, 3.0]),
+        transport_rate_gain=np.array([2.0, 2.0, 1.0]),
+        transport_filter_reset=True,
+    )
+    first = controller.compute(state, target, 1 / 70)
+    target["transport_filter_reset"] = False
+    target["desired_force_override"] = np.array([0.18, 0.0, 0.8])
+    second = controller.compute(state, target, 1 / 70)
+    assert 0.0 < second["desired_force"][0] < 0.18
+    assert np.isclose(second["collective_thrust"], second["desired_force"][2], atol=1e-12)
+    assert not np.allclose(first["desired_force"], second["desired_force"])
+
+
+def test_tension_ramp_keeps_measured_vehicle_anchor_with_independent_hold_feedback():
+    """Udaan-style ramp hold counters inward cable-force motion during handoff."""
+    module = _controller_module()
+    config = _config(
+        module,
+        independent_position_gain=np.array([3.0, 3.0, 4.0]),
+        independent_velocity_gain=np.array([3.12, 3.12, 3.60]),
+        independent_max_feedback_acceleration=np.array([6.0, 6.0, 8.0]),
+    )
+    state = _state()
+    state["position"] = np.array([0.10, 0.0, 0.0])
+    state["filter_derivatives_valid"] = True
+    state["filtered_velocity"] = np.zeros(3)
+    state["filtered_acceleration"] = np.zeros(3)
+
+    def run(hold_scale):
+        controller = module.GeometricCtbrController(config)
+        target = _target()
+        target.update({
+            "position": np.zeros(3),
+            "transport_mode": True,
+            "transport_blend": 0.5,
+            "desired_force_override": np.array([0.0, 0.0, config.mass * config.gravity]),
+            "desired_force_dot_override": np.zeros(3),
+            "ramp_position_hold_gain_scale": hold_scale,
+        })
+        return controller.compute(state, target, 0.01)["desired_force"]
+
+    without_hold = run(0.0)
+    with_hold = run(2.0)
+    expected_delta_x = 0.5 * config.mass * 2.0 * (-3.0 * 0.10)
+    assert math.isclose(
+        with_hold[0] - without_hold[0], expected_delta_x, rel_tol=0.0, abs_tol=1.0e-10
+    )
+    assert with_hold[0] < without_hold[0]
+
+
+def test_transport_lift_keeps_horizontal_anchor_with_independent_hold_feedback():
+    """The hold remains active after TENSION_RAMP during reference lift."""
+    module = _controller_module()
+    config = _config(
+        module,
+        independent_position_gain=np.array([3.0, 3.0, 4.0]),
+        independent_velocity_gain=np.array([3.12, 3.12, 3.60]),
+        independent_max_feedback_acceleration=np.array([6.0, 6.0, 8.0]),
+    )
+    controller = module.GeometricCtbrController(config)
+    state = _state()
+    state["position"] = np.array([0.10, 0.0, 0.0])
+    state["filter_derivatives_valid"] = True
+    state["filtered_velocity"] = np.zeros(3)
+    state["filtered_acceleration"] = np.zeros(3)
+    target = _target()
+    target.update({
+        "transport_mode": True,
+        "transport_blend": 1.0,
+        "desired_force_override": np.array([0.0, 0.0, config.mass * config.gravity]),
+        "desired_force_dot_override": np.zeros(3),
+        "transport_position_hold_gain_scale": 2.0,
+    })
+    command = controller.compute(state, target, 0.01)
+    expected_delta_x = config.mass * 2.0 * (-3.0 * 0.10)
+    assert math.isclose(
+        command["desired_force"][0], expected_delta_x,
+        rel_tol=0.0, abs_tol=1.0e-10
+    )
+
+
+def test_position_hold_force_derivative_tracks_velocity_and_acceleration_errors():
+    module = _controller_module()
+    config = _config(
+        module,
+        independent_position_gain=np.array([3.0, 3.0, 4.0]),
+        independent_velocity_gain=np.array([3.12, 3.12, 3.60]),
+        independent_max_feedback_acceleration=np.array([6.0, 6.0, 8.0]),
+    )
+    controller = module.GeometricCtbrController(config)
+    state = _state(acceleration=np.array([0.3, 0.0, 0.0]))
+    state["position"] = np.array([0.10, 0.0, 0.0])
+    state["velocity"] = np.array([0.20, 0.0, 0.0])
+    target = _target()
+    target.update({
+        "transport_mode": True,
+        "transport_blend": 1.0,
+        "desired_force_override": np.array([0.0, 0.0, config.mass * config.gravity]),
+        "desired_force_dot_override": np.zeros(3),
+        "transport_position_hold_gain_scale": 0.5,
+    })
+
+    command = controller.compute(state, target, 0.01)
+    expected = config.mass * 0.5 * (-3.0 * 0.20 - 3.12 * 0.30)
+    assert math.isclose(
+        command["desired_force_dot"][0], expected,
+        rel_tol=0.0, abs_tol=1.0e-10
+    )
+
+
+def test_position_hold_force_derivative_includes_the_gain_fade():
+    module = _controller_module()
+    config = _config(module, independent_position_gain=np.array([3.0, 3.0, 4.0]))
+    state = _state()
+    state["position"] = np.array([0.10, 0.0, 0.0])
+    target = _target()
+    target.update({
+        "transport_mode": True, "transport_blend": 1.0,
+        "desired_force_override": np.array([0.0, 0.0, config.mass * config.gravity]),
+        "desired_force_dot_override": np.zeros(3),
+        "transport_position_hold_gain_scale": 1.0,
+        "transport_position_hold_gain_scale_dot": -0.5,
+    })
+    command = module.GeometricCtbrController(config).compute(state, target, 0.01)
+    assert math.isclose(command["desired_force_dot"][0], 0.00651, abs_tol=1e-10)
+
+
+def test_matlab_independent_phase_scales_acceleration_feedback_by_mass():
+    """SLACK/TAKEUP must match crazyflie_slung_independent_controller's A law."""
+    module = _controller_module()
+    config = _config(
+        module,
+        independent_position_gain=np.array([3.0, 3.0, 4.0]),
+        independent_velocity_gain=np.array([3.12, 3.12, 3.60]),
+        independent_integral_gain=np.array([0.8, 0.8, 0.8]),
+        independent_integral_limit=np.array([0.20, 0.20, 0.20]),
+        independent_integral_gate=0.05,
+        independent_max_feedback_acceleration=np.array([6.0, 6.0, 8.0]),
+        independent_max_body_rate=np.array([5.0, 5.0, 3.5]),
+        independent_attitude_gain=np.array([240.0, 240.0, 120.0]),
+    )
+    controller = module.GeometricCtbrController(config)
+    state = _state()
+    state["position"] = np.array([0.0, 0.0, 0.0])
+    target = _target()
+    target.update({
+        "position": np.array([0.10, 0.0, 0.20]),
+        "independent_mode": True,
+    })
+    command = controller.compute(state, target, 0.01)
+    expected = config.mass * np.array([
+        config.independent_position_gain[0] * 0.10,
+        0.0,
+        config.gravity + config.independent_position_gain[2] * 0.20,
+    ])
+    assert np.allclose(command["desired_force"], expected, atol=1.0e-10)
+
+
+def test_independent_feedback_scale_can_strengthen_prelift_xy_pid():
+    module = _controller_module()
+    config = _config(
+        module,
+        independent_position_gain=np.array([3.0, 3.0, 4.0]),
+        independent_velocity_gain=np.array([3.12, 3.12, 3.60]),
+    )
+    state = _state()
+    state["position"] = np.array([0.20, -0.10, 0.0])
+    target = _target()
+    target.update({
+        "independent_mode": True,
+        "position": np.zeros(3),
+        "independent_position_gain_scale": np.array([3.0, 3.0, 1.0]),
+        "independent_velocity_gain_scale": np.array([1.5, 1.5, 1.0]),
+    })
+    command = module.GeometricCtbrController(config).compute(state, target, 0.01)
+    assert np.isclose(command["desired_force"][0], -config.mass * 3.0 * 3.0 * 0.20)
+    assert np.isclose(command["desired_force"][1], -config.mass * 3.0 * 3.0 * -0.10)
+
+
+def _prelift_integral_target():
+    target = _target()
+    target.update({
+        "position": np.array([0.0, 0.0, 1.6]),
+        "independent_mode": True,
+        "prelift_vertical_integral_active": True,
+        "prelift_vertical_integral_limit": 8.0,
+        "prelift_vertical_integral_gate_m": 1.65,
+        "prelift_vertical_integral_rate_limit": 0.5,
+        "prelift_vertical_feedback_limit_mps2": 12.0,
+    })
+    return target
+
+
+def _prelift_integral_controller(module):
+    return module.GeometricCtbrController(_config(
+        module, independent_position_gain=np.array([3.0, 3.0, 4.0]),
+        independent_velocity_gain=np.array([3.12, 3.12, 3.6]),
+        independent_integral_gain=np.full(3, 0.8),
+        independent_integral_limit=np.full(3, 0.2), independent_integral_gate=0.2,
+        independent_max_feedback_acceleration=np.array([6.0, 6.0, 8.0]),
+    ))
+
+
+def test_fixed_prelift_reference_keeps_increasing_thrust_with_large_z_error():
+    module = _controller_module()
+    controller = _prelift_integral_controller(module)
+    target = _prelift_integral_target()
+    state = _state()
+    initial = controller.compute(state, target, 0.01)
+    for _ in range(1000):
+        command = controller.compute(state, target, 0.01)
+    assert command["collective_thrust"] > initial["collective_thrust"] + 0.10
+    assert np.allclose(command["position_integral"][:2], 0.0)
+    assert command["position_integral"][2] < -0.2
+    assert command["collective_thrust"] <= controller.config.max_command_thrust
+
+
+def test_prelift_integral_stops_growing_at_acceleration_saturation():
+    module = _controller_module()
+    controller = _prelift_integral_controller(module)
+    target = _prelift_integral_target()
+    controller.position_integral[2] = -7.0
+    initial = controller.position_integral.copy()
+    for _ in range(100):
+        command = controller.compute(_state(), target, 0.01)
+    assert np.allclose(controller.position_integral, initial)
+    assert command["collective_thrust"] <= controller.config.mass * (controller.config.gravity + 12.0)
+
+
+def test_prelift_integral_stops_growing_when_projected_thrust_is_saturated():
+    module = _controller_module()
+    controller = _prelift_integral_controller(module)
+    controller.config.max_command_thrust = 0.70
+    target = _prelift_integral_target()
+    command = controller.compute(_state(), target, 0.01)
+    assert np.allclose(command["position_integral"], 0.0)
+
+
+def test_prelift_integral_holds_when_velocity_feedback_is_invalid():
+    module = _controller_module()
+    controller = _prelift_integral_controller(module)
+    controller.compute(_state(derivatives_valid=False), _prelift_integral_target(), 0.01)
+    assert np.allclose(controller.position_integral, 0.0)
+
+
+def test_prelift_integral_can_unwind_and_preserves_base_controller_parameters():
+    module = _controller_module()
+    controller = _prelift_integral_controller(module)
+    limit = controller.config.independent_integral_limit.copy()
+    acceleration_limit = controller.config.independent_max_feedback_acceleration.copy()
+    controller.position_integral[2] = -7.0
+    state = _state()
+    state["position"] = np.array([0.0, 0.0, 0.1])
+    target = _prelift_integral_target()
+    target["position"] = np.zeros(3)
+    for _ in range(100):
+        controller.compute(state, target, 0.01)
+    assert -7.0 < controller.position_integral[2] < -6.9
+    assert np.array_equal(controller.config.independent_integral_limit, limit)
+    assert np.array_equal(controller.config.independent_max_feedback_acceleration, acceleration_limit)
+
+
+def test_standard_independent_mode_still_uses_its_small_error_integral_gate():
+    module = _controller_module()
+    controller = _prelift_integral_controller(module)
+    target = _target()
+    target.update(position=np.array([0.0, 0.0, 1.6]), independent_mode=True)
+    for _ in range(100):
+        controller.compute(_state(), target, 0.01)
+    assert np.allclose(controller.position_integral, 0.0)
+
+
+def test_prelift_handoff_retains_last_independent_force_at_blend_zero():
+    module = _controller_module()
+    controller = module.GeometricCtbrController(_config(module))
+    state = _state()
+    target = _target()
+    target.update({
+        "transport_mode": True,
+        "transport_blend": 0.0,
+        "handoff_force": np.array([0.0, 0.0, 0.65]),
+        "desired_force_override": np.array([0.0, 0.0, 0.65]),
+        "desired_force_dot_override": np.zeros(3),
+    })
+    command = controller.compute(state, target, 0.01)
+    assert np.allclose(command["desired_force"], [0.0, 0.0, 0.65])
+
+
+def _merge_parameter_overrides(baseline, overlay):
+    """Recursively overlay mappings; copy replaced scalars/lists for isolation."""
+    result = deepcopy(baseline)
+    for key, value in overlay.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _merge_parameter_overrides(result[key], value)
+        else:
+            result[key] = deepcopy(value)
+    return result
+
+
+def _slung_manager(module, directory, parameter_overrides=None):
+    """Instantiate real mission/controller objects; replace only ROS transport."""
+    roots = _controller_parameter_roots()
+    roots.update(yaml.safe_load((CONTROLLER_CONFIG_PATH.parent / "slung_payload.yaml").read_text()))
+    roots = _merge_parameter_overrides(roots, parameter_overrides or {})
+    roots["ctbr_controller"].update(transport_mode="slung_load", log_directory=str(directory))
+    roots["crazyflies"] = [
+        {"id": i, "channel": 80, "uri": "radio://0/80/2M/E7E7E7E7%02X" % i,
+         "ctbr_enabled": True, "initialPosition": [0.0, 0.0, 0.0],
+         "orbit_phase_rad": (i - 3) * 2.0 * math.pi / 3.0}
+        for i in (3, 4, 5)
+    ]
+    _configure_controller_node_ros(module, roots)
+    module.rospy.Timer = lambda *_args: None
+    module.rospy.Duration = lambda duration: duration
+    module.rospy.Time.now = lambda: types.SimpleNamespace(to_sec=lambda: 100.0)
+    manager = module.MultiCtbrControllerNode()
+    payload = dict(_state(), valid=True, body_rate=np.zeros(3),
+                   position=np.array([0.0, 0.0, 0.025]), received_time=0.0)
+    manager.latest_payload_state = payload
+    manager.last_valid_payload_geometry = payload
+    positions = module.takeup_vehicle_targets(
+        payload["position"], np.eye(3), manager.slung_controller.config.attachment_points_m,
+        manager.slung_controller.config.link_lengths_m, 0.12,
+    ).T
+    for vehicle, position in zip(manager.vehicles, positions):
+        vehicle.latest_state = dict(_state(), position=position, valid=True,
+                                    body_rate=np.zeros(3), received_time=0.0,
+                                    mocap_sample_time_s=100.0)
+        vehicle.trajectory = module.CircularFlightTrajectory(vehicle.trajectory_config)
+        vehicle.trajectory.reset(position, 0.0, 0.0)
+        vehicle.trajectory.phase = "height_correction"
+        vehicle.trajectory.phase_start_time = 0.0
+    return manager, positions
+
+
+def test_real_takeup_waits_for_taut_cables_and_then_keeps_pulling(tmp_path):
+    module = _controller_module()
+    manager, anchors = _slung_manager(module, tmp_path)
+    try:
+        # First wait with one slack cable, even after the nominal TAKEUP time.
+        manager.vehicles[0].latest_state["position"] = anchors[0] - [0.0, 0.0, 0.2]
+        for now in np.arange(0.0, 9.0, 0.02):
+            manager.latest_payload_state["received_time"] = now
+            for vehicle in manager.vehicles:
+                vehicle.latest_state["received_time"] = now
+            manager._hold_payload_mission_clock(now)
+            manager._payload_takeup_overrides(now)
+        assert manager.payload_prelift_reference is None
+        manager.vehicles[0].latest_state["position"] = anchors[0].copy()
+        for now in np.arange(9.0, 40.0, 0.02):
+            manager.latest_payload_state["received_time"] = now
+            for vehicle in manager.vehicles:
+                vehicle.latest_state["received_time"] = now
+            manager._hold_payload_mission_clock(now)
+            overrides = manager._payload_takeup_overrides(now)
+        assert manager.payload_prelift_reference is not None
+        for i, vehicle in enumerate(manager.vehicles):
+            assert overrides[id(vehicle)]["position"][2] > anchors[i, 2] + 0.50
+            assert vehicle.trajectory.phase == "height_correction"
+        assert not manager._payload_takeup_ready(now)
+    finally:
+        manager.logger.close()
+
+
+def test_transport_overrides_keep_prelift_bias_and_force_at_handoff(tmp_path):
+    module = _controller_module()
+    manager, anchors = _slung_manager(module, tmp_path)
+    try:
+        manager.payload_transport_active = True
+        manager.payload_transport_start_time = 0.0
+        manager.payload_transport_start_position = manager.latest_payload_state["position"].copy()
+        manager.payload_transport_vehicle_start_positions = anchors.copy()
+        manager.payload_handoff_reference_positions = anchors + [0.0, 0.0, 1.0]
+        manager.payload_handoff_forces = np.tile([0.0, 0.0, 0.65], (3, 1))
+        overrides = manager._transport_overrides(0.0)
+        assert len(overrides) == 3
+        for i, vehicle in enumerate(manager.vehicles):
+            target = overrides[id(vehicle)]
+            assert target["independent_mode"] is False
+            assert np.allclose(target["position"], anchors[i] + [0.0, 0.0, 1.0])
+            assert np.allclose(target["handoff_force"], [0.0, 0.0, 0.65])
+            assert np.allclose(target["position_hold_position"], anchors[i])
+    finally:
+        manager.logger.close()
+
+
+def test_handoff_rechecks_cables_even_after_takeup_was_latched(tmp_path):
+    module = _controller_module()
+    manager, anchors = _slung_manager(module, tmp_path)
+    try:
+        raised = anchors + [0.0, 0.0, 0.22]
+        manager.latest_payload_state["position"] += [0.0, 0.0, 0.22]
+        manager.latest_payload_state["received_time"] = 2.2
+        for vehicle, position in zip(manager.vehicles, raised):
+            vehicle.latest_state["position"] = position.copy()
+        manager.payload_takeup_start_time = 0.0
+        manager.payload_takeup_target_positions = raised.copy()
+        manager.payload_takeup_taut_latched = True
+        manager.payload_prelift_confirm_s = manager.payload_takeup_confirm_s = 0.0
+        manager.payload_prelift_reference = module.SlungPreliftTrajectory()
+        manager.payload_prelift_reference.start(raised, raised, 0.0)
+        for now in np.arange(0.0, 2.21, 0.02):
+            manager.payload_prelift_reference.update(raised, clearance_m=0.22, now=now)
+        assert manager._payload_takeup_ready(2.2)
+        manager.vehicles[0].latest_state["position"] -= [0.0, 0.0, 0.2]
+        assert not manager._payload_takeup_ready(2.2)
+        assert not manager.payload_prelift_ready
+    finally:
+        manager.logger.close()
+
+
+def test_prelift_limit_routes_all_vehicles_into_controlled_landing(tmp_path):
+    module = _controller_module()
+    manager, anchors = _slung_manager(module, tmp_path)
+    try:
+        manager.payload_prelift_parameters["max_lead_m"] = 0.10
+        for now in np.arange(0.0, 40.0, 0.02):
+            manager.latest_payload_state["received_time"] = now
+            for vehicle in manager.vehicles:
+                vehicle.latest_state["received_time"] = now
+            manager._hold_payload_mission_clock(now)
+            overrides = manager._payload_takeup_overrides(now)
+            if manager.payload_last_takeup_reference["failed"]:
+                break
+        assert manager.payload_last_takeup_reference["reason"] == "max_lead"
+        assert overrides == {}
+        assert all(vehicle.trajectory.phase == "emergency_landing"
+                   for vehicle in manager.vehicles)
+        assert all(not vehicle._target_for(vehicle.latest_state, now).get("zero_output", False)
+                   for vehicle in manager.vehicles)
+    finally:
+        manager.logger.close()
+
+
+def test_takeup_csv_reports_actual_payload_health_and_landing_reason(tmp_path):
+    module = _controller_module()
+    manager, anchors = _slung_manager(module, tmp_path)
+    try:
+        vehicle = manager.vehicles[0]
+        payload = dict(manager.latest_payload_state, received_time=0.99)
+        vehicle.set_payload_diagnostics(payload)
+        state = dict(vehicle.latest_state, filtered_velocity=np.zeros(3),
+                     filtered_acceleration=np.zeros(3))
+        target = _target()
+        target.update(position=anchors[0], flight_phase="takeup", independent_mode=True)
+        command = vehicle.controller.compute(state, target, 0.01)
+        vehicle._write_log(1.0, state, target, command)
+        vehicle.trajectory.begin_emergency_landing(
+            1.01, anchors[0], 0.0, "payload_load: 预抬参考达到边界：max_lead"
+        )
+        vehicle.set_payload_diagnostics(dict(payload, received_time=-1.0))
+        target = vehicle._target_for(state, 1.01)
+        command = vehicle.controller.compute(state, target, 0.01)
+        vehicle._write_log(1.01, state, target, command)
+        manager.logger.flush()
+        with open(manager.logger.path, newline="") as stream:
+            import csv
+            rows = list(csv.DictReader(stream))
+        assert rows[0]["payload_state_valid"] == "1"
+        assert math.isclose(float(rows[0]["payload_state_age_s"]), 0.01)
+        assert rows[1]["payload_state_valid"] == "0"
+        assert rows[1]["emergency_landing_reason"].endswith("max_lead")
+    finally:
+        manager.logger.close()
+
+
+def test_independent_real_vehicle_attitude_gains_are_rate_loop_safe():
+    """Real rate loops must not saturate on a small independent-phase error."""
+    vehicle_config = yaml.safe_load(
+        (CONTROLLER_CONFIG_PATH.parent / "ctbr_vehicle.yaml").read_text()
+    )
+    for name in ("ctbr_controller_cf3", "ctbr_controller_cf4", "ctbr_controller_cf5"):
+        gain = np.asarray(vehicle_config[name]["independent_attitude_gain"], dtype=float)
+        limit = np.asarray(
+            vehicle_config[name]["independent_max_body_rate_radps"], dtype=float
+        )
+        # Keep MATLAB's 2:2:1 axis ratio while scaling kR for the real inner loop.
+        assert np.allclose(gain, [12.0, 12.0, 6.0])
+        assert np.allclose(limit, [3.0, 3.0, 2.0])
+        assert np.all(np.abs(gain * 0.1) < limit)
+
+
+def test_independent_takeup_integral_gate_covers_observed_tracking_error():
+    """TAKEUP errors around 0.1-0.17 m must be allowed to remove thrust bias."""
+    vehicle_config = yaml.safe_load(
+        (CONTROLLER_CONFIG_PATH.parent / "ctbr_vehicle.yaml").read_text()
+    )
+    for name in ("ctbr_controller_cf3", "ctbr_controller_cf4", "ctbr_controller_cf5"):
+        assert vehicle_config[name]["independent_integral_gate"] >= 0.20
+
+
+def test_independent_takeoff_preserves_each_vehicle_start_yaw():
+    """A fixed world heading must not spin a vehicle during vertical takeoff.
+
+    The MATLAB simulation starts every vehicle at yaw zero, but a real fleet
+    may be armed with different initial yaws.  The independent geometric PID
+    should use the trajectory's start yaw in that case; otherwise the yaw
+    rate saturates and couples into roll/pitch before the vehicle has lifted.
+    """
+    module = _controller_module()
+    yaw = -0.85
+    config = _config(
+        module,
+        independent_position_gain=np.array([3.0, 3.0, 4.0]),
+        independent_velocity_gain=np.array([3.12, 3.12, 3.60]),
+        independent_integral_gain=np.array([0.8, 0.8, 0.8]),
+        independent_integral_limit=np.array([0.20, 0.20, 0.20]),
+        independent_integral_gate=0.05,
+        independent_max_feedback_acceleration=np.array([6.0, 6.0, 8.0]),
+        independent_max_body_rate=np.array([5.0, 5.0, 3.5]),
+        independent_attitude_gain=np.array([240.0, 240.0, 120.0]),
+        independent_heading=np.array([1.0, 0.0, 0.0]),
+    )
+    rotation = np.array([
+        [math.cos(yaw), -math.sin(yaw), 0.0],
+        [math.sin(yaw), math.cos(yaw), 0.0],
+        [0.0, 0.0, 1.0],
+    ])
+    controller = module.GeometricCtbrController(config)
+    state = _state(rotation=rotation)
+    target = _target(yaw=yaw)
+    target["independent_mode"] = True
+
+    command = controller.compute(state, target, 0.01)
+
+    assert np.allclose(command["attitude_error"], np.zeros(3), atol=1.0e-10)
+    assert np.allclose(command["body_rate_command"], np.zeros(3), atol=1.0e-10)
 
 
 def _computed_rotation_at(module, acceleration, jerk, yaw):
@@ -1102,7 +1708,7 @@ def test_filter_columns_are_appended_after_legacy_csv_columns():
         header = Path(logger.path).read_text().splitlines()[0].split(",")
 
     assert header[header.index("command_thrust_newton")] == "command_thrust_newton"
-    assert header[header.index("mocap_sample_age_s"):] == [
+    assert header[header.index("mocap_sample_age_s"):header.index("controller_tick_interval_s")] == [
         "mocap_sample_age_s",
         "ekf_position_x", "ekf_position_y", "ekf_position_z",
         "ekf_velocity_x", "ekf_velocity_y", "ekf_velocity_z",
@@ -1117,828 +1723,40 @@ def test_filter_columns_are_appended_after_legacy_csv_columns():
         "command_raw_thrust", "command_raw_thrust_age_s", "invalid_reason",
         "ekf_position_error_m", "ekf_position_consistent",
         "ekf_kinematics_held", "ekf_fault_age_s", "ekf_status",
-        "formation_acceleration_x", "formation_acceleration_y", "formation_acceleration_z",
-        "formation_acceleration_dot_x", "formation_acceleration_dot_y", "formation_acceleration_dot_z",
-        "formation_law_active",
-        "thrust_scale_correction",
-        "formation_integral_x", "formation_integral_y", "formation_integral_z",
-    ]
-
-
-def test_multi_vehicle_formation_override_matches_matlab_leader_follower_law():
-    """A position perturbation produces the MATLAB u_i including the center term."""
-    module = _controller_module()
-    offsets = np.array([
-        [0.0, 0.5 / math.sqrt(3.0), 1.0],
-        [-0.25, -0.25 / math.sqrt(3.0), 1.0],
-        [0.25, -0.25 / math.sqrt(3.0), 1.0],
-    ])
-    center_acceleration = np.array([0.04, -0.03, 0.0])
-
-    class FakeVehicle:
-        def __init__(self, position, target):
-            self.lock = threading.Lock()
-            self.latest_state = {"position": np.asarray(position, dtype=float)}
-            self.target = target
-            self._ekf_kinematics_enabled = True
-
-        def _state_ready(self, _now):
-            return True
-
-        def _build_ekf_control_state(self, _state, _now):
-            return {
-                "control_velocity": np.zeros(3),
-                "control_acceleration": center_acceleration.copy(),
-                "ekf_state_valid": True,
-                "ekf_kinematics_held": False,
-            }
-
-        def _target_for(self, _state, _now):
-            return self.target
-
-    vehicles = []
-    for offset in offsets:
-        target = {
-            "position": offset.copy(),
-            "velocity": np.zeros(3),
-            "acceleration": center_acceleration.copy(),
-            "jerk": np.zeros(3),
-            "flight_phase": "figure_eight",
-        }
-        vehicles.append(FakeVehicle(offset.copy(), target))
-
-    # Move only aircraft 0 by +0.1 m in ROS world x.
-    vehicles[0].latest_state["position"][0] += 0.1
-    node = _formation_node(
-        module, vehicles,
-        # The integral channel is disabled here: this test pins the P/D terms.
-        kil=0.0, kf=2.8, kvf=2.1, kbl=2.0, kvl=1.6,
-    )
-    result = module.MultiCtbrControllerNode._formation_overrides(node, 1.0)
-
-    # For aircraft 0: a_c=[0.04,-0.03,0], E_x=0.2 and eLeader_x=0.1, hence
-    # u = [0.04 - 2.8*0.2 - 2.0*0.1, -0.03, 0] = [-0.72, -0.03, 0] m/s^2.
-    assert np.allclose(
-        result[id(vehicles[0])]["formation_acceleration"],
-        np.array([-0.72, -0.03, 0.0]),
-        atol=1e-12,
-    )
-    # Each neighbor sees E_x=-0.1 and u = [0.04 + 2.8*0.1, -0.03, 0].
-    for vehicle in vehicles[1:]:
-        assert np.allclose(
-            result[id(vehicle)]["formation_acceleration"],
-            np.array([0.32, -0.03, 0.0]),
-            atol=1e-12,
-        )
-        assert np.allclose(
-            result[id(vehicle)]["formation_acceleration_dot"],
-            np.zeros(3),
-            atol=1e-12,
-        )
-
-
-def test_leader_follower_phase_drops_geometric_pid_feedback():
-    """The MATLAB law must not be summed with position/velocity/integral gains."""
-    module = _controller_module()
-    config = _config(
-        module,
-        position_gain=np.array([0.75, 0.75, 0.45]),
-        velocity_gain=np.array([0.45, 0.45, 0.35]),
-        integral_gain=np.array([0.40, 0.40, 0.20]),
-    )
-    controller = module.GeometricCtbrController(config)
-    desired_acceleration = np.array([0.30, -0.20, 0.05])
-    state = _state()
-    state["position"] = np.array([0.10, -0.05, 0.02])
-
-    target = _target()
-    target["formation_acceleration"] = desired_acceleration
-    target["formation_acceleration_dot"] = np.zeros(3)
-    target["formation_law_active"] = True
-    command = controller.compute(state, target, 0.01)
-
-    # F = m (u_i + g e3) exactly as MATLAB A = -mass*(g*e3 - u); a nonzero
-    # position error must not contribute any PID term.
-    expected_force = config.mass * (
-        desired_acceleration + np.array([0.0, 0.0, config.gravity])
-    )
-    assert np.allclose(command["desired_force"], expected_force, atol=1e-12)
-    assert np.allclose(command["position_integral"], np.zeros(3), atol=1e-12)
-    assert command["formation_law_active"] is True
-
-
-def _formation_node(module, vehicles, **overrides):
-    """Build the minimal manager state ``_formation_overrides`` needs.
-
-    Formation gains are per-vehicle world-xyz vectors, exactly as the manager
-    builds them from ``formation_gains``.  Callers override ``kf``/``kbl``/... by
-    passing a scalar (broadcast to xyz) or a 3-element list.
-    """
-    defaults = dict(
-        kf=4.0, kvf=2.1, kbl=4.0, kvl=1.6, kil=0.0,
-        integral_c1=0.35, integral_limit_m=0.30, bl=1.0,
-    )
-    defaults.update(overrides)
-    gains = {}
-    for key, value in defaults.items():
-        if key == "bl":
-            gains[key] = module.as_pinning_weight(value)
-        else:
-            gains[key] = module.as_gain_vector(value, "test_%s" % key)
-    count = len(vehicles)
-    values = dict(
-        multi_mode=True,
-        vehicles=vehicles,
-        formation_control_mode="leader_follower",
-        formation_gains=[dict(gains) for _ in range(count)],
-        formation_integral=np.zeros((count, 3)),
-        formation_integral_last_time=None,
-        formation_integral_active=False,
-        formation_adjacency=np.ones((count, count)) - np.eye(count),
-    )
-    return types.SimpleNamespace(**values)
-
-
-class _FakeFleetVehicle:
-    """Static vehicle stand-in exposing only what the law reads."""
-
-    def __init__(self, position, reference, velocity=None):
-        self.lock = threading.Lock()
-        self.latest_state = {"position": np.asarray(position, dtype=float)}
-        self._velocity = (
-            np.zeros(3) if velocity is None else np.asarray(velocity, dtype=float)
-        )
-        self.target = {
-            "position": np.asarray(reference, dtype=float),
-            "velocity": np.zeros(3),
-            "acceleration": np.zeros(3),
-            "jerk": np.zeros(3),
-            "flight_phase": "figure_eight",
-        }
-        self._ekf_kinematics_enabled = True
-
-    def _state_ready(self, _now):
-        return True
-
-    def _build_ekf_control_state(self, _state, _now):
-        return {
-            "control_velocity": self._velocity.copy(),
-            "control_acceleration": np.zeros(3),
-            "ekf_state_valid": True,
-            "ekf_kinematics_held": False,
-        }
-
-    def _target_for(self, _state, _now):
-        return self.target
-
-
-def test_formation_pinning_weight_is_read_per_vehicle():
-    """``formation_bl`` (MATLAB b_i) must come from the vehicle's own block.
-
-    It used to be a global positional array indexed by launch order, so
-    reordering ``crazyflies.yaml`` silently shifted the pinning weight to a
-    different aircraft.  Reading it through ``formation_param`` binds it to the
-    CF ID instead.
-    """
-    module = _controller_module()
-    server = _FakeParameterServer({})
-    server.values.update({
-        "/ctbr_controller_cf2": {},
-        "/ctbr_controller_cf4": {},
-        # Only CF4 de-emphasises the virtual center.
-        "/ctbr_controller_cf4/formation_bl": 0.25,
-    })
-    server.has_param = lambda name: name in server.values
-    server.get_param = lambda name, default=None: server.values.get(name, default)
-
-    def bl_for(cf_id):
-        resolver = module.CtbrParameterResolver(
-            server.get_param, server.has_param, vehicle_id=cf_id
-        )
-        vehicle = types.SimpleNamespace(params=resolver)
-        gains = module.MultiCtbrControllerNode._read_formation_gains(
-            types.SimpleNamespace(), vehicle
-        )
-        return gains["bl"]
-
-    assert bl_for(2) == 1.0
-    assert bl_for(4) == 0.25
-
-
-def test_pinning_weight_rejects_negative_or_non_finite_values():
-    module = _controller_module()
-
-    assert module.as_pinning_weight(0) == 0.0
-    assert module.as_pinning_weight(2.5) == 2.5
-    for invalid in (-1.0, float("nan"), float("inf")):
-        try:
-            module.as_pinning_weight(invalid)
-        except ValueError:
-            pass
-        else:
-            raise AssertionError("formation_bl=%r 应被拒绝" % invalid)
-
-
-def test_pinning_weight_scales_only_the_center_terms():
-    """b_i multiplies kbl/kvl/kil but must not touch the graph terms kf/kvf."""
-    module = _controller_module()
-    offsets = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
-    error = 0.2
-
-    def acceleration_for(bl):
-        fleet = [
-            _FakeFleetVehicle(offsets[i] + error, offsets[i]) for i in range(3)
+        "payload_state_valid",
+        "payload_position_error_x", "payload_position_error_y", "payload_position_error_z",
+        "payload_velocity_error_x", "payload_velocity_error_y", "payload_velocity_error_z",
+        "payload_attitude_error_x", "payload_attitude_error_y", "payload_attitude_error_z",
+        "link_direction_x", "link_direction_y", "link_direction_z",
+        "desired_link_direction_x", "desired_link_direction_y", "desired_link_direction_z",
+            "link_direction_error_x", "link_direction_error_y", "link_direction_error_z",
+            "desired_tension_n",
+            "payload_position_x", "payload_position_y", "payload_position_z",
+            "payload_raw_velocity_x", "payload_raw_velocity_y", "payload_raw_velocity_z",
+            "payload_raw_acceleration_x", "payload_raw_acceleration_y", "payload_raw_acceleration_z",
+            "payload_velocity_x", "payload_velocity_y", "payload_velocity_z",
+            "payload_acceleration_x", "payload_acceleration_y", "payload_acceleration_z",
+            "payload_body_rate_x", "payload_body_rate_y", "payload_body_rate_z",
+            "payload_filter_derivatives_valid",
+            "payload_target_x", "payload_target_y", "payload_target_z",
+            "payload_desired_force_x", "payload_desired_force_y", "payload_desired_force_z",
+            "payload_desired_moment_x", "payload_desired_moment_y", "payload_desired_moment_z",
+            "raw_desired_link_direction_x", "raw_desired_link_direction_y",
+            "raw_desired_link_direction_z",
+            "desired_tension_signed_n", "payload_yaw_enabled", "transport_blend",
+            "transport_blend_dot", "transport_link_gain_scale",
+            "ramp_position_hold_gain_scale", "transport_position_hold_gain_scale",
+            "payload_landing_rope_preserving", "payload_landing_rope_distance_m",
+            "desired_force_dot_x", "desired_force_dot_y", "desired_force_dot_z",
+            "payload_ground_clearance_m", "payload_prelift_clearance_target_m",
+            "payload_prelift_ready", "payload_prelift_active",
+            "payload_prelift_stage", "payload_prelift_reference_rise_m",
+            "payload_prelift_reference_lead_m", "payload_prelift_failure_reason",
+            "target_velocity_x", "target_velocity_y", "target_velocity_z",
+            "target_acceleration_x", "target_acceleration_y", "target_acceleration_z",
+            "payload_state_age_s", "emergency_landing_reason",
+            "prelift_vertical_integral_active", "prelift_vertical_integral_force_n",
+            "transport_support_trim_n", "payload_minimum_vehicle_distance_m",
+            "payload_predicted_vehicle_distance_m", "payload_safety_reason",
+            "transport_max_tilt_rad",
         ]
-        # Only the center-pinning channel is active: kf = kvf = 0 removes the
-        # graph-relative terms, so any change must come from b_i scaling kbl.
-        node = _formation_node(
-            module, fleet, bl=bl, kbl=4.0, kf=0.0, kvf=0.0, kvl=0.0, kil=0.0
-        )
-        result = module.MultiCtbrControllerNode._formation_overrides(node, 1.0)
-        return np.array([
-            result[id(vehicle)]["formation_acceleration"] for vehicle in fleet
-        ])
-
-    full = acceleration_for(1.0)
-    half = acceleration_for(0.5)
-    none = acceleration_for(0.0)
-
-    # A pure translation: -kbl*b*e_i along the error direction.
-    assert np.allclose(full[:, 0], -4.0 * error, atol=1e-12)
-    assert np.allclose(half, 0.5 * full, atol=1e-12)
-    assert np.allclose(none, 0.0, atol=1e-12)
-
-
-def test_formation_integral_accumulates_and_enters_the_law():
-    """e_ic = ∫(eta + c1*e_i)dτ must feed the -kil*b*e_ic term."""
-    module = _controller_module()
-    offsets = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
-    # A constant +0.2 m error on every vehicle (pure translation).
-    fleet = [_FakeFleetVehicle(offsets[i] + 0.2, offsets[i]) for i in range(3)]
-    node = _formation_node(
-        module, fleet, kil=1.0, kf=0.0, kbl=0.0, kvl=0.0,
-    )
-
-    # First cycle only establishes the time anchor: no integration yet.
-    first = module.MultiCtbrControllerNode._formation_overrides(node, 100.0)
-    assert np.allclose(node.formation_integral, 0.0, atol=1e-15)
-    assert np.allclose(first[id(fleet[0])]["formation_acceleration"], 0.0, atol=1e-15)
-
-    # One control period later e_ic grows by dt*(eta + c1*e) = dt*c1*0.2.
-    dt = 1.0 / 70.0
-    module.MultiCtbrControllerNode._formation_overrides(node, 100.0 + dt)
-    expected = dt * 0.35 * 0.2
-    assert np.allclose(node.formation_integral[:, 0], expected, atol=1e-14)
-
-    # A second period doubles it; u carries -kil*b*e_ic.
-    result = module.MultiCtbrControllerNode._formation_overrides(node, 100.0 + 2*dt)
-    assert np.allclose(
-        result[id(fleet[0])]["formation_acceleration"][0],
-        -2.0 * expected, atol=1e-13,
-    )
-
-
-def test_formation_integral_is_clamped_per_axis():
-    """A persistent bias must not grow the integrator without bound."""
-    module = _controller_module()
-    offsets = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
-    fleet = [_FakeFleetVehicle(offsets[i] + 5.0, offsets[i]) for i in range(3)]
-    node = _formation_node(
-        module, fleet, kil=1.0, integral_limit_m=0.25,
-        kf=0.0, kbl=0.0, kvl=0.0,
-    )
-
-    dt = 1.0 / 70.0
-    module.MultiCtbrControllerNode._formation_overrides(node, 200.0)
-    for step in range(1, 60):
-        module.MultiCtbrControllerNode._formation_overrides(node, 200.0 + step*dt)
-    assert np.all(np.abs(node.formation_integral) <= 0.25 + 1e-12)
-    # It must actually reach the clamp for this test to be meaningful.
-    assert np.allclose(node.formation_integral[:, 0], 0.25, atol=1e-12)
-
-
-def test_formation_integral_uses_the_saturated_derivative_in_a_dot():
-    """At the clamp the a_dot integral contribution must be zero, not the raw rate."""
-    module = _controller_module()
-    offsets = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
-    fleet = [_FakeFleetVehicle(offsets[i] + 5.0, offsets[i]) for i in range(3)]
-    node = _formation_node(
-        module, fleet, kil=1.0, integral_limit_m=0.001,
-        kf=0.0, kbl=0.0, kvl=0.0,
-    )
-
-    dt = 1.0 / 70.0
-    module.MultiCtbrControllerNode._formation_overrides(node, 300.0)
-    module.MultiCtbrControllerNode._formation_overrides(node, 300.0 + dt)
-    # The integrator is pinned at the limit while the raw rate stays positive.
-    assert np.allclose(node.formation_integral[:, 0], 0.001, atol=1e-12)
-    result = module.MultiCtbrControllerNode._formation_overrides(node, 300.0 + 2*dt)
-
-    assert np.allclose(
-        result[id(fleet[0])]["formation_acceleration_dot"], 0.0, atol=1e-12
-    )
-
-
-def test_formation_integral_reset_clears_state_and_time_anchor():
-    """Leaving the formation phase must not keep old trim."""
-    module = _controller_module()
-    fleet = [_FakeFleetVehicle(np.zeros(3), np.zeros(3)) for _ in range(3)]
-    node = _formation_node(module, fleet)
-    node.formation_integral[0] = np.array([0.1, 0.2, 0.3])
-    node.formation_integral_last_time = 123.0
-    node.formation_integral_active = True
-
-    module.MultiCtbrControllerNode._formation_integral_reset(node)
-
-    assert np.allclose(node.formation_integral, 0.0, atol=1e-15)
-    assert node.formation_integral_last_time is None
-    assert node.formation_integral_active is False
-
-
-def test_formation_integral_skips_a_time_jump():
-    """A stalled loop must not inject one huge integration step."""
-    module = _controller_module()
-    offsets = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
-    fleet = [_FakeFleetVehicle(offsets[i] + 0.2, offsets[i]) for i in range(3)]
-    node = _formation_node(module, fleet, kil=1.0)
-
-    module.MultiCtbrControllerNode._formation_overrides(node, 400.0)
-    # A 3 s gap exceeds the 0.5 s guard.
-    module.MultiCtbrControllerNode._formation_overrides(node, 403.0)
-    assert np.allclose(node.formation_integral, 0.0, atol=1e-15)
-
-
-def test_final_hover_uses_the_same_law_as_the_figure_eight():
-    """The hand-off must be continuous, not a law switch.
-
-    Switching to the geometric PID at hover discarded the formation integrator,
-    so the thrust trim had to be rebuilt and the fleet sank for seconds.  Both
-    phases must run the identical law and share the integrator state.
-    """
-    module = _controller_module()
-    offsets = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
-    fleet = [_FakeFleetVehicle(offsets[i] + 0.1, offsets[i]) for i in range(3)]
-    node = _formation_node(module, fleet, kil=2.0)
-
-    # A hover target is static: zero velocity, acceleration and jerk.
-    for vehicle in fleet:
-        vehicle.target["flight_phase"] = "final_hover"
-        vehicle.target["velocity"] = np.zeros(3)
-        vehicle.target["acceleration"] = np.zeros(3)
-        vehicle.target["jerk"] = np.zeros(3)
-
-    result = module.MultiCtbrControllerNode._formation_overrides(node, 1.0)
-
-    assert result, "final_hover must still be solved by the formation law"
-    # The pinning term still acts: u = -kbl * e_i with e_i = (0, 0, 0.1) here.
-    u = result[id(fleet[0])]["formation_acceleration"]
-    assert np.allclose(u, 0.0, atol=1e-12) or math.isclose(u[2], -0.4, abs_tol=1e-9)
-
-
-def test_formation_law_phases_cover_figure_eight_and_hover_only():
-    """Landing must never use the formation law: the fleet breaks formation."""
-    module = _controller_module()
-
-    assert "figure_eight" in module.FORMATION_LAW_PHASES
-    assert "final_hover" in module.FORMATION_LAW_PHASES
-    for phase in ("landing", "landing_settle", "emergency_landing", "landed",
-                  "circle_entry", "takeoff", "height_correction"):
-        assert phase not in module.FORMATION_LAW_PHASES
-
-
-def test_hover_loading_of_the_integrator_survives_the_hand_off():
-    """The thrust trim built up in the figure-eight must persist into hover."""
-    module = _controller_module()
-    offsets = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
-    fleet = [_FakeFleetVehicle(offsets[i] + 0.1, offsets[i]) for i in range(3)]
-    node = _formation_node(module, fleet, kil=2.0)
-
-    # Charge the integrator during the figure-eight.
-    for step in range(1, 30):
-        module.MultiCtbrControllerNode._formation_overrides(node, step * 0.01)
-    charged = node.formation_integral.copy()
-    assert np.any(charged != 0.0)
-
-    # Hand over to hover: the integrator must carry over unchanged.
-    for vehicle in fleet:
-        vehicle.target["flight_phase"] = "final_hover"
-    module.MultiCtbrControllerNode._formation_overrides(node, 0.31)
-
-    # It may keep integrating, but it must not be wiped back to zero.
-    assert not np.allclose(node.formation_integral, 0.0, atol=1e-12)
-    assert np.all(np.abs(node.formation_integral - charged) < 0.05)
-
-
-def test_manager_does_not_call_undefined_self_methods():
-    """Guard against the misspelled-call bug that cut thrust mid-air.
-
-    The manager called ``self.formation_integral_reset()`` while the method is
-    named ``_formation_integral_reset``.  The figure-eight -> hover transition
-    is the first cycle with no formation solution, so the node raised exactly
-    at that hand-off and every vehicle lost thrust in flight.
-    """
-    import re
-    from pathlib import Path
-
-    source = (
-        Path(__file__).resolve().parent / "ctbr_controller.py"
-    ).read_text()
-    body = source[source.index("class MultiCtbrControllerNode"):]
-    # Methods defined anywhere on the class (plus the next class/EOF boundary).
-    defined = set(re.findall(r"def (_?[a-z][a-z0-9_]*)\(", body))
-    called = set(re.findall(r"self\.(_?[a-z][a-z0-9_]*)\(", body))
-    # Data attributes assigned in __init__ and per-vehicle helpers.
-    assigned = set(re.findall(r"self\.(_?[a-z][a-z0-9_]*)\s*=", body))
-    assigned |= set(re.findall(r"self\.(_?[a-z][a-z0-9_]*)\s*:", body))
-
-    missing = sorted(called - defined - assigned)
-    assert not missing, (
-        "MultiCtbrControllerNode calls self.<name>() but never defines it: %s"
-        % missing
-    )
-
-
-def test_as_gain_vector_accepts_scalars_and_lists():
-    """A scalar must broadcast to xyz; a 3-list must be kept per axis."""
-    module = _controller_module()
-
-    assert np.allclose(module.as_gain_vector(4.0, "k"), [4.0, 4.0, 4.0])
-    assert np.allclose(module.as_gain_vector([1.0, 2.0, 3.0], "k"), [1.0, 2.0, 3.0])
-
-    for bad in ([[1.0, 2.0]], [1.0, 2.0, 3.0, 4.0], [math.nan, 1.0, 1.0]):
-        try:
-            module.as_gain_vector(bad, "k")
-        except ValueError:
-            pass
-        else:
-            raise AssertionError("malformed gain %r must be rejected" % (bad,))
-
-
-def test_negative_formation_gain_is_rejected():
-    """A negative gain would make the formation loop non-passive."""
-    module = _controller_module()
-    try:
-        module.as_gain_vector([-1.0, 1.0, 1.0], "formation_kf")
-    except ValueError as error:
-        assert "formation_kf" in str(error)
-    else:
-        raise AssertionError("a negative gain must be rejected")
-
-
-def test_formation_gains_are_read_per_vehicle_before_the_global_default():
-    """Each CF block may override a formation gain; unset keys use the global."""
-    module = _controller_module()
-    values = {
-        "/ctbr_controller_cf2": {},
-        "/ctbr_controller_cf4": {},
-        "/ctbr_controller/formation_kf": 4.0,
-        "/ctbr_controller/formation_kbl": 4.0,
-        # Only CF4 overrides these.
-        "/ctbr_controller_cf4/formation_kf": [5.0, 5.0, 6.0],
-        "/ctbr_controller_cf4/formation_kvl": 2.5,
-    }
-    server = _FakeParameterServer({})
-    server.values.update(values)
-    server.has_param = lambda name: name in server.values
-    server.get_param = lambda name, default=None: server.values.get(name, default)
-
-    def reader_for(cf_id):
-        resolver = module.CtbrParameterResolver(
-            server.get_param, server.has_param, vehicle_id=cf_id
-        )
-        vehicle = types.SimpleNamespace(params=resolver)
-        node = types.SimpleNamespace()
-        return module.MultiCtbrControllerNode._read_formation_gains(node, vehicle)
-
-    cf2 = reader_for(2)
-    cf4 = reader_for(4)
-
-    # CF2 follows the global defaults.
-    assert np.allclose(cf2["kf"], [4.0, 4.0, 4.0])
-    assert np.allclose(cf2["kvl"], [1.6, 1.6, 1.6])
-    # CF4 overrides kf per axis and kvl with a scalar, keeping other defaults.
-    assert np.allclose(cf4["kf"], [5.0, 5.0, 6.0])
-    assert np.allclose(cf4["kvl"], [2.5, 2.5, 2.5])
-    assert np.allclose(cf4["kbl"], [4.0, 4.0, 4.0])
-
-
-def test_per_axis_gain_only_affects_its_own_axis():
-    """An anisotropic kf must not leak into the other two axes.
-
-    A rigid translation of the whole fleet makes the relative sum ``E`` vanish,
-    so the pinning term is the only contribution and the per-axis gain is
-    directly observable.
-    """
-    module = _controller_module()
-    offsets = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
-    fleet = [
-        _FakeFleetVehicle(offsets[i] + np.array([0.1, 0.1, 0.1]), offsets[i])
-        for i in range(3)
-    ]
-    node = _formation_node(
-        module, fleet,
-        # kf is irrelevant here (E = 0); kbl carries the per-axis response.
-        kf=0.0, kbl=[8.0, 4.0, 2.0], kvf=0.0, kvl=0.0, kil=0.0,
-    )
-    result = module.MultiCtbrControllerNode._formation_overrides(node, 500.0)
-
-    u = result[id(fleet[0])]["formation_acceleration"]
-    # u = -kbl * e_i with e_i = (0.1, 0.1, 0.1).
-    assert np.allclose(u, -np.array([8.0, 4.0, 2.0]) * 0.1, atol=1e-12)
-
-
-def test_each_vehicle_can_use_a_different_gain_vector():
-    """Two vehicles in the same fleet may run different formation gains."""
-    module = _controller_module()
-    offsets = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
-    fleet = [_FakeFleetVehicle(offsets[i] + 0.1, offsets[i]) for i in range(3)]
-    node = _formation_node(module, fleet, kf=0.0, kbl=4.0, kvf=0.0, kvl=0.0, kil=0.0)
-    # Give vehicle 1 twice the pinning gain of the others.
-    node.formation_gains[1]["kbl"] = np.array([8.0, 8.0, 8.0])
-
-    result = module.MultiCtbrControllerNode._formation_overrides(node, 600.0)
-
-    u0 = result[id(fleet[0])]["formation_acceleration"]
-    u1 = result[id(fleet[1])]["formation_acceleration"]
-    assert np.allclose(u0, -4.0 * 0.1, atol=1e-12)
-    assert np.allclose(u1, -8.0 * 0.1, atol=1e-12)
-
-
-def test_matlab_pid_feedback_still_applies_outside_leader_follower_phase():
-    """Takeoff, entry, hover and landing keep the geometric PID loop."""
-    module = _controller_module()
-    config = _config(module)
-    controller = module.GeometricCtbrController(config)
-    state = _state()
-    state["position"] = np.array([0.10, -0.05, 0.02])
-
-    command = controller.compute(state, _target(), 0.01)
-
-    # The C1 integrator runs at the same dt, so reproduce it to isolate the fact
-    # that the position loop is still active outside the formation phase.
-    integral_rate = config.position_integral_c1 * state["position"]
-    expected_integral = np.clip(integral_rate * 0.01, -config.integral_limit, config.integral_limit)
-    expected_force = (
-        config.mass * np.array([0.0, 0.0, config.gravity])
-        - config.position_gain * state["position"]
-        - config.integral_gain * expected_integral
-    )
-    assert np.allclose(command["desired_force"], expected_force, atol=1e-12)
-    assert np.any(command["position_integral"] != 0.0)
-    assert command["formation_law_active"] is False
-
-
-def test_leaving_leader_follower_phase_does_not_reuse_stale_trim_integral():
-    """A frozen nonzero trim integral must not be reinjected after the phase."""
-    module = _controller_module()
-    config = _config(module)
-    controller = module.GeometricCtbrController(config)
-
-    # Accumulate trim in a normal phase, then fly the formation phase.
-    controller.compute(_state(), _target(), 0.01)
-    for _ in range(50):
-        moving_state = _state()
-        moving_state["position"] = np.array([0.05, 0.0, 0.0])
-        controller.compute(moving_state, _target(), 0.01)
-    assert np.any(controller.position_integral != 0.0)
-
-    target = _target()
-    target["formation_acceleration"] = np.zeros(3)
-    target["formation_acceleration_dot"] = np.zeros(3)
-    target["formation_law_active"] = True
-    controller.compute(_state(), target, 0.01)
-
-    assert np.allclose(controller.position_integral, np.zeros(3), atol=1e-12)
-
-
-def test_figure_eight_target_carries_the_formation_law_once_overridden():
-    """The multi-vehicle manager must be the only place that enables the flag."""
-    from test_ctbr_trajectory_smoothstep import _config as trajectory_config
-    from ctbr_trajectory import CircularFlightTrajectory
-
-    trajectory = CircularFlightTrajectory(trajectory_config(
-        trajectory_mode="figure_eight_triangle",
-    ))
-    trajectory.reset(np.array([0.0, 0.0, 0.2]), start_yaw=0.0, now=0.0)
-    target = trajectory._figure_eight_target(0.25)
-
-    assert target["flight_phase"] == "figure_eight"
-    # The reference alone never requests the MATLAB law; only the fleet manager
-    # sets ``formation_law_active`` when it supplies the solved u_i.
-    assert "formation_law_active" not in target
-    assert "formation_acceleration" not in target
-
-
-def _formation_target(acceleration, acceleration_dot=None, max_accel=None):
-    target = _target()
-    target["formation_acceleration"] = np.asarray(acceleration, dtype=float)
-    target["formation_acceleration_dot"] = (
-        np.zeros(3) if acceleration_dot is None
-        else np.asarray(acceleration_dot, dtype=float)
-    )
-    target["formation_law_active"] = True
-    target["formation_max_accel_mps2"] = 0.0 if max_accel is None else float(max_accel)
-    return target
-
-
-def test_formation_phase_does_not_apply_the_tilt_cone():
-    """MATLAB builds b3c = -A/||A|| from an unlimited A: no tilt clip at all.
-
-    The previous hybrid limiter scaled the horizontal force by the *already
-    clipped* vertical force, so a vehicle with a vertical thrust deficit lost
-    lateral authority.  With the MATLAB-faithful path the full horizontal
-    demand must reach ``desired_force``.
-    """
-    module = _controller_module()
-    config = _config(module)
-    controller = module.GeometricCtbrController(config)
-    # A demand far beyond the 10 deg cone the non-formation phases would allow.
-    acceleration = np.array([6.0, 0.0, 0.0])
-    target = _formation_target(acceleration)
-    # Give the phase the same 10 deg cone other phases use, to prove it is ignored.
-    target["max_tilt_rad"] = math.radians(10.0)
-
-    command = controller.compute(_state(), target, 0.01)
-
-    expected_force = config.mass * (
-        acceleration + np.array([0.0, 0.0, config.gravity])
-    )
-    assert np.allclose(command["desired_force"], expected_force, atol=1e-12)
-    tilt = math.degrees(math.atan2(
-        float(np.linalg.norm(command["desired_force"][:2])),
-        float(command["desired_force"][2]),
-    ))
-    assert tilt > 10.0, "the formation phase must be allowed past the tilt cone"
-
-
-def test_formation_phase_direction_is_preserved_exactly():
-    """Every horizontal direction must survive the limiter unchanged."""
-    module = _controller_module()
-    config = _config(module)
-    controller = module.GeometricCtbrController(config)
-
-    for angle in np.linspace(0.0, 2.0 * math.pi, 9):
-        acceleration = np.array([3.0 * math.cos(angle), 3.0 * math.sin(angle), 0.5])
-        command = controller.compute(_state(), _formation_target(acceleration), 0.01)
-        force = command["desired_force"]
-        # b3 must equal the law's intent F/||F|| (up to the attitude construction).
-        expected = config.mass * (acceleration + np.array([0.0, 0.0, config.gravity]))
-        assert np.allclose(force, expected, atol=1e-12)
-        assert np.allclose(
-            command["computed_rotation"][:, 2],
-            expected / np.linalg.norm(expected),
-            atol=1e-12,
-        )
-
-
-def test_formation_acceleration_safety_valve_scales_all_axes_equally():
-    """The optional 3-D ceiling must keep the vector direction."""
-    module = _controller_module()
-    config = _config(module)
-    controller = module.GeometricCtbrController(config)
-    acceleration = np.array([3.0, 4.0, 0.0])   # ||u|| = 5
-    limit = 2.5
-
-    command = controller.compute(
-        _state(), _formation_target(acceleration, max_accel=limit), 0.01
-    )
-    reported = command["formation_acceleration"]
-    assert math.isclose(float(np.linalg.norm(reported)), limit, rel_tol=1e-12)
-    # Direction is preserved because a single scale factor is used.
-    assert np.allclose(reported, acceleration * (limit / 5.0), atol=1e-12)
-    expected_force = config.mass * (
-        reported + np.array([0.0, 0.0, config.gravity])
-    )
-    assert np.allclose(command["desired_force"], expected_force, atol=1e-12)
-
-
-def test_disabled_safety_valve_is_the_default_matlab_behaviour():
-    """A zero/non-finite ceiling must leave the acceleration untouched."""
-    module = _controller_module()
-    for disabled in (0.0, -1.0, math.inf):
-        acceleration, acceleration_dot = module._limit_acceleration_with_derivative(
-            np.array([3.0, 4.0, 1.0]),
-            np.array([0.5, -0.5, 0.25]),
-            disabled,
-        )
-        assert np.allclose(acceleration, [3.0, 4.0, 1.0], atol=1e-15)
-        assert np.allclose(acceleration_dot, [0.5, -0.5, 0.25], atol=1e-15)
-
-
-def test_vertical_only_clip_matches_matlab_scalar_thrust_saturation():
-    """MATLAB clips only the scalar thrust; xy must not be rescaled with it."""
-    module = _controller_module()
-    config = _config(module)
-    controller = module.GeometricCtbrController(config)
-    # Drive the vertical demand past the command ceiling.
-    acceleration = np.array([1.0, -0.5, 40.0])
-    command = controller.compute(_state(), _formation_target(acceleration), 0.01)
-    force = command["desired_force"]
-
-    assert math.isclose(force[2], config.max_command_thrust, rel_tol=1e-12)
-    assert np.allclose(force[:2], config.mass * acceleration[:2], atol=1e-12)
-
-
-def test_takeoff_still_uses_the_tilt_cone():
-    """Removing the cone from the formation phase must not weaken other phases."""
-    module = _controller_module()
-    config = _config(module)
-    controller = module.GeometricCtbrController(config)
-    # A large horizontal position error in a normal phase must stay inside the cone.
-    state = _state()
-    state["position"] = np.array([5.0, 0.0, 0.0])
-    target = _target()
-    target["max_tilt_rad"] = math.radians(10.0)
-
-    command = controller.compute(state, target, 0.01)
-    force = command["desired_force"]
-    tilt = math.atan2(float(np.linalg.norm(force[:2])), float(force[2]))
-
-    assert tilt <= math.radians(10.0) + 1e-9
-    assert abs(force[0]) < config.mass * 5.0 * config.position_gain[0]
-
-
-def test_thrust_scale_correction_multiplies_the_frozen_voltage_scale():
-    """A per-vehicle thrust offset must compose with, not replace, the voltage scale."""
-    module = _controller_module()
-    module.rospy.loginfo = lambda *_args, **_kwargs: None
-
-    def make_node(correction):
-        return types.SimpleNamespace(
-            require_preflight_voltage=True,
-            preflight_voltage_ready=False,
-            preflight_voltage_failed=False,
-            preflight_voltage_started_time=None,
-            preflight_voltage_samples_required=1,
-            preflight_voltage_timeout_s=5.0,
-            preflight_battery_max_age_s=0.5,
-            preflight_min_voltage_v=3.8,
-            preflight_voltage_reference_v=4.2,
-            preflight_raw_scale_exponent=1.0,
-            preflight_raw_scale_min=0.9,
-            preflight_raw_scale_max=1.12,
-            thrust_scale_correction=correction,
-            preflight_voltage_samples=deque([(10.0, 4.0)], maxlen=10),
-            preflight_voltage_sample_count=0,
-            preflight_voltage_v=math.nan,
-            thrust_raw_scale=1.0,
-            controller=types.SimpleNamespace(reset=lambda: None),
-            lock=threading.Lock(),
-        )
-
-    state = {"position": np.array([0.0, 0.0, 0.0]), "rotation": np.eye(3)}
-    # Battery at 4.0 V with a 4.2 V reference gives a 1.05 voltage scale.
-    node = make_node(0.891)
-    assert module.CtbrControllerNode._preflight_voltage_target(node, state, 10.1) is None
-    assert math.isclose(node.thrust_raw_scale, 1.05 * 0.891, rel_tol=1e-12)
-
-    # A neutral correction must reproduce the old voltage-only behaviour exactly.
-    node = make_node(1.0)
-    assert module.CtbrControllerNode._preflight_voltage_target(node, state, 10.1) is None
-    assert math.isclose(node.thrust_raw_scale, 1.05, rel_tol=1e-12)
-
-
-def test_thrust_scale_correction_does_not_widen_the_voltage_sanity_window():
-    """The raw 电压补偿 window must still reject a genuinely bad battery."""
-    module = _controller_module()
-    module.rospy.logerror = lambda *_args, **_kwargs: None
-    module.rospy.loginfo = lambda *_args, **_kwargs: None
-    failures = []
-    node = types.SimpleNamespace(
-        require_preflight_voltage=True,
-        preflight_voltage_ready=False,
-        preflight_voltage_failed=False,
-        preflight_voltage_started_time=None,
-        preflight_voltage_samples_required=1,
-        preflight_voltage_timeout_s=5.0,
-        preflight_battery_max_age_s=0.5,
-        # Keep the absolute voltage floor low so this test isolates the *scale*
-        # window: 4.2/3.0 = 1.4 must be rejected by the 1.12 upper bound.
-        preflight_min_voltage_v=2.0,
-        preflight_voltage_reference_v=4.2,
-        preflight_raw_scale_exponent=1.0,
-        preflight_raw_scale_min=0.9,
-        preflight_raw_scale_max=1.12,
-        # A large correction must not let a 3.0 V pack pass the 0.9..1.12 window.
-        thrust_scale_correction=5.0,
-        preflight_voltage_samples=deque([(10.0, 3.0)], maxlen=10),
-        preflight_voltage_sample_count=0,
-        preflight_voltage_v=math.nan,
-        preflight_voltage_failure_reason="",
-        thrust_raw_scale=1.0,
-        controller=types.SimpleNamespace(reset=lambda: None),
-        lock=threading.Lock(),
-    )
-    node._fail_preflight_voltage = lambda reason: failures.append(reason)
-    node._preflight_hold_target = lambda _state, phase: {
-        "zero_output": True, "phase": phase,
-    }
-    state = {"position": np.array([0.0, 0.0, 0.0]), "rotation": np.eye(3)}
-
-    module.CtbrControllerNode._preflight_voltage_target(node, state, 10.1)
-
-    # 4.2/3.0 = 1.4 exceeds the 1.12 voltage window and must be rejected.
-    assert failures, "an out-of-window voltage scale must still fail preflight"
-    assert "raw 缩放" in failures[0]
-
-

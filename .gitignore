@@ -18,9 +18,10 @@ __pycache__/
 .pytest_cache/
 *.egg-info/
 
-# CTBR 实飞日志：体积可达几百 MB，不进入版本库。
-# 仓库里只保留 ctbr_logs/sample_flight.csv 作为 CSV 列格式的样例。
-ros_ws/src/crazyswarm/scripts/ctbr_logs/*.csv
+# ===== 修改的地方在这里 =====
+# CTBR 实飞日志：忽略整个文件夹
+ros_ws/src/crazyswarm/scripts/ctbr_logs/
+# 如果你想保留里面对应的空文件夹或特定样例（比如 sample_flight.csv），使用下面这行强制取消忽略：
 !ros_ws/src/crazyswarm/scripts/ctbr_logs/sample_flight.csv
 
 # 编辑器与本地环境

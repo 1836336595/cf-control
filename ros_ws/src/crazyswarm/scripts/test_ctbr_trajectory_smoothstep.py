@@ -257,6 +257,52 @@ def test_height_correction_tracks_target_altitude_without_waiting_for_gate():
     assert math.isclose(circle_target["acceleration"][2], 0.0, abs_tol=1e-12)
 
 
+def test_hover_landing_starts_from_measured_position_without_reference_jump():
+    trajectory = CircularFlightTrajectory(_config(trajectory_mode="hover"))
+    start = np.array([0.0, 0.0, 0.2])
+    trajectory.reset(start, start_yaw=0.0, now=0.0)
+    trajectory.phase = "hover"
+    trajectory.phase_start_time = 0.0
+    measured = np.array([0.18, -0.07, 0.73])
+    state = {"position": measured.copy(), "velocity": np.zeros(3)}
+
+    target = trajectory.evaluate(state, trajectory.config.hover_duration_s)
+
+    assert target["flight_phase"] == "landing"
+    assert np.allclose(target["position"], measured, atol=1e-12)
+    assert np.allclose(target["velocity"], 0.0, atol=1e-12)
+    assert np.allclose(target["acceleration"], 0.0, atol=1e-12)
+
+def test_slung_takeoff_has_independent_hover_before_takeup_reference():
+    """吊运模式先到独立悬停高度，再用固定 TAKEUP 时间进入最终高度。"""
+    trajectory = CircularFlightTrajectory(_config(
+        takeoff_height_m=1.65,
+        takeoff_duration_s=9.0,
+        takeoff_settle_s=9.0,
+        independent_takeoff_height_m=0.30,
+        independent_takeoff_duration_s=0.10,
+        takeup_duration_s=0.20,
+        trajectory_mode="hover",
+    ))
+    start = np.array([0.0, 0.0, 0.05])
+    trajectory.reset(start, start_yaw=0.0, now=0.0)
+    state = {"position": start.copy(), "velocity": np.zeros(3)}
+
+    trajectory.evaluate(state, trajectory.config.reference_hold_s)
+    takeoff_end = trajectory.config.reference_hold_s + 0.10 + 1e-6
+    target = trajectory.evaluate(state, takeoff_end)
+    assert target["flight_phase"] == "height_correction"
+    assert math.isclose(target["position"][2], start[2] + 0.30, abs_tol=1e-9)
+
+    target = trajectory.evaluate(state, takeoff_end + 0.10)
+    assert target["flight_phase"] == "height_correction"
+    assert start[2] + 0.30 < target["position"][2] < start[2] + 1.65
+
+    target = trajectory.evaluate(state, takeoff_end + 0.20 + 1e-6)
+    assert target["flight_phase"] == "hover"
+    assert math.isclose(target["position"][2], start[2] + 1.65, abs_tol=1e-9)
+
+
 def test_emergency_landing_starts_from_current_position_and_never_releases_thrust_high():
     trajectory = CircularFlightTrajectory(_config(airborne_min_collective_thrust=0.3))
     start = np.array([0.0, 0.0, 0.2])
@@ -279,6 +325,20 @@ def test_emergency_landing_starts_from_current_position_and_never_releases_thrus
     state["position"][2] = trajectory.landing_target_position[2]
     target = trajectory.evaluate(state, now=end_time)
     assert target["zero_output"] is True
+
+
+def test_payload_limit_landing_does_not_report_an_ekf_failure():
+    trajectory = CircularFlightTrajectory(_config())
+    trajectory.reset(np.zeros(3), start_yaw=0.0, now=0.0)
+    trajectory.pop_events()
+    trajectory.begin_emergency_landing(
+        now=1.0, position=np.array([0.0, 0.0, 0.7]), yaw=0.0,
+        reason="payload_load: 预抬参考达到边界：max_lead",
+    )
+    event = trajectory.pop_events()[0]
+    assert "max_lead" in event
+    assert "EKF" not in event
+    assert trajectory.emergency_landing_reason.endswith("max_lead")
 
 
 def test_airborne_minimum_thrust_remains_active_after_takeoff_overshoot():

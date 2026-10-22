@@ -28,21 +28,21 @@ def test_canonical_vehicle_entry_has_explicit_uri_and_ctbr_selection():
     config = yaml.safe_load(CONFIG_PATH.read_text())
     entries = config["crazyflies"]
 
-    selected = module.select_vehicle_entry(entries, cf_id=2)
+    selected = module.select_vehicle_entry(entries, cf_id=3)
 
-    assert selected["id"] == 2
-    assert selected["uri"] == "radio://0/80/2M/E7E7E7E702"
+    assert selected["id"] == 3
+    assert selected["uri"] == "radio://0/80/2M/E7E7E7E703"
     assert selected["ctbr_enabled"] is True
     assert module.vehicle_uri(selected) == selected["uri"]
 
     selected_entries = module.select_vehicle_entries(entries)
-    assert [entry["id"] for entry in selected_entries] == [2, 4, 5]
+    assert [entry["id"] for entry in selected_entries] == [3, 4, 5]
     validated = module.validate_vehicle_entries(
         entries, require_shared_radio=True, require_phase=True
     )
-    assert [entry["id"] for entry in validated] == [2, 4, 5]
+    assert [entry["id"] for entry in validated] == [3, 4, 5]
     assert [entry["uri"] for entry in validated] == [
-        "radio://0/80/2M/E7E7E7E702",
+        "radio://0/80/2M/E7E7E7E703",
         "radio://0/80/2M/E7E7E7E704",
         "radio://0/80/2M/E7E7E7E705",
     ]
@@ -71,7 +71,7 @@ def test_vehicle_selection_by_id_remains_available_in_multi_configuration():
 def test_multi_vehicle_validation_rejects_mismatched_channel():
     module = _cf_arm_module()
     entries = [
-        {"id": 2, "channel": 80, "uri": "radio://0/80/2M/E7E7E7E702",
+        {"id": 3, "channel": 80, "uri": "radio://0/80/2M/E7E7E7E703",
          "ctbr_enabled": True, "orbit_phase_rad": 0.0},
         {"id": 4, "channel": 81, "uri": "radio://0/81/2M/E7E7E7E704",
          "ctbr_enabled": True, "orbit_phase_rad": 3.14},
@@ -89,11 +89,14 @@ def test_enabled_vehicles_have_dedicated_controller_parameter_blocks():
     """An enabled CF must never inherit another CF's tuning by accident."""
     vehicles = yaml.safe_load(CONFIG_PATH.read_text())["crazyflies"]
     controller_config = yaml.safe_load(CONTROLLER_CONFIG_PATH.read_text())
+    vehicle_config = yaml.safe_load(
+        (SCRIPT_DIR.parent / "config" / "ctbr_vehicle.yaml").read_text()
+    )
 
     assert "ctbr_trajectory" in controller_config
     enabled_ids = [entry["id"] for entry in vehicles if entry["ctbr_enabled"]]
     for vehicle_id in enabled_ids:
-        block = controller_config["ctbr_controller_cf%d" % vehicle_id]
+        block = vehicle_config["ctbr_controller_cf%d" % vehicle_id]
         assert block["mass_kg"] > 0.0
         assert block["max_total_thrust_newton"] >= block["max_command_thrust_newton"]
         assert len(block["position_gain"]) == 3

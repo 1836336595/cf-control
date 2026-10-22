@@ -1,0 +1,8 @@
+# 离线仿真候选：实际轻负载23g，三根有效绳长均0.830m。
+# 默认覆盖质量和长度；其他控制器/推力模型/增益继承当前参数。
+# 关闭10秒实飞计时器以观察完整60秒；不要直接作为roslaunch实飞参数加载。
+slung_payload:
+  mass_kg: 0.023
+  link_lengths_m: [0.830, 0.830, 0.830]
+  post_handoff_s: 60.0
+  flight_validation_enabled: false

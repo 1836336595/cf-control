@@ -310,6 +310,161 @@ def load_multi_log(log_path, max_abs_position_m=10.0, vehicle_id=None):
     )
 
 
+def load_payload_plot_data(log_path, max_abs_position_m=10.0):
+    """Read load state/reference; optional attitude is returned in degrees."""
+    with open(log_path, newline="") as log_file:
+        rows = [row for row in csv.DictReader(log_file)
+                if row.get("mode") in ("control", "shadow")]
+    required = (
+        "payload_position_x", "payload_position_y", "payload_position_z",
+    )
+    if not rows or not all(name in rows[0] for name in required):
+        return None
+
+    def value(row, name):
+        try:
+            return float(row[name])
+        except (KeyError, TypeError, ValueError):
+            return float("nan")
+
+    samples = []
+    last_time = None
+    for row in rows:
+        time_value = value(row, "mission_time_s")
+        if not np.isfinite(time_value):
+            time_value = value(row, "control_time_s")
+        if not np.isfinite(time_value):
+            continue
+        # Each task tick is logged once per vehicle. Keep one load sample per
+        # timestamp so the merged log does not triple the load trajectory.
+        if last_time is not None and np.isfinite(time_value) and abs(time_value - last_time) < 0.002:
+            continue
+        last_time = time_value
+        samples.append((row, time_value))
+    if not samples:
+        return None
+
+    def matrix(prefix):
+        return np.vstack([
+            [value(row, prefix + "_x") for row, _ in samples],
+            [value(row, prefix + "_y") for row, _ in samples],
+            [value(row, prefix + "_z") for row, _ in samples],
+        ])
+
+    time_s = np.asarray([time_value for _, time_value in samples], dtype=float)
+    position = matrix("payload_position")
+    if not np.any(np.all(np.isfinite(position), axis=0)):
+        return None
+    target = matrix("payload_target")
+    rpy = np.rad2deg(np.asarray([
+        [value(row, "payload_" + axis + "_rad") for row, _ in samples]
+        for axis in ("roll", "pitch", "yaw")
+    ]))
+    desired_rpy = np.rad2deg(np.asarray([
+        [value(row, "payload_target_" + axis + "_rad") for row, _ in samples]
+        for axis in ("roll", "pitch", "yaw")
+    ]))
+    velocity = matrix("payload_raw_velocity")
+    velocity_filtered = matrix("payload_velocity")
+    acceleration = matrix("payload_raw_acceleration")
+    acceleration_filtered = matrix("payload_acceleration")
+    plausible = np.all(np.isfinite(position), axis=0) & np.all(
+        np.abs(position) <= float(max_abs_position_m), axis=0
+    )
+    if "payload_state_valid" in rows[0]:
+        state_valid = np.asarray([value(row, "payload_state_valid") for row, _ in samples])
+        plausible &= np.isfinite(state_valid) & (state_valid >= 0.5)
+    for values in (position, rpy, velocity, velocity_filtered,
+                   acceleration, acceleration_filtered):
+        values[:, ~plausible] = np.nan
+    # Keep the reference visible during measured-state gaps. Missing reference
+    # fields stay NaN rather than inventing a horizontal target for old logs.
+    target_valid = np.all(np.isfinite(target), axis=0) & np.all(
+        np.abs(target) <= float(max_abs_position_m), axis=0
+    )
+    target[:, ~target_valid] = np.nan
+    for values in (rpy, desired_rpy):
+        values[:, ~np.all(np.isfinite(values), axis=0)] = np.nan
+    return {
+        "log_path": log_path,
+        "time_s": time_s,
+        "position": position,
+        "target": target,
+        "rpy": rpy,
+        "desired_rpy": desired_rpy,
+        "velocity": velocity,
+        "velocity_filtered": velocity_filtered,
+        "acceleration": acceleration,
+        "acceleration_filtered": acceleration_filtered,
+    }
+
+
+def create_payload_figure(pyplot):
+    """Create a companion figure so load pose stays readable beside the UAVs."""
+    figure, axes = pyplot.subplots(
+        2, 3, num="Crazyflie Payload Pose", figsize=(15, 8),
+        sharex=True, constrained_layout=True,
+    )
+    measured_lines, reference_lines, availability_texts = [], [], []
+    for index, (axis, name) in enumerate(zip(axes.flat, ("X", "Y", "Z", "Roll", "Pitch", "Yaw"))):
+        measured_lines.append(axis.plot([], [], color="#8a3ffc", label="Measured")[0])
+        reference_lines.append(axis.plot([], [], "--", color="#202020", label="Reference")[0])
+        axis.set(title="Load " + name, xlabel="Time (s)",
+                 ylabel="Position (m)" if index < 3 else "Attitude (deg)")
+        axis.grid(True)
+        axis.legend(loc="best", fontsize=9)
+        availability_texts.append(axis.text(
+            0.02, 0.97, "", transform=axis.transAxes, va="top", fontsize=8,
+            color="#666666",
+        ))
+    return {
+        "figure": figure, "axes": list(axes.flat),
+        "measured_lines": measured_lines, "reference_lines": reference_lines,
+        "availability_texts": availability_texts,
+    }
+
+
+def update_payload_figure(handles, data, title_prefix):
+    """Update actual/reference load XYZ and RPY, preserving unknown data gaps."""
+    time_s = [] if data is None else data["time_s"]
+    measured = np.empty((6, 0)) if data is None else np.vstack((data["position"], data["rpy"]))
+    reference = np.empty((6, 0)) if data is None else np.vstack((data["target"], data["desired_rpy"]))
+    for axis, line, target_line, text, values, target in zip(
+            handles["axes"], handles["measured_lines"], handles["reference_lines"],
+            handles["availability_texts"], measured, reference):
+        line.set_data(time_s, values)
+        target_line.set_data(time_s, target)
+        unavailable = []
+        if not np.any(np.isfinite(values)):
+            unavailable.append("Measured unavailable")
+        if not np.any(np.isfinite(target)):
+            unavailable.append("Reference unavailable")
+        text.set_text("\n".join(unavailable))
+        axis.relim()
+        axis.autoscale_view()
+    source = "" if data is None else ": " + os.path.basename(data["log_path"])
+    handles["figure"].suptitle("%s - Payload Pose%s" % (title_prefix, source), fontsize=14)
+    # FuncAnimation belongs to the UAV figure. The companion needs its own
+    # redraw request when the shared timer refreshes both figures.
+    handles["figure"].canvas.draw_idle()
+    return handles["measured_lines"] + handles["reference_lines"]
+
+
+def save_plot_figures(handles, payload_handles, output_path):
+    """Save the vehicle figure and an adjacent *_payload image when present."""
+    output_path = os.path.abspath(output_path)
+    stem, extension = os.path.splitext(output_path)
+    if not extension:
+        extension = "." + handles["figure"].canvas.get_default_filetype()
+        output_path += extension
+    handles["figure"].savefig(output_path, dpi=150)
+    print("已保存图像：%s" % output_path)
+    if payload_handles is not None:
+        payload_path = stem + "_payload" + extension
+        payload_handles["figure"].savefig(payload_path, dpi=150)
+        print("已保存负载位姿图像：%s" % payload_path)
+
+
 def create_figure(pyplot, vehicle_ids=None):
     """创建固定布局；左侧 3D 轨迹图纵向占满并放大显示。"""
     if vehicle_ids is not None:
@@ -337,6 +492,12 @@ def create_figure(pyplot, vehicle_ids=None):
     )
     target_line, = trajectory_axes.plot(
         [], [], [], "--", color="#e05a33", label="Reference path"
+    )
+    payload_line, = trajectory_axes.plot(
+        [], [], [], color="#8a3ffc", linewidth=1.8, label="Load measured"
+    )
+    payload_target_line, = trajectory_axes.plot(
+        [], [], [], ":", color="#8a3ffc", linewidth=1.4, label="Load reference"
     )
     start_marker = trajectory_axes.scatter(
         [np.nan], [np.nan], [np.nan], color="#0067b1", label="Start"
@@ -443,6 +604,8 @@ def create_figure(pyplot, vehicle_ids=None):
         "trajectory_axes": trajectory_axes,
         "measured_line": measured_line,
         "target_line": target_line,
+        "payload_line": payload_line,
+        "payload_target_line": payload_target_line,
         "start_marker": start_marker,
         "final_marker": final_marker,
         "error_axes": error_axes,
@@ -477,6 +640,12 @@ def create_multi_figure(pyplot, vehicle_ids):
     trajectory_axes = figure.add_subplot(grid[:, 0], projection="3d")
     trajectory_axes.set(xlabel="World X (m)", ylabel="World Y (m)", zlabel="World Z (m)",
                         title="3D Position")
+    payload_measured, = trajectory_axes.plot(
+        [], [], [], color="#8a3ffc", linewidth=1.8, label="load measured"
+    )
+    payload_target, = trajectory_axes.plot(
+        [], [], [], ":", color="#8a3ffc", linewidth=1.4, label="load reference"
+    )
     error_axes = figure.add_subplot(grid[0, 1])
     error_axes.set(xlabel="Time (s)", ylabel="Position error (m)", title="Position Error")
     attitude_axes = figure.add_subplot(grid[1, 1])
@@ -494,6 +663,8 @@ def create_multi_figure(pyplot, vehicle_ids):
     handles = {
         "figure": figure,
         "trajectory_axes": trajectory_axes,
+        "payload_measured": payload_measured,
+        "payload_target": payload_target,
         "error_axes": error_axes,
         "attitude_axes": attitude_axes,
         "attitude_error_axes": attitude_error_axes,
@@ -585,7 +756,7 @@ def _update_3d_limits(axes, position, target):
     axes.set_zlim(minimum[2] - padding[2], maximum[2] + padding[2])
 
 
-def update_figure(handles, data, title_prefix):
+def update_figure(handles, data, title_prefix, load_data=None):
     time_s = data["time_s"]
     position = data["position"]
     target = data["target"]
@@ -594,13 +765,28 @@ def update_figure(handles, data, title_prefix):
     handles["measured_line"].set_3d_properties(position[2])
     handles["target_line"].set_data(target[0], target[1])
     handles["target_line"].set_3d_properties(target[2])
+    if load_data is None:
+        handles["payload_line"].set_data([], [])
+        handles["payload_line"].set_3d_properties([])
+        handles["payload_target_line"].set_data([], [])
+        handles["payload_target_line"].set_3d_properties([])
+    else:
+        payload = load_data["position"]
+        payload_target = load_data["target"]
+        handles["payload_line"].set_data(payload[0], payload[1])
+        handles["payload_line"].set_3d_properties(payload[2])
+        handles["payload_target_line"].set_data(payload_target[0], payload_target[1])
+        handles["payload_target_line"].set_3d_properties(payload_target[2])
     valid_position = np.flatnonzero(data["sample_is_plausible"])
     start_point = position[:, valid_position[0]] if valid_position.size else None
     valid_target = np.flatnonzero(np.all(np.isfinite(target), axis=0))
     final_point = target[:, valid_target[-1]] if valid_target.size else None
     _set_3d_marker(handles["start_marker"], start_point)
     _set_3d_marker(handles["final_marker"], final_point)
-    _update_3d_limits(handles["trajectory_axes"], position, target)
+    limit_sets = [position, target]
+    if load_data is not None:
+        limit_sets.extend((load_data["position"], load_data["target"]))
+    _update_3d_limits(handles["trajectory_axes"], np.hstack(limit_sets), np.empty((3, 0)))
 
     for line, values in zip(handles["error_lines"], data["position_error"]):
         line.set_data(time_s, values)
@@ -636,7 +822,8 @@ def update_figure(handles, data, title_prefix):
 
     artists = [
         handles["measured_line"], handles["target_line"], handles["start_marker"],
-        handles["final_marker"], handles["thrust_line"],
+        handles["final_marker"], handles["payload_line"], handles["payload_target_line"],
+        handles["thrust_line"],
     ]
     artists.extend(handles["error_lines"])
     artists.extend(handles["attitude_lines"])
@@ -649,7 +836,7 @@ def update_figure(handles, data, title_prefix):
     return artists
 
 
-def update_multi_figure(handles, data_by_vehicle, title_prefix):
+def update_multi_figure(handles, data_by_vehicle, title_prefix, load_data=None):
     """Update a multi-vehicle figure from ``vehicle_id -> plot data``."""
     all_positions = []
     all_targets = []
@@ -701,11 +888,25 @@ def update_multi_figure(handles, data_by_vehicle, title_prefix):
             + group["acceleration_filtered"] + group["command"] + [group["thrust"]]
         )
     if all_positions or all_targets:
+        combined_positions = list(all_positions) + ([] if load_data is None else [load_data["position"]])
+        combined_targets = list(all_targets) + ([] if load_data is None else [load_data["target"]])
         _update_3d_limits(
             handles["trajectory_axes"],
-            np.hstack(all_positions) if all_positions else np.empty((3, 0)),
-            np.hstack(all_targets) if all_targets else np.empty((3, 0)),
+            np.hstack(combined_positions) if combined_positions else np.empty((3, 0)),
+            np.hstack(combined_targets) if combined_targets else np.empty((3, 0)),
         )
+    if load_data is None:
+        handles["payload_measured"].set_data([], [])
+        handles["payload_measured"].set_3d_properties([])
+        handles["payload_target"].set_data([], [])
+        handles["payload_target"].set_3d_properties([])
+    else:
+        payload = load_data["position"]
+        payload_target = load_data["target"]
+        handles["payload_measured"].set_data(payload[0], payload[1])
+        handles["payload_measured"].set_3d_properties(payload[2])
+        handles["payload_target"].set_data(payload_target[0], payload_target[1])
+        handles["payload_target"].set_3d_properties(payload_target[2])
     for axes in (handles["error_axes"], handles["attitude_axes"], handles["command_axes"],
                  handles["thrust_axes"], handles["attitude_error_axes"],
                  handles["velocity_axes"], handles["acceleration_axes"]):
@@ -715,6 +916,7 @@ def update_multi_figure(handles, data_by_vehicle, title_prefix):
     handles["figure"].suptitle(
         "%s: %s" % (title_prefix, ", ".join(labels)), fontsize=14
     )
+    artists.extend([handles["payload_measured"], handles["payload_target"]])
     return artists
 
 
@@ -722,21 +924,26 @@ def plot(log_path, output_path, show, max_abs_position_m, vehicle_id=None):
     """一次性绘制完整 CSV。"""
     pyplot = require_matplotlib()
     grouped = load_multi_plot_data(log_path, max_abs_position_m, vehicle_id=vehicle_id)
+    load_data = load_payload_plot_data(log_path, max_abs_position_m)
     if len(grouped) == 1:
         data = next(iter(grouped.values()))
         handles = create_figure(pyplot)
-        update_figure(handles, data, "CTBR Flight Log")
+        update_figure(handles, data, "CTBR Flight Log", load_data=load_data)
     else:
         handles = create_multi_figure(pyplot, list(grouped))
-        update_multi_figure(handles, grouped, "CTBR Flight Log")
+        update_multi_figure(handles, grouped, "CTBR Flight Log", load_data=load_data)
+    payload_handles = None
+    if load_data is not None:
+        payload_handles = create_payload_figure(pyplot)
+        update_payload_figure(payload_handles, load_data, "CTBR Flight Log")
     if output_path:
-        output_path = os.path.abspath(output_path)
-        handles["figure"].savefig(output_path, dpi=150)
-        print("已保存图像：%s" % output_path)
+        save_plot_figures(handles, payload_handles, output_path)
     if show:
         pyplot.show()
     else:
         pyplot.close(handles["figure"])
+        if payload_handles is not None:
+            pyplot.close(payload_handles["figure"])
 
 
 def realtime_plot(log_path, output_path, interval_s, max_abs_position_m, log_directory,
@@ -753,6 +960,7 @@ def realtime_plot(log_path, output_path, interval_s, max_abs_position_m, log_dir
             grouped = load_multi_plot_data(
                 active_log_path, max_abs_position_m, vehicle_id=vehicle_id
             )
+            load_data = load_payload_plot_data(active_log_path, max_abs_position_m)
             merged_log = (
                 vehicle_id is None and
                 os.path.basename(active_log_path).startswith("multi_ctbr_")
@@ -769,28 +977,44 @@ def realtime_plot(log_path, output_path, interval_s, max_abs_position_m, log_dir
     multi = len(grouped) > 1 or merged_log
     if multi:
         handles = create_multi_figure(pyplot, list(grouped))
-        update_multi_figure(handles, grouped, "CTBR Realtime")
+        update_multi_figure(handles, grouped, "CTBR Realtime", load_data=load_data)
     else:
         handles = create_figure(pyplot)
-        update_figure(handles, next(iter(grouped.values())), "CTBR Realtime")
+        update_figure(handles, next(iter(grouped.values())), "CTBR Realtime", load_data=load_data)
+    payload_handles = None
+    if load_data is not None:
+        payload_handles = create_payload_figure(pyplot)
+        update_payload_figure(payload_handles, load_data, "CTBR Realtime")
 
     from matplotlib.animation import FuncAnimation
 
     def refresh(_frame):
+        nonlocal payload_handles
         try:
             # 未指定路径时跟踪最新文件，确保本次 launch 创建的日志会被接管。
             active_log_path = requested_log_path or latest_ctbr_log(log_directory)
             latest_grouped = load_multi_plot_data(
                 active_log_path, max_abs_position_m, vehicle_id=vehicle_id
             )
+            latest_load_data = load_payload_plot_data(active_log_path, max_abs_position_m)
         except (OSError, ValueError, SystemExit):
             # 控制器刚创建文件或正在写入表头时，保留上一帧等待下一次刷新。
             return []
         if multi:
-            return update_multi_figure(handles, latest_grouped, "CTBR Realtime")
-        return update_figure(
-            handles, next(iter(latest_grouped.values())), "CTBR Realtime"
-        )
+            artists = update_multi_figure(
+                handles, latest_grouped, "CTBR Realtime", load_data=latest_load_data
+            )
+        else:
+            artists = update_figure(
+                handles, next(iter(latest_grouped.values())), "CTBR Realtime",
+                load_data=latest_load_data,
+            )
+        # Payload telemetry may arrive after the UAVs have started logging.
+        if latest_load_data is not None and payload_handles is None:
+            payload_handles = create_payload_figure(pyplot)
+        if payload_handles is not None:
+            update_payload_figure(payload_handles, latest_load_data, "CTBR Realtime")
+        return artists
 
     animation = FuncAnimation(
         handles["figure"],
@@ -804,9 +1028,7 @@ def realtime_plot(log_path, output_path, interval_s, max_abs_position_m, log_dir
     print("实时绘图：跟踪最新 CTBR CSV（每 %.2f s 刷新）" % interval_s)
     pyplot.show()
     if output_path:
-        output_path = os.path.abspath(output_path)
-        handles["figure"].savefig(output_path, dpi=150)
-        print("已保存图像：%s" % output_path)
+        save_plot_figures(handles, payload_handles, output_path)
 
 
 def main():
@@ -814,7 +1036,7 @@ def main():
         description="实时绘制最新 CTBR CSV；使用 --static 进行一次性绘图"
     )
     parser.add_argument("log", nargs="?", help="CSV 路径；默认读取最新 CTBR CSV")
-    parser.add_argument("--output", help="保存 PNG、PDF 或其他 matplotlib 支持的格式")
+    parser.add_argument("--output", help="保存图像；有负载数据时另存同名 _payload 位姿图")
     parser.add_argument("--static", action="store_true", help="只绘制一次，不实时刷新")
     parser.add_argument("--no-show", action="store_true", help="保存静态图像但不打开窗口")
     parser.add_argument(

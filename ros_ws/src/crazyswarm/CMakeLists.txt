@@ -82,6 +82,7 @@ add_message_files(
   GenericLogData.msg
   MocapState.msg
   CTBR.msg
+  CTBRTiming.msg
   FullState.msg
   VelocityWorld.msg
   TrajectoryPolynomialPiece.msg
@@ -209,6 +210,11 @@ target_link_libraries(mocap_helper
 ## in contrast to setup.py, you can choose the destination
 install(PROGRAMS
   scripts/ctbr_controller.py
+  scripts/native_position_pid.py
+  scripts/slung_load_controller.py
+  scripts/slung_reference.py
+  scripts/slung_attitude_trim.py
+  scripts/slung_transport_integral.py
   scripts/ctbr_trajectory.py
   scripts/ctbr_visualization.py
   scripts/cf_arm.py
@@ -245,10 +251,13 @@ install(PROGRAMS
 install(FILES
   launch/ctbr_controller.launch
   launch/crazyflies.yaml
+  launch/hover_swarm.launch
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/launch
 )
 install(FILES
   config/ctbr_controller.yaml
+  config/ctbr_vehicle.yaml
+  config/slung_payload.yaml
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/config
 )
 

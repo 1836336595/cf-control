@@ -4,6 +4,7 @@
 
   <rosparam command="load" file="$(find crazyswarm)/launch/crazyflieTypes.yaml" />
   <rosparam command="load" file="$(find crazyswarm)/launch/crazyflies.yaml" />
+  <rosparam command="load" file="$(find crazyswarm)/config/slung_payload.yaml" />
 
   <!--
     无刷 Crazyflie 2.1 (CF21BL) 起飞前必须先 ARM，而 crazyswarm_server 本身
@@ -15,17 +16,16 @@
   <node pkg="crazyswarm" type="crazyswarm_server" name="crazyswarm_server" output="screen"
         launch-prefix="$(find crazyswarm)/scripts/cf_arm_wrapper.sh" >
     <rosparam>
-      # 服务端参数名虽然叫 frequency，实际值是日志周期 ms：25=40 Hz，100=10 Hz，
-      # 0=只采样一次。单 Crazyradio 三机 CTBR 时将 EKF 日志限定为 40 Hz，
-      # 为外部定位广播和 CTBR 指令留出链路预算；位置/速度六浮点数仍在同一 block。
-      # 计算方法 25 / 10 = 2 ， 2 × 10 ms = 20 ms 实际频率 = 50 Hz
+      # 此处值为日志周期 ms，服务端按整数 /10 转为固件的 10 ms 单位。
+      # EKF 20 ms=50 Hz（与原 25 被整数截断后的周期一致）；电池 500 ms=2 Hz。
+      # 电池重复低频发送，避免一次性日志丢包后预检永远收不到样本。
       genericLogTopics: ["ekf_kinematics", "battery"]
-      genericLogTopicFrequencies: [25, 0]
+      genericLogTopicFrequencies: [20, 500]
       genericLogTopic_ekf_kinematics_Variables:
         ["stateEstimate.x", "stateEstimate.y", "stateEstimate.z",
          "stateEstimate.vx", "stateEstimate.vy", "stateEstimate.vz"]
-      # 电池只用于启动前电压预检；服务端对 GenericLogData 使用 latch，避免一次性消息
-      # 在 ctbr_controller 订阅前发出后丢失。
+      # 电池仍只参与启动前的缩放标定，飞行中缩放值冻结。
+      # latch 保留已收到的最新消息；持续采样负责补偿机载日志或无线电丢包。
       genericLogTopic_battery_Variables: ["pm.vbat", "pm.vbatMV", "pm.state", "pm.batteryLevel"]
       # firmware parameters for all drones (use crazyflieTypes.yaml to set per type, or
       # allCrazyflies.yaml to set per drone)
@@ -91,6 +91,9 @@
       enable_logging: False
       enable_generic_logging: True
       enable_logging_pose: False
+      # 负载 NOKOV 刚体原点在上表面中心；仅由服务端发布状态，不参与外部位置广播。
+      payload_rigid_body: "load"
+      payload_mocap_topic: "/load/mocap_state"
     </rosparam>
   </node>
 
