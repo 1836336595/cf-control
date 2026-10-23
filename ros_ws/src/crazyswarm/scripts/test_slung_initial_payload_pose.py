@@ -20,7 +20,7 @@ def test_initial_payload_rpy_defaults_to_level():
                                       [0., np.nan, 0.], [0., np.inf, 0.], "bad"])
 def test_initial_payload_rpy_rejects_invalid_attitudes(rpy):
     with pytest.raises(ValueError, match="initial_payload_rpy_deg"):
-        replay.resolve_simulation_settings({"simulation": {"initial_payload_rpy_deg": rpy}})
+        replay.resolve_simulation_settings({"initial_payload_rpy_deg": rpy})
 
 
 @pytest.mark.parametrize("custom_anchors", [False, True])
@@ -39,7 +39,7 @@ if sys.argv[2] == 'True':
     simulation['initial_vehicle_positions_m'] = [[.4, 0., .78], [-.2, .3, .8], [-.2, -.3, .79]]
 summary = replay.run_simulation(directory, {'slung_payload': {
     'flight_validation_enabled': False, 'link_calibration_enabled': False,
-    'mass_kg': .023, 'link_lengths_m': [.85, .85, .85], 'simulation': simulation}},
+    'mass_kg': .023, 'link_lengths_m': [.85, .85, .85]}, 'slung_simulation': simulation},
     time_limit_s=.05)
 '''
     environment = dict(os.environ, OPENBLAS_NUM_THREADS="1", OMP_NUM_THREADS="1", MKL_NUM_THREADS="1")

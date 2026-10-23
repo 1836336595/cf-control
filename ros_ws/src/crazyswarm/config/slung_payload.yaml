@@ -10,13 +10,30 @@ slung_payload:
   # 负载几何中心的绝对目标高度，m。预抬阶段先满足 prelift_clearance_m，
   # 接管后的 reference_lift 使用此目标，不再沿用普通轨迹的 1.0 m。
   target_payload_height_m: 0.60
-  # 离线实机控制器回放在接管后继续观察的时间；不改变真实控制器时钟。
-  post_handoff_s: 60.0
-  # 实飞验证：进入 TAUT_RAMP 后计时，前 17 s 完成参考运动，余下约 43 s 观察差分补偿。
-  # 到时从当前实测位置受控降落；不是起飞后第 60 s，也不是到达 0.60 m 后再等 60 s。
+  # 吊运轨迹由负载参考统一驱动；ctbr_controller.yaml 的普通飞机轨迹保持 hover。
+  trajectory:
+    mode: hover           # hover / circle / figure_eight / attitude_cone
+    radius_m: 0.50
+    center_xy: [0.0, 0.0]        # 圆锥模式为固定质心 XY；八字模式为交点。
+    # circle 模式时本项表示单圆圆心；注释掉本项则恢复单圆的自动圆心。
+    # 不填写 null；省略 center_xy 时，八字交点为原悬停目标 XY。
+    speed_mps: 0.10              # 仅单圆/八字使用，最高线速度，m/s。
+    direction: ccw               # 圆锥倾斜方向从上向下看逆时针；八字右圆 ccw、左圆 cw。
+    revolutions: 2.0             # 圆锥圈数，正整数；每增加一圈，扫描增加 cone_period_s（当前 30 s）。
+    ramp_s: 5.0                  # 平面轨迹起停与中途姿态制动时间；圆锥进出用 cone_transition_s。
+    settle_s: 3.0                # 抬升/姿态参考完成后额外保持时间，不代表实测姿态已收敛。
+    cone_half_angle_deg: 15.0    # 自身 +Z 与世界 +Z 的固定夹角；仅 attitude_cone 使用。
+    cone_period_s: 30.0          # 每圈各自平滑起停，当前两圈共 60 s；保持质心不动。
+    cone_transition_s: 5.0       # 扫描前倾斜、扫描后回水平的时间，各自 5 s。
+  # circle：负载自身 +X 指向圆心；figure_eight：+X 沿运行切线。roll/pitch 参考保持 0。
+  # 圆锥模式：h20–25 倾斜，h25–55 第一圈，h55–85 第二圈，h85–90 回水平，h100 降落。
+  # 若增加到 3 圈或更多，须同时延长 flight_validation_transport_s、普通 hover_duration_s
+  # 和独立仿真文件的 post_handoff_s；窗口不够时启动检查会拒绝，避免扫描中途计划降落。
+  # 实飞验证：进入 TAUT_RAMP 后计时，当前任务总窗口 100 s。
+  # 到时从当前实测位置受控降落；不是起飞后第 100 s，也不是到达 0.60 m 后再等 100 s。
   # 先协同放下负载，确认负载落地稳定后，再保持三机 XY 分别下降并停推。
   flight_validation_enabled: true
-  flight_validation_transport_s: 60.0
+  flight_validation_transport_s: 100.0
   # 独立的负载下降限幅；时间按实际下降距离自适应，不再取 4 s × 0.55。
   landing_payload_max_speed_mps: 0.12
   landing_payload_max_acceleration_mps2: 0.15
@@ -34,52 +51,10 @@ slung_payload:
   landing_touchdown_window_s: 0.40
   landing_touchdown_height_span_m: 0.012
   landing_touchdown_timeout_s: 4.0 # 下降参考完成后的确认期限；超时不是确认接地。
-  # Udaan 执行器模型选择。实飞仍由 hover_swarm.launch 的 stabilizer.controller 控制。
-  simulation:
-    onboard_controller: mellinger # pid/mellinger
-    # Graefe 2026：混控后四个电机各自维护转速，随后计算推力和反扭矩。
-    # legacy_quadratic 保留旧平方推力曲线和 12 ms 推力滞后作对照。
-    motor_model: graefe2026
-    brushless_motor_time_constant_s: 0.05
-    brushless_motor_speed_gain_radps: 2900.0
-    brushless_speed_normalization_radps: 2900.0
-    brushless_rotor_inertia_kgm2: 5.0e-8
-    brushless_thrust_coefficients: [-0.23009526, 0.56176458, -0.0433191]
-    brushless_torque_coefficients: [-0.0003396, 0.00087032, 0.0002896]
-    vehicle_inertia: [3.3e-5, 3.6e-5, 5.9e-5] # 论文带保护圈惯量；质量仍取各机实测值。
-    arm_length: 0.04999244943 # 论文电机中心方形宽度 0.0707 m / sqrt(2)。
-    # 与当前 C++ 桥接一致：1.176798 N 对应 raw=60000；这是映射参数。
-    bridge_collective_pwm_reference: 60000.0
-    bridge_collective_pwm_limit: 60000.0
-    bridge_thrust_curve_exponent: 2.0
-    bridge_thrust_raw_scale: [1.0, 1.0, 1.0] # 可填写该次实飞冻结的 preflight scale。
-    motor_pwm_max: 65535.0 # 混控后单电机归一化范围，与 collective 上限不同。
-    motor_available_command_fraction: [1.0, 1.0, 1.0] # 作者式可用指令上限；不是电压标定曲线。
-    # sampled_filtered：50 Hz 位置/速度包进入实飞 _ekf_state_callback，
-    # 由 ctbr_controller.yaml 的 5 Hz 滤波器产生控制速度/加速度。
-    # delayed_truth：旧理想反馈，仅用于对照；两者都未模拟完整机载 EKF。
-    ekf_feedback_mode: sampled_filtered
-    ekf_sample_rate_hz: 50.0
-    ekf_delay_s: 0.02
-    pose_sample_rate_hz: 100.0
-    pose_delay_s: 0.01
-    command_delay_s: 0.005
-    time_limit_s: 180.0
-    # 空列表按固定 70 Hz 运行；非空列表按秒重复这些控制周期，位姿/EKF 时钟独立。
-    control_intervals_s: []
-    mellinger_rate_hz: 500.0
-    # 机载 Mellinger 增益单位为 PWM/rad，与主机 transport_* 增益不同；
-    # 用固件 ctrlMel 源码值核对模型，不能用主机增益替代。
-    mellinger_attitude_gains: [70000.0, 70000.0, 60000.0]
-    mellinger_rate_gains: [20000.0, 20000.0, 12000.0]
-    mellinger_rate_derivative_gain: 200.0
-    mellinger_yaw_integral_gain: 500.0
-    mellinger_yaw_integral_limit: 1500.0
-    payload_rotational_damping: 0.001
   density_kg_m3: 0.0                # 0 表示使用 mass_kg，不按密度派生质量。
   # 依据 2026-10-01 CSV 的早期稳定运输段拟合，顺序为 [CF3, CF4, CF5]，m。
   # CSV 未记录负载姿态，因此这是几何拟合值；重新测量绳长时应优先采用实测值。
-  link_lengths_m: [0.850, 0.850, 0.850] # [0.699, 0.699, 0.674] / [0.830, 0.830, 0.830]
+  link_lengths_m: [0.857, 0.860, 0.854] # [0.699, 0.699, 0.674] / [0.830, 0.830, 0.830]
   # 名义长度保留；TAKEUP 完成后的稳定几何窗口可校准一次运行有效值。
   # 只增加、不缩短，避免把松绳距离当成真实绳长；不回写本文件。
   link_calibration_enabled: true
@@ -106,10 +81,14 @@ slung_payload:
   observer_acceleration_gain: 0.02   # 加速度残差修正比例，gamma。
   observer_attitude_gain: 0.35       # SO(3) 姿态残差修正比例。
   observer_angular_rate_gain: 0.30   # 与稳定 Udaan 仿真一致，角速度残差修正比例。
-  observer_max_dt: 0.05              # 样本间隔超过此值时重置观测器，s。
+  observer_max_dt: 0.05              # 源时间戳确有采样间断时重新预热；连续坏帧不会自动重置。
+  observer_min_dt_s: 0.005           # 过短间隔先累积，不用极小 dt 计算导数。
+  observer_nominal_dt_s: 0.010       # 原观测增益对应 100 Hz；短间隔按真实 dt 缩放修正。
+  observer_position_innovation_margin_m: 0.020 # 位置创新额外裕量，另计物理运动界限。
+  observer_attitude_innovation_margin_deg: 5.0 # 姿态创新额外裕量，另计角速度允许步长。
   observer_max_velocity_mps: [1.0, 1.0, 1.0]
   observer_max_acceleration_mps2: [8.0, 8.0, 8.0]
-  observer_max_body_rate_rps: [8.0, 8.0, 8.0]
+  observer_max_body_rate_rps: [8.0, 8.0, 8.0] # 候选导数触界时拒绝整帧，不再把限幅值送入姿态 PD。
   observer_min_samples: 3             # 至少收到这些个位姿样本后才允许接管。
   independent_hover_height_m: 0.50 # 实机先在更接近收绳高度处独立悬停，m。
   independent_takeoff_duration_s: 5.0 # 独立起飞到上述高度的时间，s；延长以降低上升速度。
@@ -162,7 +141,14 @@ slung_payload:
   # 两种 reference_cascade 飞机反馈共用：负载姿态误差缓慢修正三机三维参考。
   # 期望姿态仍保持当前水平/零航向；本项不把姿态目标改成补偿角。
   transport_attitude_trim_enabled: true
-  transport_attitude_trim_gain_per_s: [0.0, 0.10, 0.01] # 当前先只验证 pitch，roll/yaw 保持原姿态环。
+  # false：原静态调平，运动时冻结；true：按瞬时期望姿态持续更新有界的世界系构型补偿。
+  transport_attitude_trim_dynamic_enabled: true # 当前启用动态；省略时兼容静态模式，原增益/预算不变。
+  # 仅动态补偿：张力渐增完成且协同混合=1后，边抬升/调平边更新，当前最早h5；false恢复h17。
+  transport_attitude_trim_during_lift_enabled: true
+  transport_attitude_trim_feedback_max_rate_rps: 0.50 # 仅暂停补偿更新，不改负载姿态环的角速度反馈。
+  transport_attitude_trim_feedback_pose_jump_deg: 1.0 # 相邻源位姿额外允许步长，另加 max_rate * 源时间间隔。
+  transport_attitude_trim_feedback_recovery_s: 0.50 # 异常之后连续恢复所需时间。
+  transport_attitude_trim_gain_per_s: [0.05, 0.10, 0.01] # 三轴慢补偿；动态开关为 false 时保留原冻结策略。
   transport_attitude_trim_limit_m: 0.010 # 最大任一飞机参考偏置的三维范数，m。
   transport_attitude_trim_rate_limit_mps: 0.0015
   transport_attitude_trim_acceleration_limit_mps2: 0.002

@@ -2,6 +2,9 @@
 
 本文说明原始几何控制推导如何对应到当前 Crazyflie/NOKOV/CTBR 实现，以及为了完成实际起飞、接管、运输和降落增加了哪些控制与调度逻辑。当前实现以 2026-10-19 正式接入运输差分保持力积分后的配置和源码为准；第 10 节保留 2026-10-18 无运输积分基线及其离线试验作为历史证据。
 
+2026-10-22 已将主机公式按独立飞行、负载、吊运单机拆分，ROS 入口只保留启动和兼容导出。
+历史公式与下面各对照仍保留，新的代码位置及独立仿真参数入口见 [模块说明](ctbr_controller_modules.md)。
+
 当前运行配置选择 **`reference_cascade`**：保留载荷位置 PID、载荷姿态几何 PD 和载荷六维力/力矩分配，采用一致的载荷姿态/绳向几何参考、各机位置保持 PD、零和差分保持力积分，以及接管竖直残差补偿。飞机普通位置积分在协同阶段仍冻结。2026-10-20 新增可选的 `native_position_pid`，使用同一单机位置 PID 公式和运输专用积分状态替换保持反馈，详见第14节。源码同时保留 `coupled` 分支用于对照，该分支不注入新增差分积分。两个分支都属于基于原始几何框架的工程实现；当前程序没有完整实现原笔记中的多通道自适应扰动估计，也没有在主机输出原笔记的 UAV 姿态力矩控制律。
 
 本文的原始对照材料为本地文件 `/home/csy/my_project/几何控制协同搬运/几何控制协同搬运.md`，共 932 行，题为《Geometric Control of Quadrotor UAVs Transporting a Cable-Suspended Rigid Body》，标注 Taeyoung Lee、TCST 2018。该笔记位于 `crazyswarm` Git 仓库外，因此这里直接给出所需公式，并用笔记章节名定位，不依赖 GitHub 上不可用的上级目录链接。下文“原笔记”专指这份本地推导；其公式、后续工程修改与原论文的完整证明应分别核对。
@@ -9,7 +12,10 @@
 主要实现入口：
 
 - [slung_load_controller.py](../ros_ws/src/crazyswarm/scripts/slung_load_controller.py)：载荷外环、分配、绳向状态及每机三维力。
-- [ctbr_controller.py](../ros_ws/src/crazyswarm/scripts/ctbr_controller.py)：状态来源、全机调度、参考、位置保持、力到 CTBR、预检与日志。
+- [ctbr_controller.py](../ros_ws/src/crazyswarm/scripts/ctbr_controller.py)：启动入口；实际状态接收、全机调度、参考和日志见 `ctbr_vehicle_*` / `ctbr_payload_*` / `ctbr_fleet_node.py`。
+- [ctbr_independent_controller.py](../ros_ws/src/crazyswarm/scripts/ctbr_independent_controller.py)：单机独立起飞/预抬及放载后降落反馈。
+- [ctbr_transport_vehicle_controller.py](../ros_ws/src/crazyswarm/scripts/ctbr_transport_vehicle_controller.py)：吊运时每机位置反馈、接管混合和姿态命令。
+- [ctbr_geometric_controller.py](../ros_ws/src/crazyswarm/scripts/ctbr_geometric_controller.py)：共同控制计算组合、力到 CTBR 及原公开 API。
 - [slung_transport_integral.py](../ros_ws/src/crazyswarm/scripts/slung_transport_integral.py)：三机世界系差分保持力积分，共同缩放保持零和及每机向量范数约束。
 - [slung_reference.py](../ros_ws/src/crazyswarm/scripts/slung_reference.py)：$SO(3)$ 姿态与 $S^2$ 绳向参考及解析导数。
 - [slung_payload.yaml](../ros_ws/src/crazyswarm/config/slung_payload.yaml)、[ctbr_vehicle.yaml](../ros_ws/src/crazyswarm/config/ctbr_vehicle.yaml)、[ctbr_controller.yaml](../ros_ws/src/crazyswarm/config/ctbr_controller.yaml)：负载、各机与全局配置。
@@ -430,7 +436,11 @@ $$
 \hat a^+=\hat a+\gamma r/\Delta t^2.
 $$
 
-当前 $\alpha=0.35,\beta=0.20,\gamma=0.02$；姿态修正增益 $0.35$、body-rate 修正增益 $0.30$。观测器至少需要 3 个独立样本，间隔超过 $0.05$ s 重置，并对速度、加速度和角速度限幅。这是状态导数观测器，不是原笔记的外部扰动力自适应估计器。
+当前 $\alpha=0.35,\beta=0.20,\gamma=0.02$；姿态修正增益 $0.35$、body-rate 修正增益 $0.30$。
+上式对应名义 100 Hz；短接受间隔按时间比例缩放增益，少于 5 ms 先累积时间。
+观测器至少需要 3 个接受样本，真实源间断超过 $0.05$ s 重新预热；重复/倒序时间、异常创新和
+候选导数触界会拒绝整帧，保留可信历史，而不是把限幅值送入核心控制。
+详见 [负载观测与诊断](slung_payload_observer.md)。这是状态导数观测器，不是原笔记的外部扰动力自适应估计器。
 
 起飞前要求 EKF/NOKOV 位置差小于 $0.05$ m 连续 1 s，并要求滤波导数就绪。飞行中位置差阈值为 $0.30$ m，新鲜 EKF 数据年龄上限 $0.15$ s，可短时保持最后有效运动学 $0.10$ s，持续失效 $0.35$ s 后转受控降落。飞行中不通过重置 EKF 来掩盖失效。
 
@@ -589,7 +599,7 @@ CSV 记录飞机/负载实测状态、EKF 健康、原始与滤波导数、参�
 
 ### 9.3 仿真通过真实控制接口复现
 
-[simulate_slung_handoff.py](../ros_ws/src/crazyswarm/scripts/simulate_slung_handoff.py) 使用实际 Python 控制器和调度路径；[slung_simulated_telemetry.py](../ros_ws/src/crazyswarm/scripts/slung_simulated_telemetry.py) 管理采样、延迟与滤波输入。当前配置提供 Mellinger/其他机载模型、Graefe 2026 电机动态、逐电机转速到推力/反扭矩、机体惯量、混控饱和、绳索和地面接触等环节。
+[simulate_slung_handoff.py](../ros_ws/src/crazyswarm/scripts/simulate_slung_handoff.py) 使用实际 Python 控制器和调度路径；[slung_simulated_telemetry.py](../ros_ws/src/crazyswarm/scripts/slung_simulated_telemetry.py) 管理采样、延迟与滤波输入。仿真机载环固定为 Mellinger，保留 Graefe 2026 电机动态、逐电机转速到推力/反扭矩、机体惯量、混控饱和、绳索和地面接触等环节。
 
 当前默认离线参数包括 70 Hz 主机 tick、100 Hz 位姿/10 ms 延迟、50 Hz EKF 包/20 ms 延迟、5 ms 命令延迟。`sampled_filtered` 让样本进入实机 `_ekf_state_callback` 的过滤路径；它不是完整固件 EKF 内部状态的仿真。固定周期、实测周期序列、姿态噪声、物理负载转动阻尼、绳长与电机效率都可以作为独立变量对照。
 
@@ -761,8 +771,8 @@ $$
 `independent_integral_limit` 乘 `3.3333333333333335`，不是直接把上限设为这个数字。
 缺省可选 independent 参数仍按单机代码回退到公共参数。
 
-$w_v$ 为 `transport_position_pid_integral_velocity_weight`，当前YAML设为0.0，
-因此运输I只累计 $0.5e_i$；设1.0恢复原公式。省略参数时回退1.0以兼容历史配置，
+$w_v$ 为 `transport_position_pid_integral_velocity_weight`，当前YAML设为1.0，
+保持原公式；设0.0时运输I只累计 $0.5e_i$。省略参数时回退1.0以兼容历史配置，
 允许非负有限标量，拒绝布尔值、负数及非有限值。该权重不缩放PD的速度反馈，
 不影响单机普通起飞/预抬的积分公式，也不影响 `differential_integral`。
 积分的真实增量和导数使用同一加权输入，力导数继续包含预算、接管和卸载的实际变化。

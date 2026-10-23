@@ -245,3 +245,106 @@ class SlungAttitudeReferenceTrim:
             1., max(0., (now - self._segment_start) / self.adaptation_interval_s)))
         self._cached = self.evaluate(now)
         return tuple(values.copy() for values in self._cached)
+
+
+class SlungDynamicAttitudeReferenceTrim(SlungAttitudeReferenceTrim):
+    """Learn bounded world offsets while the full desired attitude changes.
+
+    The actual learned state is the world-frame aircraft offset endpoint,
+    with zero common translation. At each segment start, the instantaneous
+    desired-frame error ``e = Log(Rd.T @ Rmeasured)`` requests the increment
+    ``-Rd @ ((gain_per_s * e) x centered_rho_i) * duration``. The new endpoint
+    is projected jointly into the per-aircraft position balls, then approached
+    with the same bounded rest-to-rest quintic as the static helper. Desired
+    rotations during a segment never rotate its endpoints, so returned world
+    velocity and acceleration are complete derivatives even for moving goals.
+
+    ``attitude_error`` remains in instantaneous desired-frame coordinates.
+    For API compatibility, ``integral`` is a world-frame small-angle diagnostic:
+    if endpoint projection uses beta and the segment limiter uses alpha, it is
+    updated as ``eta_new = (1-alpha)*eta + alpha*beta*(eta + Rd @ (gain*e)*T)``.
+    This is a weighted sum of historical world angular increments; because
+    their attachment orientations differ, it is NOT a single rotation that
+    reconstructs the learned offsets. It is neither feedback state nor
+    independently bounded by the position limit.
+
+    Gating or ``freeze()`` finishes the active segment and holds its world
+    endpoint. Duplicate timestamps are idempotent; gaps never catch up missed
+    learning steps. ``desired_rotation`` reports the latest accepted goal
+    after initialization, including while learning is gated. A gated call
+    before first learning does not initialize the helper.
+    """
+
+    def _next_segment(self, error, desired, now):
+        duration = self.adaptation_interval_s
+        with np.errstate(over="ignore", invalid="ignore"):
+            angular_increment = self.gain_per_s * error * duration
+            proposed_position = self._end_position + self._offset(angular_increment, desired)
+            proposed_integral = self._integral + desired @ angular_increment
+        if (not np.all(np.isfinite(proposed_position))
+                or not np.all(np.isfinite(proposed_integral))):
+            raise ValueError("dynamic trim update must remain finite")
+
+        proposed_norm = self._max_norm(proposed_position)
+        saturated = proposed_norm > self.max_offset_m
+        projection = self.max_offset_m / proposed_norm if saturated else 1.
+        with np.errstate(over="ignore", invalid="ignore"):
+            increment = projection * proposed_position - self._end_position
+        displacement = self._max_norm(increment)
+        speed_step = self.max_rate_mps * duration / self._QUINTIC_MAX_SPEED
+        acceleration_step = (self.max_acceleration_mps2 * duration**2
+                             / self._QUINTIC_MAX_ACCELERATION)
+        scale = min(1., speed_step / displacement, acceleration_step / displacement) \
+            if displacement > 0. else 1.
+        with np.errstate(over="ignore", invalid="ignore"):
+            endpoint = self._end_position + scale * increment
+            integral = ((1. - scale) * self._integral
+                        + scale * projection * proposed_integral)
+        if not np.all(np.isfinite(endpoint)) or not np.all(np.isfinite(integral)):
+            raise ValueError("dynamic trim update must remain finite")
+
+        self._start_position = self._end_position.copy()
+        self._end_position = endpoint
+        self._integral = integral
+        self._segment_start = now
+        self.saturated = saturated
+        self.rate_limited = displacement > speed_step
+        self.acceleration_limited = displacement > acceleration_step
+
+    def update(self, measured_rotation, desired_rotation, now, learning=True):
+        """Return world P/V/A, sampling the moving goal once per learning step.
+
+        All supplied rotations and timestamps are validated before mutation,
+        including duplicate ticks. Missing attitudes are allowed while gated;
+        a missing desired rotation uses the most recently accepted goal.
+        """
+        now = self._scalar(now, "now")
+        if now < 0. or (self._last_update_time is not None and now < self._last_update_time):
+            raise ValueError("now must be nonnegative and nondecreasing")
+        measured = None if measured_rotation is None else self._rotation(
+            measured_rotation, "measured_rotation")
+        desired = None if desired_rotation is None else self._rotation(
+            desired_rotation, "desired_rotation")
+        if self._last_update_time == now:
+            return tuple(values.copy() for values in self._cached)
+        if desired is None:
+            desired = self._desired_rotation
+        eligible = self.enabled and bool(learning) and not self.frozen
+        if eligible and (measured is None or desired is None):
+            raise ValueError("measured_rotation and desired_rotation are required while learning")
+
+        error = self._attitude_error
+        if measured is not None and desired is not None:
+            error = _rotation_vector(desired.T @ measured)
+        if eligible and (self._segment_start is None
+                         or now >= self._segment_start + self.adaptation_interval_s):
+            self._next_segment(error, desired, now)
+        if desired is not None and (eligible or self.initialized):
+            self._desired_rotation = desired.copy()
+        self._attitude_error = error.copy()
+        self.learning = eligible
+        self._last_update_time = now
+        self.progress = (1. if self._segment_start is None else min(
+            1., max(0., (now - self._segment_start) / self.adaptation_interval_s)))
+        self._cached = self.evaluate(now)
+        return tuple(values.copy() for values in self._cached)

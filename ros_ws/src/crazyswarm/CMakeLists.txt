@@ -210,8 +210,33 @@ target_link_libraries(mocap_helper
 ## in contrast to setup.py, you can choose the destination
 install(PROGRAMS
   scripts/ctbr_controller.py
+  scripts/ctbr_control_math.py
+  scripts/ctbr_geometric_controller.py
+  scripts/ctbr_independent_controller.py
+  scripts/ctbr_transport_vehicle_controller.py
+  scripts/ctbr_parameters.py
+  scripts/ctbr_state_feedback.py
+  scripts/ctbr_csv_logger.py
+  scripts/ctbr_vehicle_node.py
+  scripts/ctbr_vehicle_state.py
+  scripts/ctbr_vehicle_preflight.py
+  scripts/ctbr_vehicle_logging.py
+  scripts/ctbr_fleet_node.py
+  scripts/ctbr_payload_parameters.py
+  scripts/ctbr_payload_state.py
+  scripts/ctbr_payload_takeup.py
+  scripts/ctbr_payload_reference.py
+  scripts/ctbr_payload_control.py
+  scripts/ctbr_payload_mission.py
   scripts/native_position_pid.py
   scripts/slung_load_controller.py
+  scripts/slung_attitude_integral.py
+  scripts/slung_circle_reference.py
+  scripts/slung_attitude_cone_reference.py
+  scripts/slung_prelift_trajectory.py
+  scripts/slung_transport_guard.py
+  scripts/slung_landing.py
+  scripts/slung_link_calibration.py
   scripts/slung_reference.py
   scripts/slung_attitude_trim.py
   scripts/slung_transport_integral.py

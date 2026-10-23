@@ -73,6 +73,12 @@ def _install_ros_import_stubs():
 
 def _controller_module():
     _install_ros_import_stubs()
+    # Each fixture installs fresh ROS transport stubs; reload their consumers.
+    for name in ("ctbr_fleet_node", "ctbr_vehicle_node", "ctbr_vehicle_logging",
+                 "ctbr_vehicle_state", "ctbr_vehicle_preflight", "ctbr_payload_parameters",
+                 "ctbr_payload_state", "ctbr_payload_takeup", "ctbr_payload_reference",
+                 "ctbr_payload_control", "ctbr_payload_mission"):
+        sys.modules.pop(name, None)
     module_name = "ctbr_controller_v2_under_test"
     sys.modules.pop(module_name, None)
     spec = importlib.util.spec_from_file_location(
@@ -673,11 +679,23 @@ def _merge_parameter_overrides(baseline, overlay):
     return result
 
 
-def _slung_manager(module, directory, parameter_overrides=None):
+def _slung_manager(module, directory, parameter_overrides=None, use_live_payload_trajectory=False):
     """Instantiate real mission/controller objects; replace only ROS transport."""
     roots = _controller_parameter_roots()
     roots.update(yaml.safe_load((CONTROLLER_CONFIG_PATH.parent / "slung_payload.yaml").read_text()))
-    roots = _merge_parameter_overrides(roots, parameter_overrides or {})
+    # Unit cases declare the legacy stationary mission; simulation explicitly
+    # opts into the live configured trajectory before applying its candidate.
+    if not use_live_payload_trajectory:
+        roots["slung_payload"]["trajectory"] = {"mode": "hover"}
+        # Legacy unit cases keep the original post-reference adaptation gate;
+        # live replay and explicit feature cases opt into the new early gate.
+        roots["slung_payload"]["transport_attitude_trim_dynamic_enabled"] = False
+        roots["slung_payload"]["transport_attitude_trim_during_lift_enabled"] = False
+        roots["slung_payload"]["flight_validation_transport_s"] = 60.
+        roots["ctbr_trajectory"]["hover_duration_s"] = 60.
+    flight_overrides = {name: value for name, value in (parameter_overrides or {}).items()
+                        if name != "slung_simulation"}
+    roots = _merge_parameter_overrides(roots, flight_overrides)
     roots["ctbr_controller"].update(transport_mode="slung_load", log_directory=str(directory))
     roots["crazyflies"] = [
         {"id": i, "channel": 80, "uri": "radio://0/80/2M/E7E7E7E7%02X" % i,

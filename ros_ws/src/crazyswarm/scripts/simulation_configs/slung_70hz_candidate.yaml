@@ -19,7 +19,6 @@ ctbr_controller_cf5:
   transport_force_filter_tau_s: 0.005
 
 slung_payload:
-  post_handoff_s: 60.0
   # 完整 60 s 离线观察；默认实飞文件则开启 10 s 自动降落验证。
   flight_validation_enabled: false
   transport_link_gain_scale: 0.4
@@ -27,3 +26,6 @@ slung_payload:
   transport_position_hold_gain_scale: 0.5
   link_force_correction_limit_n: 0.40
   link_force_correction_rate_limit_nps: 20.0
+
+slung_simulation:
+  post_handoff_s: 60.0

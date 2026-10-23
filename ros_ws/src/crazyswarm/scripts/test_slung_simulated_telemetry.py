@@ -84,11 +84,11 @@ def test_invalid_transport_settings_are_rejected(rate, delay):
 
 
 def test_simulation_delays_and_ekf_mode_resolve_from_parameter_file():
-    settings = replay.resolve_simulation_settings({"simulation": {
+    settings = replay.resolve_simulation_settings({
         "ekf_feedback_mode": "sampled_filtered", "ekf_sample_rate_hz": 50,
         "ekf_delay_s": .03, "pose_delay_s": .02, "command_delay_s": .01,
         "time_limit_s": 180,
-    }})
+    })
     assert settings["ekf_feedback_mode"] == "sampled_filtered"
     assert settings["ekf_delay_s"] == .03
     assert settings["pose_delay_s"] == .02

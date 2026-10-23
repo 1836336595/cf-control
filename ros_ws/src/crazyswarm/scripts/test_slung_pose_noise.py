@@ -29,4 +29,4 @@ def test_seeded_noise_is_a_rotation_and_never_mutates_truth():
 @pytest.mark.parametrize('std', [[-.01,0,0],[0,0],[float('nan'),0,0]])
 def test_invalid_noise_configuration_fails_before_simulation(std):
     with pytest.raises(ValueError,match='payload_rotation_noise_std_rad'):
-        replay.resolve_simulation_settings({'simulation':{'payload_rotation_noise_std_rad':std}})
+        replay.resolve_simulation_settings({'payload_rotation_noise_std_rad':std})

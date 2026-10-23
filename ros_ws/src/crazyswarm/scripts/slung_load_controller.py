@@ -17,6 +17,8 @@ import math
 
 import numpy as np
 
+from slung_attitude_integral import SlungAttitudeMomentIntegral
+
 
 def smoothstep5_profile(elapsed, duration):
     """Return quintic blend position, velocity and acceleration coefficients."""
@@ -219,6 +221,11 @@ class PayloadStateObserver:
     correct the rotation with the measured rigid-body orientation, then use
     that orientation innovation to correct angular velocity.  NOKOV twist and
     acceleration fields are intentionally not consumed by this observer.
+
+    Updates are committed only after pose innovations and all candidate
+    derivatives pass their limits.  Rejected samples leave the accepted
+    estimate and its timestamp intact.  Short intervals accumulate real
+    elapsed time; only a gap in the source stream restarts initialization.
     """
 
     def __init__(
@@ -226,13 +233,23 @@ class PayloadStateObserver:
             acceleration_gain=0.02, attitude_gain=0.35,
             angular_rate_gain=0.08, max_dt=0.05,
             max_velocity_mps=None, max_acceleration_mps2=None,
-            max_body_rate_rps=None, min_samples=3):
+            max_body_rate_rps=None, min_samples=3,
+            min_dt_s=0.005, nominal_dt_s=0.01,
+            position_innovation_margin_m=0.02,
+            attitude_innovation_margin_rad=math.radians(5.0)):
         self.position_gain = float(position_gain)
         self.velocity_gain = float(velocity_gain)
         self.acceleration_gain = float(acceleration_gain)
         self.attitude_gain = float(attitude_gain)
         self.angular_rate_gain = float(angular_rate_gain)
         self.max_dt = float(max_dt)
+        self.min_dt_s = float(min_dt_s)
+        self.nominal_dt_s = float(nominal_dt_s)
+        self.position_innovation_margin = self._limit_vector(
+            position_innovation_margin_m, "position_innovation_margin_m",
+            default=np.full(3, 0.02)
+        )
+        self.attitude_innovation_margin = float(attitude_innovation_margin_rad)
         self.max_velocity = self._limit_vector(
             max_velocity_mps, "max_velocity_mps", default=np.full(3, np.inf)
         )
@@ -247,11 +264,14 @@ class PayloadStateObserver:
                 not all(math.isfinite(value) and value > 0.0 for value in (
                     self.position_gain, self.velocity_gain,
                     self.acceleration_gain, self.attitude_gain,
-                    self.angular_rate_gain, self.max_dt
+                    self.angular_rate_gain, self.max_dt, self.min_dt_s,
+                    self.nominal_dt_s, self.attitude_innovation_margin
                 )) or
                 self.position_gain > 1.0 or self.velocity_gain > 1.0 or
                 self.acceleration_gain > 1.0 or self.attitude_gain > 1.0 or
-                self.angular_rate_gain > 1.0 or self.min_samples < 2):
+                self.angular_rate_gain > 1.0 or self.min_samples < 2 or
+                self.min_dt_s > self.nominal_dt_s or
+                self.nominal_dt_s > self.max_dt):
             raise ValueError("invalid payload pose observer parameters")
         self.reset()
 
@@ -268,7 +288,11 @@ class PayloadStateObserver:
         return vector
 
     def reset(self):
+        self.reset_count = getattr(self, "reset_count", -1) + 1
+        self.rejected_count = getattr(self, "rejected_count", 0)
+        self.consecutive_rejected_count = 0
         self._previous_time = None
+        self._previous_source_time = None
         self.position = None
         self.velocity = np.zeros(3)
         self.acceleration = np.zeros(3)
@@ -276,39 +300,111 @@ class PayloadStateObserver:
         self.body_rate = np.zeros(3)
         self.sample_count = 0
         self.derivatives_valid = False
+        self.source_stamp = None
+        self.input_dt_s = None
+        self.update_dt_s = None
+        self.observer_status = "reset"
+        self.observer_updated = False
+        self.position_innovation = np.zeros(3)
+        self.attitude_innovation = np.zeros(3)
+        self.velocity_clipped = False
+        self.acceleration_clipped = False
+        self.body_rate_clipped = False
 
     def _snapshot(self):
         return {
+            "position": None if self.position is None else self.position.copy(),
             "velocity": self.velocity.copy(),
             "acceleration": self.acceleration.copy(),
             "rotation": self.rotation.copy(),
             "body_rate": self.body_rate.copy(),
             "derivatives_valid": bool(self.derivatives_valid),
             "sample_count": int(self.sample_count),
+            "sample_time": self._previous_time,
+            "source_stamp": self.source_stamp,
+            "input_dt_s": self.input_dt_s,
+            "update_dt_s": self.update_dt_s,
+            "observer_status": self.observer_status,
+            "observer_updated": bool(self.observer_updated),
+            "observer_quality_valid": bool(
+                self.observer_updated and self.derivatives_valid
+            ),
+            "position_innovation": self.position_innovation.copy(),
+            "attitude_innovation": self.attitude_innovation.copy(),
+            # These flags describe rejected candidates; no clipped derivative
+            # is ever committed as a valid estimate.
+            "velocity_clipped": bool(self.velocity_clipped),
+            "acceleration_clipped": bool(self.acceleration_clipped),
+            "body_rate_clipped": bool(self.body_rate_clipped),
+            "reset_count": int(self.reset_count),
+            "rejected_count": int(self.rejected_count),
+            "consecutive_rejected_count": int(self.consecutive_rejected_count),
         }
 
-    def update(self, position, rotation, timestamp):
-        position = _as_vector(position, "observer position")
-        rotation = _project_so3(rotation)
-        timestamp = float(timestamp)
-        if not math.isfinite(timestamp):
-            self.reset()
-            return None
-        if self._previous_time is None or self.position is None:
-            self.position = position.copy()
-            self.rotation = rotation.copy()
-            self._previous_time = timestamp
-            self.sample_count = 1
-            self.derivatives_valid = False
-            return self._snapshot()
+    def _reject(self, status):
+        self.observer_status = status
+        self.derivatives_valid = False
+        self.rejected_count += 1
+        self.consecutive_rejected_count += 1
+        return self._snapshot()
 
-        dt = timestamp - self._previous_time
-        if not math.isfinite(dt) or dt <= 0.0 or dt > self.max_dt:
+    def _initialize(self, position, rotation, timestamp, status):
+        self.position = position.copy()
+        self.rotation = rotation.copy()
+        self._previous_time = timestamp
+        self._previous_source_time = timestamp
+        self.sample_count = 1
+        self.derivatives_valid = False
+        self.observer_updated = True
+        self.observer_status = status
+        return self._snapshot()
+
+    def update(self, position, rotation, timestamp):
+        timestamp = float(timestamp)
+        self.source_stamp = timestamp
+        self.input_dt_s = (None if self._previous_source_time is None else
+                           timestamp - self._previous_source_time)
+        self.update_dt_s = (None if self._previous_time is None else
+                            timestamp - self._previous_time)
+        self.observer_updated = False
+        self.position_innovation = np.zeros(3)
+        self.attitude_innovation = np.zeros(3)
+        self.velocity_clipped = False
+        self.acceleration_clipped = False
+        self.body_rate_clipped = False
+        if not math.isfinite(timestamp):
+            return self._reject("invalid_input")
+        if self.input_dt_s is not None and self.input_dt_s <= 0.0:
+            return self._reject("nonmonotonic_time")
+
+        # Keep a monotonic raw timestamp separately from the accepted sample.
+        # Otherwise repeated bad poses eventually look like a source gap and
+        # would be admitted by reset without passing an innovation check.
+        self._previous_source_time = timestamp
+        try:
+            position = _as_vector(position, "observer position")
+            raw_rotation = np.asarray(rotation, dtype=float).reshape(3, 3)
+            if not np.all(np.isfinite(raw_rotation)):
+                return self._reject("invalid_input")
+            rotation = _project_so3(raw_rotation)
+        except (ValueError, np.linalg.LinAlgError):
+            return self._reject("invalid_input")
+        if self._previous_time is None or self.position is None:
+            return self._initialize(position, rotation, timestamp, "initializing")
+
+        if self.input_dt_s > self.max_dt:
+            input_dt_s = self.input_dt_s
+            update_dt_s = self.update_dt_s
             self.reset()
-            self.position = position.copy()
-            self.rotation = rotation.copy()
-            self._previous_time = timestamp
-            self.sample_count = 1
+            self.source_stamp = timestamp
+            self.input_dt_s = input_dt_s
+            self.update_dt_s = update_dt_s
+            return self._initialize(position, rotation, timestamp, "gap_reset")
+
+        dt = self.update_dt_s
+        if dt < self.min_dt_s - 1.0e-12:
+            self.observer_status = "pending_interval"
+            self.derivatives_valid = False
             return self._snapshot()
 
         dt2 = dt * dt
@@ -317,30 +413,72 @@ class PayloadStateObserver:
         )
         predicted_velocity = self.velocity + dt * self.acceleration
         residual = position - predicted_position
-        self.position = predicted_position + self.position_gain * residual
-        self.velocity = predicted_velocity + self.velocity_gain * residual / dt
-        self.acceleration = self.acceleration + (
-            self.acceleration_gain * residual / dt2
-        )
-        self.velocity = np.clip(self.velocity, -self.max_velocity, self.max_velocity)
-        self.acceleration = np.clip(
-            self.acceleration, -self.max_acceleration, self.max_acceleration
-        )
-
         predicted_rotation = self.rotation @ _rotation_exp(self.body_rate * dt)
         attitude_residual = _rotation_log(predicted_rotation.T @ rotation)
-        self.rotation = _project_so3(
-            predicted_rotation @ _rotation_exp(self.attitude_gain * attitude_residual)
+        self.position_innovation = residual.copy()
+        self.attitude_innovation = attitude_residual.copy()
+
+        # Finite fallback rates keep innovation rejection active when callers
+        # deliberately leave derivative clipping unconfigured.  Configured
+        # physical limits take precedence.  Use the source interval for this
+        # margin, not time since acceptance: repeated rejected poses must not
+        # progressively open their own innovation gate.
+        gate_dt = min(self.input_dt_s, self.max_dt)
+        position_rate_limit = np.where(np.isfinite(self.max_velocity), self.max_velocity, 2.0)
+        acceleration_limit = np.where(np.isfinite(self.max_acceleration), self.max_acceleration, 8.0)
+        angular_rate_limit = np.where(np.isfinite(self.max_body_rate), self.max_body_rate, 8.0)
+        position_gate = (
+            self.position_innovation_margin + position_rate_limit * gate_dt +
+            0.5 * acceleration_limit * gate_dt * gate_dt
         )
-        self.body_rate = self.body_rate + (
-            self.angular_rate_gain * attitude_residual / dt
+        attitude_gate = (
+            self.attitude_innovation_margin + float(np.max(angular_rate_limit)) * gate_dt
         )
-        self.body_rate = np.clip(
-            self.body_rate, -self.max_body_rate, self.max_body_rate
+        if np.any(np.abs(residual) > position_gate):
+            return self._reject("position_innovation")
+        if np.linalg.norm(attitude_residual) > attitude_gate:
+            return self._reject("attitude_innovation")
+
+        # At nominal 100 Hz these are exactly the original gains.  For shorter
+        # accepted intervals, scaling by dt, dt^2 and dt^3 gives correction
+        # rates proportional to elapsed time rather than amplifying pose noise
+        # through beta/dt or gamma/dt^2.  This is a local noise safeguard, not a
+        # stability claim for arbitrary motion or timing.
+        ratio = min(1.0, dt / self.nominal_dt_s)
+        candidate_position = predicted_position + self.position_gain * ratio * residual
+        candidate_velocity = predicted_velocity + (
+            self.velocity_gain * ratio ** 2 * residual / dt
         )
+        candidate_acceleration = self.acceleration + (
+            self.acceleration_gain * ratio ** 3 * residual / dt2
+        )
+        candidate_rotation = _project_so3(
+            predicted_rotation @ _rotation_exp(self.attitude_gain * ratio * attitude_residual)
+        )
+        candidate_body_rate = self.body_rate + (
+            self.angular_rate_gain * ratio ** 2 * attitude_residual / dt
+        )
+        self.velocity_clipped = bool(np.any(np.abs(candidate_velocity) >= self.max_velocity))
+        self.acceleration_clipped = bool(np.any(np.abs(candidate_acceleration) >= self.max_acceleration))
+        self.body_rate_clipped = bool(np.any(np.abs(candidate_body_rate) >= self.max_body_rate))
+        if self.velocity_clipped or self.acceleration_clipped or self.body_rate_clipped:
+            return self._reject("derivative_limit")
+        if not all(np.all(np.isfinite(value)) for value in (
+                candidate_position, candidate_velocity, candidate_acceleration,
+                candidate_rotation, candidate_body_rate)):
+            return self._reject("invalid_candidate")
+
+        self.position = candidate_position
+        self.velocity = candidate_velocity
+        self.acceleration = candidate_acceleration
+        self.rotation = candidate_rotation
+        self.body_rate = candidate_body_rate
         self._previous_time = timestamp
         self.sample_count += 1
         self.derivatives_valid = self.sample_count >= self.min_samples
+        self.consecutive_rejected_count = 0
+        self.observer_updated = True
+        self.observer_status = "updated" if self.derivatives_valid else "initializing"
         return self._snapshot()
 
 
@@ -678,6 +816,7 @@ class SlungLoadController:
     def __init__(self, config):
         self.config = config
         cfg = config
+        self.attitude_integral = SlungAttitudeMomentIntegral()
         self.position_integral = np.zeros(3)
         self.link_integrals = np.zeros((3, 3))
         self.previous_link_units = None
@@ -712,6 +851,11 @@ class SlungLoadController:
         self.previous_payload_rotation = None
         self.previous_vehicle_forces = None
         self.previous_perpendicular_forces = None
+        self.reset_attitude_integral()
+
+    def reset_attitude_integral(self):
+        """Clear the optional payload moment bias at lifecycle boundaries."""
+        self.attitude_integral.reset()
 
     @staticmethod
     def _state_vector(state, name, fallback=None):
@@ -810,12 +954,94 @@ class SlungLoadController:
             directions[:, index] = -mu_world[:, index] / magnitude
         return directions
 
+    def _update_attitude_integral(self, rotation, desired_rotation, target, dt,
+                                  desired_force, pd_moment, matrix, gram,
+                                  internal_bias, link_units):
+        """Accept integral increments only where current cables can transmit them.
+
+        The 6D allocator chooses free force vectors, but taut cables transmit
+        their positive projection along measured cable directions. Compare
+        the increment in that projected moment to the proposed body moment;
+        a positive directional response is required. Residual wrench size is
+        deliberately irrelevant because three cables cannot realize all six
+        arbitrary wrench components at fixed geometry.
+        """
+        helper = self.attitude_integral
+        helper.configure(
+            target.get("payload_attitude_integral_gain_nm_per_rad_s",
+                       (5.e-5, 5.e-5, 2.e-5)),
+            target.get("payload_attitude_integral_limit_nm", .0015),
+            target.get("payload_attitude_integral_rate_limit_nmps", .00015))
+        weight = float(target.get("payload_attitude_integral_weight", 1.))
+        yaw_enabled = bool(target.get("payload_yaw_enabled", True))
+        authority = [1.]
+
+        def body_moment(world_moment):
+            moment = weight * (rotation.T @ world_moment)
+            if not yaw_enabled:
+                moment[2] = 0.
+            return moment
+
+        def projected_allocation(moment):
+            rhs = np.concatenate([rotation.T @ desired_force, pd_moment + moment])
+            body_forces = matrix.T @ np.linalg.solve(gram, rhs) + internal_bias
+            world_forces = rotation @ body_forces.reshape(3, 3).T
+            signed = -np.sum(link_units * world_forces, axis=0)
+            transmitted = -link_units * np.maximum(signed, 0.)
+            projected_moment = np.sum(np.cross(
+                self.config.attachment_points_m.T,
+                (rotation.T @ transmitted).T), axis=0)
+            return signed, projected_moment
+
+        def accept(candidate, previous):
+            candidate_body, previous_body = body_moment(candidate), body_moment(previous)
+            candidate_tensions, candidate_projected = projected_allocation(candidate_body)
+            previous_tensions, previous_projected = projected_allocation(previous_body)
+            if (not np.all(np.isfinite(candidate_tensions))
+                    or not np.all(np.isfinite(candidate_projected))):
+                authority[0] = 0.
+                return "allocation_nonfinite"
+            # Reject a step further into compression; allow steps that recover
+            # positive tension when the previous PD wrench is already infeasible.
+            if np.any((candidate_tensions <= 0.)
+                      & (candidate_tensions < previous_tensions - 1.e-12)):
+                authority[0] = 0.
+                return "allocation_tension"
+            delta = candidate_body - previous_body
+            magnitude_squared = float(delta @ delta)
+            if magnitude_squared > np.finfo(float).tiny:
+                authority[0] = float((candidate_projected - previous_projected) @ delta
+                                     / magnitude_squared)
+                if authority[0] <= 1.e-8:
+                    return "allocation_authority"
+            return True
+
+        snapshot = helper.update(
+            rotation, desired_rotation, dt,
+            enabled=bool(target.get("payload_attitude_integral_enabled", False)),
+            learning=bool(target.get("payload_attitude_integral_learning", False)),
+            freeze_reason=target.get("payload_attitude_integral_freeze_reason", "gated"),
+            tick=target.get("payload_attitude_integral_tick"),
+            yaw_enabled=yaw_enabled, weight=weight,
+            weight_dot=target.get("payload_attitude_integral_weight_dot", 0.),
+            accept=accept)
+        snapshot["payload_attitude_integral_projection_authority"] = authority[0]
+        return snapshot
+
     def compute(self, payload_state, vehicle_states, target, dt):
         """Return per-vehicle force commands or ``None`` for invalid payload state."""
+        if not bool(target.get("payload_attitude_integral_enabled", False)):
+            self.reset_attitude_integral()
         if not payload_state or not bool(payload_state.get("valid", False)):
             return None
         if len(vehicle_states) != 3:
             raise ValueError("slung-load controller requires three vehicle states")
+        try:
+            dt = float(dt)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(dt):
+            return None
         dt = float(np.clip(dt, 0.001, 0.05))
         try:
             p0 = self._state_vector(payload_state, "position")
@@ -829,7 +1055,7 @@ class SlungLoadController:
             rd = _project_so3(target.get("rotation", np.eye(3)))
             omegad = self._state_vector(target, "body_rate", np.zeros(3))
             omegadd = self._state_vector(target, "body_rate_dot", np.zeros(3))
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError, np.linalg.LinAlgError):
             return None
 
         ep = p0 - pd
@@ -880,20 +1106,13 @@ class SlungLoadController:
         )
         if not bool(target.get("payload_yaw_enabled", True)):
             desired_moment[2] = 0.0
-        omega0_dot_cmd = np.linalg.solve(
-            inertia, desired_moment - np.cross(omega0, inertia @ omega0)
-        )
-
         matrix = self._allocation_matrix()
-        rhs = np.concatenate([r0.T @ desired_force, desired_moment])
         gram = matrix @ matrix.T
         if np.linalg.cond(gram) > 1.0 / self.config.tension_pinv_tolerance:
             raise ValueError("slung-load tension allocation matrix is singular")
-        mu_body = matrix.T @ np.linalg.solve(gram, rhs)
-        mu_body += self._internal_bias(
+        internal_bias = self._internal_bias(
             matrix, self.config.payload_mass_kg, self.config.gravity_mps2
         )
-        mu_desired = r0 @ mu_body.reshape(3, 3).T
 
         link_units = np.zeros((3, 3))
         link_rates = np.zeros((3, 3))
@@ -910,6 +1129,18 @@ class SlungLoadController:
                 (np.eye(3) - np.outer(link_units[:, index], link_units[:, index]))
                 @ relative_velocity / max(float(np.linalg.norm(relative)), 1.0e-6)
             )
+
+        attitude_integral = self._update_attitude_integral(
+            r0, rd, target, dt, desired_force, desired_moment, matrix, gram,
+            internal_bias, link_units)
+        desired_moment += attitude_integral["payload_attitude_integral_body_moment"]
+        omega0_dot_cmd = np.linalg.solve(
+            inertia, desired_moment - np.cross(omega0, inertia @ omega0)
+        )
+        rhs = np.concatenate([r0.T @ desired_force, desired_moment])
+        mu_body = matrix.T @ np.linalg.solve(gram, rhs)
+        mu_body += internal_bias
+        mu_desired = r0 @ mu_body.reshape(3, 3).T
 
         if self.previous_link_units is None:
             self.previous_link_units = link_units.copy()
@@ -1032,6 +1263,7 @@ class SlungLoadController:
         self.previous_vehicle_forces = vehicle_forces.copy()
         self.previous_link_units = link_units.copy()
         return {
+            **attitude_integral,
             "force_mode": self.config.transport_force_mode,
             "vehicles": outputs,
             "payload_position_error": ep,

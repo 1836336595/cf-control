@@ -1,0 +1,44 @@
+# 仅供 simulate_slung_handoff.py 读取的离线物理、传感器和观察窗口参数。
+# 实飞 launch 不加载本文件；机载仿真环固定为 Mellinger。
+slung_simulation:
+  # 接管后离线观察时间；真实任务降落时钟仍由 slung_payload.flight_validation_transport_s 控制。
+  post_handoff_s: 100.0
+  # Graefe 2026：混控后四个电机各自维护转速，随后计算推力和反扭矩。
+  # legacy_quadratic 保留旧平方推力曲线和 12 ms 推力滞后作对照。
+  motor_model: graefe2026
+  brushless_motor_time_constant_s: 0.05
+  brushless_motor_speed_gain_radps: 2900.0
+  brushless_speed_normalization_radps: 2900.0
+  brushless_rotor_inertia_kgm2: 5.0e-8
+  brushless_thrust_coefficients: [-0.23009526, 0.56176458, -0.0433191]
+  brushless_torque_coefficients: [-0.0003396, 0.00087032, 0.0002896]
+  vehicle_inertia: [3.3e-5, 3.6e-5, 5.9e-5] # 论文带保护圈惯量；质量仍取各机实测值。
+  arm_length: 0.04999244943 # 论文电机中心方形宽度 0.0707 m / sqrt(2)。
+  # 与当前 C++ 桥接一致：1.176798 N 对应 raw=60000；这是映射参数。
+  bridge_collective_pwm_reference: 60000.0
+  bridge_collective_pwm_limit: 60000.0
+  bridge_thrust_curve_exponent: 2.0
+  bridge_thrust_raw_scale: [1.0, 1.0, 1.0] # 可填写该次实飞冻结的 preflight scale。
+  motor_pwm_max: 65535.0 # 混控后单电机归一化范围，与 collective 上限不同。
+  motor_available_command_fraction: [1.0, 1.0, 1.0] # 作者式可用指令上限；不是电压标定曲线。
+  # sampled_filtered：50 Hz 位置/速度包进入实飞 _ekf_state_callback，
+  # 由 ctbr_controller.yaml 的 5 Hz 滤波器产生控制速度/加速度。
+  # delayed_truth：旧理想反馈，仅用于对照；两者都未模拟完整机载 EKF。
+  ekf_feedback_mode: sampled_filtered
+  ekf_sample_rate_hz: 50.0
+  ekf_delay_s: 0.02
+  pose_sample_rate_hz: 100.0
+  pose_delay_s: 0.01
+  command_delay_s: 0.005
+  time_limit_s: 180.0
+  # 空列表按固定 70 Hz 运行；非空列表按秒重复这些控制周期，位姿/EKF 时钟独立。
+  control_intervals_s: []
+  mellinger_rate_hz: 500.0
+  # 机载 Mellinger 增益单位为 PWM/rad，与主机 transport_* 增益不同；
+  # 用固件 ctrlMel 源码值核对模型，不能用主机增益替代。
+  mellinger_attitude_gains: [70000.0, 70000.0, 60000.0]
+  mellinger_rate_gains: [20000.0, 20000.0, 12000.0]
+  mellinger_rate_derivative_gain: 200.0
+  mellinger_yaw_integral_gain: 500.0
+  mellinger_yaw_integral_limit: 1500.0
+  payload_rotational_damping: 0.001

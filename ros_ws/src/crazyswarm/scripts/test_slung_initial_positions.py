@@ -59,9 +59,9 @@ try:
     initial = attachment + relative * (physical / np.linalg.norm(relative,axis=1))[:,None]
 finally:
     manager.logger.close()
-overrides = {'slung_payload': {'flight_validation_enabled': False, 'post_handoff_s': 60.,
-    'link_calibration_enabled': False, 'simulation': {'physical_link_lengths_m': physical.tolist(),
-    'initial_vehicle_positions_m': initial.tolist()}}}
+overrides = {'slung_payload': {'flight_validation_enabled': False,
+    'link_calibration_enabled': False}, 'slung_simulation': {'post_handoff_s': 60.,
+    'physical_link_lengths_m': physical.tolist(), 'initial_vehicle_positions_m': initial.tolist()}}
 summary = replay.run_simulation(directory/'smoke', overrides, time_limit_s=.1)
 assert np.max(np.abs(summary['initial_physical_cable_errors_m'])) <= 1e-5
 np.testing.assert_allclose(summary['initial_vehicle_positions_m'], initial, atol=1e-12)

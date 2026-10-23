@@ -5,13 +5,15 @@ Only ROS I/O is stubbed by the existing test utilities. Mission logic, payload
 pose observer and CTBR control laws come from ctbr_controller.py. Sampled ideal
 EKF velocity passes through the real host filter. Full firmware EKF is not modeled.
 
-simulation.initial_payload_rpy_deg sets the actual grounded load's roll, pitch,
+slung_simulation.initial_payload_rpy_deg sets the actual grounded load's roll, pitch,
 and yaw (degrees, Rz @ Ry @ Rx). Default aircraft starts follow the displaced
 attachment sites; explicit initial_vehicle_positions_m remain world positions.
 """
 
 import argparse
 from collections import deque
+from collections.abc import Mapping
+from copy import deepcopy
 import csv
 from dataclasses import asdict, replace
 import json
@@ -27,18 +29,62 @@ from slung_load_controller import payload_ground_clearance
 from slung_simulated_telemetry import SampledEkfTelemetry
 
 
-def resolve_simulation_settings(payload, pose_delay_s=None, command_delay_s=None,
+SIMULATION_CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "slung_simulation.yaml"
+
+
+def load_simulation_config(path=None, parameter_overrides=None):
+    """Read offline settings without loading them into the ROS parameter server.
+
+    Candidate YAMLs may contain flight controller roots and a separate
+    ``slung_simulation`` mapping. Only the latter is merged here.
+    """
+    document = yaml.safe_load(Path(path or SIMULATION_CONFIG_PATH).read_text())
+    if not isinstance(document, Mapping) or not isinstance(document.get("slung_simulation"), Mapping):
+        raise ValueError("simulation config must contain a slung_simulation mapping")
+    overrides = parameter_overrides if parameter_overrides is not None else {}
+    if not isinstance(overrides, Mapping):
+        raise ValueError("candidate must contain parameter mappings including slung_simulation")
+    payload = overrides.get("slung_payload", {})
+    if isinstance(payload, Mapping) and any(name in payload for name in ("simulation", "post_handoff_s")):
+        raise ValueError("move simulation and post_handoff_s candidate settings into slung_simulation")
+    simulation_overlay = overrides.get("slung_simulation", {})
+    if not isinstance(simulation_overlay, Mapping):
+        raise ValueError("candidate slung_simulation must be a mapping")
+
+    def merge(baseline, overlay):
+        result = deepcopy(baseline)
+        for name, value in overlay.items():
+            if isinstance(value, Mapping) and isinstance(result.get(name), Mapping):
+                result[name] = merge(result[name], value)
+            else:
+                result[name] = deepcopy(value)
+        return result
+
+    return merge(document["slung_simulation"], simulation_overlay)
+
+
+def resolve_simulation_settings(simulation, pose_delay_s=None, command_delay_s=None,
                                 time_limit_s=None):
+    """Validate a direct offline settings mapping and apply replay overrides."""
+    if not isinstance(simulation, Mapping):
+        raise ValueError("slung_simulation must be a mapping")
+    configured = simulation
+    if "simulation" in configured:
+        raise ValueError("pass the slung_simulation mapping directly, without a simulation wrapper")
+    retired = [name for name in configured if name in ("onboard_controller", "rate_loop_bandwidth")
+               or name.startswith("onboard_pid_")]
+    if retired:
+        raise ValueError("仿真机载环已固定为 Mellinger，请删除旧参数：" + ", ".join(sorted(retired)))
     settings = dict(
         pose_delay_s=.01, command_delay_s=.005, pose_sample_rate_hz=100.0,
         ekf_feedback_mode="sampled_filtered", ekf_sample_rate_hz=50.0,
-        ekf_delay_s=.02, time_limit_s=180.0,
+        ekf_delay_s=.02, time_limit_s=180.0, post_handoff_s=60.0,
         payload_rotation_noise_std_rad=[0.,0.,0.], pose_noise_seed=20261016,
         control_intervals_s=[],
         initial_vehicle_positions_m=None,
         initial_payload_rpy_deg=[0., 0., 0.],
     )
-    settings.update(payload.get("simulation", {}))
+    settings.update(deepcopy(configured))
     for name, value in (("pose_delay_s", pose_delay_s),
                         ("command_delay_s", command_delay_s),
                         ("time_limit_s", time_limit_s)):
@@ -47,7 +93,7 @@ def resolve_simulation_settings(payload, pose_delay_s=None, command_delay_s=None
     for name in ("pose_delay_s", "command_delay_s", "ekf_delay_s"):
         if not np.isfinite(settings[name]) or settings[name] < 0:
             raise ValueError(name + " must be finite and nonnegative")
-    for name in ("pose_sample_rate_hz", "ekf_sample_rate_hz", "time_limit_s"):
+    for name in ("pose_sample_rate_hz", "ekf_sample_rate_hz", "time_limit_s", "post_handoff_s"):
         if not np.isfinite(settings[name]) or settings[name] <= 0:
             raise ValueError(name + " must be finite and positive")
     if settings["ekf_feedback_mode"] not in ("sampled_filtered", "delayed_truth"):
@@ -241,7 +287,7 @@ class ValidationLandingMonitor:
 
 
 PLANT_SETTING_NAMES = (
-    "onboard_controller", "motor_model", "vehicle_inertia", "arm_length",
+    "motor_model", "vehicle_inertia", "arm_length",
     "thrust_time_constant", "motor_thrust_efficiency", "motor_yaw_torque_coefficient",
     "brushless_motor_time_constant_s", "brushless_motor_speed_gain_radps",
     "brushless_speed_normalization_radps", "brushless_rotor_inertia_kgm2",
@@ -251,13 +297,11 @@ PLANT_SETTING_NAMES = (
     "motor_available_command_fraction", "mellinger_rate_hz",
     "mellinger_attitude_gains", "mellinger_rate_gains", "mellinger_rate_derivative_gain",
     "mellinger_yaw_integral_gain", "mellinger_yaw_integral_limit",
-    "onboard_pid_rate_hz", "onboard_pid_rate_kp", "onboard_pid_rate_ki",
-    "onboard_pid_rate_kd", "onboard_pid_rate_integral_limit", "onboard_pid_yaw_gains",
-    "onboard_pid_yaw_integral_limit", "payload_rotational_damping",
+    "payload_rotational_damping",
 )
 
 
-def build_physics_config(base, manager, simulation, rate_bandwidth):
+def build_physics_config(base, manager, simulation):
     """Resolve plant assumptions separately from the unchanged flight controller."""
     settings = {}
     for name in PLANT_SETTING_NAMES:
@@ -271,7 +315,6 @@ def build_physics_config(base, manager, simulation, rate_bandwidth):
         raise ValueError("physical_link_lengths_m must contain three finite positive lengths")
     return replace(
         base, **settings, control_rate_hz=manager.rate_hz,
-        rate_loop_bandwidth=tuple(rate_bandwidth),
         vehicles=tuple(replace(v, mass=n.controller.config.mass,
                                max_total_thrust=n.controller.config.max_total_thrust,
                                max_command_thrust=n.controller.config.max_command_thrust)
@@ -306,12 +349,223 @@ def actuator_trace_fields(model, index):
     return result
 
 
+def payload_reference_trace_fields(manager, target, payload_rotation=None):
+    """Keep desired load pose and trajectory scheduling alongside physical truth.
+
+    No desired pose exists before transport overrides are produced. Preserve
+    that absence as NaN so a diagnostic cannot mistake it for a zero target.
+    """
+    config = getattr(manager, "payload_circle_config", None)
+    reference = getattr(manager, "payload_circle_reference", None)
+    motion = getattr(manager, "payload_circle_state", None) or {}
+    mode = target.get("payload_trajectory_mode", getattr(config, "mode", "hover"))
+    phase = target.get("payload_trajectory_phase", motion.get(
+        "phase", "waiting" if mode in ("circle", "figure_eight", "attitude_cone") else "hover"))
+    position = np.asarray(target.get("payload_target_position", np.full(3, np.nan)), dtype=float)
+    rotation = np.asarray(target.get("payload_target_rotation", np.full((3, 3), np.nan)), dtype=float)
+    roll, pitch, yaw = float("nan"), float("nan"), float("nan")
+    if rotation.shape == (3, 3) and np.all(np.isfinite(rotation)):
+        roll = float(np.arctan2(rotation[2, 1], rotation[2, 2]))
+        pitch = float(np.arcsin(np.clip(-rotation[2, 0], -1., 1.)))
+        yaw = float(np.arctan2(rotation[1, 0], rotation[0, 0]))
+    actual_rotation = np.asarray(payload_rotation if payload_rotation is not None
+                                 else np.full((3, 3), np.nan), dtype=float)
+    actual_valid = actual_rotation.shape == (3, 3) and np.all(np.isfinite(actual_rotation))
+    desired_valid = rotation.shape == (3, 3) and np.all(np.isfinite(rotation))
+    actual_body_z = actual_rotation[:, 2] if actual_valid else np.full(3, np.nan)
+    desired_body_z = rotation[:, 2] if desired_valid else np.full(3, np.nan)
+    actual_half_angle = float(np.rad2deg(np.arccos(np.clip(actual_body_z[2], -1., 1.))))
+    desired_half_angle = float(np.rad2deg(np.arccos(np.clip(desired_body_z[2], -1., 1.))))
+    axis_error = float(np.rad2deg(np.arccos(np.clip(actual_body_z @ desired_body_z, -1., 1.))))
+    attitude_error = (float(np.rad2deg(np.arccos(np.clip(
+        (np.trace(rotation.T @ actual_rotation)-1.)/2., -1., 1.))))
+        if actual_valid and desired_valid else float("nan"))
+    center = target.get("payload_trajectory_center", target.get(
+        "payload_circle_center", reference.center_position
+        if reference is not None else np.full(3, np.nan)))
+    lobe_centers = (target.get("payload_lobe_centers", getattr(
+        reference, "lobe_centers", np.full((2, 3), np.nan)))
+        if mode == "figure_eight" else np.full((2, 3), np.nan))
+    progress = float(target.get("payload_trajectory_progress", target.get(
+        "payload_circle_progress", motion.get("progress", np.nan))))
+    result = dict(
+        payload_trajectory_mode=mode, payload_trajectory_phase=phase,
+        payload_trajectory_progress=progress, payload_circle_progress=progress,
+        payload_circle_radius_m=float(target.get("payload_trajectory_radius_m", target.get(
+            "payload_circle_radius_m", getattr(config, "radius_m", np.nan)))),
+        payload_target_roll_rad=roll, payload_target_pitch_rad=pitch,
+        payload_target_yaw_rad=yaw, payload_target_height_m=float(position[2]),
+        payload_cone_half_angle_deg=actual_half_angle,
+        payload_target_cone_half_angle_deg=desired_half_angle,
+        payload_cone_axis_error_deg=axis_error,
+        payload_cone_half_angle_error_deg=actual_half_angle-desired_half_angle,
+        payload_attitude_error_deg=attitude_error,
+        payload_cone_config_half_angle_deg=(float(target.get("payload_cone_config_half_angle_deg",
+                                            getattr(config, "cone_half_angle_deg", np.nan)))
+                                            if mode == "attitude_cone" else float("nan")),
+        payload_cone_period_s=(float(target.get("payload_cone_period_s", getattr(config, "cone_period_s", np.nan)))
+                               if mode == "attitude_cone" else float("nan")),
+    )
+    result.update({"payload_target_position_" + axis: float(value)
+                   for axis, value in zip("xyz", position)})
+    result.update({"payload_circle_center_" + axis: float(value)
+                   for axis, value in zip("xyz", center)})
+    result.update({"payload_body_z_" + axis: float(value)
+                   for axis, value in zip("xyz", actual_body_z)})
+    result.update({"payload_target_body_z_" + axis: float(value)
+                   for axis, value in zip("xyz", desired_body_z)})
+    for index, lobe_center in enumerate(lobe_centers, 1):
+        result.update({"payload_lobe_center_{}_{}".format(index, axis): float(value)
+                       for axis, value in zip("xyz", lobe_center)})
+    return result
+
+
+def payload_circle_summary(manager, trace, reference=None):
+    """Report reference completion separately from observed physical tracking.
+
+    Payload samples repeat once per aircraft. Count each control tick once,
+    and compute errors only while the selected trajectory is active. These
+    errors are descriptive measurements, not additional acceptance thresholds.
+    """
+    config = getattr(manager, "payload_circle_config", None)
+    if reference is None:
+        reference = getattr(manager, "payload_circle_reference", None)
+    mode = getattr(config, "mode", "hover")
+    ticks = {}
+    for row in trace:
+        ticks.setdefault(float(row["control_time_s"]), row)
+    trajectory_rows = [(now, row) for now, row in sorted(ticks.items())
+                       if mode in ("circle", "figure_eight", "attitude_cone")
+                       and row.get("payload_trajectory_mode") == mode]
+    # Landing overrides have their own phase; after release the controller
+    # clears its references. Neither may rewrite the last observed motion phase.
+    reference_phases = ("waiting", mode, "complete")
+    if mode == "attitude_cone":
+        reference_phases += ("cone_tilt_in", "cone_tilt_out")
+    reference_rows = [(now, row) for now, row in trajectory_rows
+                      if row.get("payload_trajectory_phase") in reference_phases
+                      and all(np.isfinite(float(row.get("payload_target_position_" + axis, np.nan)))
+                              for axis in "xyz")
+                      and np.isfinite(float(row.get("payload_target_yaw_rad", np.nan)))]
+    progress = [float(row.get("payload_trajectory_progress", row.get("payload_circle_progress", np.nan)))
+                for _, row in reference_rows]
+    progress = [value for value in progress if np.isfinite(value)]
+    completed = bool(reference is not None and any(
+        row.get("payload_trajectory_phase") == "complete"
+        and float(row.get("payload_trajectory_progress", row.get("payload_circle_progress", np.nan))) >= 1. - 1e-9
+        and now >= reference.end_time - 1e-9
+        for now, row in reference_rows))
+    position_errors, yaw_errors = [], []
+    attitude_errors, body_z_errors, half_angle_errors = [], [], []
+    attitude_invalid_count = 0
+    invalid_count = 0
+    for _, row in trajectory_rows:
+        if row.get("payload_trajectory_phase") != mode:
+            continue
+        actual = np.asarray([float(row.get("payload_position_" + axis, np.nan)) for axis in "xyz"])
+        desired = np.asarray([float(row.get("payload_target_position_" + axis, np.nan)) for axis in "xyz"])
+        actual_yaw = float(row.get("payload_yaw_rad", np.nan))
+        desired_yaw = float(row.get("payload_target_yaw_rad", np.nan))
+        if not (np.all(np.isfinite(actual)) and np.all(np.isfinite(desired))
+                and np.isfinite(actual_yaw) and np.isfinite(desired_yaw)):
+            invalid_count += 1
+            continue
+        position_errors.append(float(np.linalg.norm(actual - desired)))
+        delta = actual_yaw - desired_yaw
+        yaw_errors.append(float(np.rad2deg(np.arctan2(np.sin(delta), np.cos(delta)))))
+        attitude_error = float(row.get("payload_attitude_error_deg", np.nan))
+        axis_error = float(row.get("payload_cone_axis_error_deg", np.nan))
+        actual_half_angle = float(row.get("payload_cone_half_angle_deg", np.nan))
+        configured_half_angle = float(getattr(config, "cone_half_angle_deg", np.nan))
+        if np.isfinite(attitude_error):
+            attitude_errors.append(attitude_error)
+        elif mode == "attitude_cone":
+            attitude_invalid_count += 1
+        if mode == "attitude_cone":
+            if np.isfinite(axis_error):
+                body_z_errors.append(axis_error)
+            if np.isfinite(actual_half_angle) and np.isfinite(configured_half_angle):
+                half_angle_errors.append(actual_half_angle-configured_half_angle)
+    result = dict(
+        payload_trajectory_mode=mode,
+        payload_circle_radius_m=getattr(config, "radius_m", None),
+        payload_circle_speed_mps=getattr(config, "speed_mps", None),
+        payload_circle_ramp_s=getattr(config, "ramp_s", None),
+        payload_circle_settle_s=getattr(config, "settle_s", None),
+        payload_circle_direction=getattr(config, "direction", None),
+        payload_circle_revolutions=getattr(config, "revolutions", None),
+        payload_circle_center_m=reference.center_position.tolist() if reference is not None else None,
+        payload_circle_entry_m=reference.entry_position.tolist() if reference is not None else None,
+        payload_circle_start_time_s=float(reference.start_time) if reference is not None else None,
+        payload_circle_end_time_s=float(reference.end_time) if reference is not None else None,
+        payload_circle_duration_s=float(reference.duration) if reference is not None else None,
+        payload_circle_reference_completion_observed=completed,
+        payload_circle_observed_progress=max(progress) if progress else None,
+        payload_circle_observed_final_phase=(reference_rows[-1][1].get("payload_trajectory_phase")
+                                             if reference_rows else None),
+        payload_circle_tracking_sample_count=len(position_errors),
+        payload_circle_tracking_invalid_sample_count=invalid_count,
+        payload_circle_position_rmse_m=(float(np.sqrt(np.mean(np.square(position_errors))))
+                                        if position_errors else None),
+        payload_circle_position_max_error_m=max(position_errors) if position_errors else None,
+        payload_circle_yaw_rmse_deg=(float(np.sqrt(np.mean(np.square(yaw_errors))))
+                                     if yaw_errors else None),
+        payload_circle_yaw_max_error_deg=max(map(abs, yaw_errors)) if yaw_errors else None,
+    )
+    # Preserve existing consumers while exposing labels that describe either
+    # circle mode or the complete two-lobe figure-eight reference.
+    result.update({name.replace("payload_circle_", "payload_trajectory_", 1): value
+                   for name, value in result.items() if name.startswith("payload_circle_")})
+    lobe_centers = getattr(reference, "lobe_centers", None)
+    result["payload_trajectory_lobe_centers_m"] = (
+        np.asarray(lobe_centers, dtype=float).tolist() if lobe_centers is not None else None)
+    result.update(
+        payload_trajectory_attitude_tracking_sample_count=len(attitude_errors),
+        payload_trajectory_attitude_invalid_sample_count=attitude_invalid_count,
+        payload_trajectory_attitude_rmse_deg=(float(np.sqrt(np.mean(np.square(attitude_errors))))
+                                              if attitude_errors else None),
+        payload_trajectory_attitude_max_error_deg=max(attitude_errors) if attitude_errors else None,
+        payload_cone_config_half_angle_deg=(getattr(config, "cone_half_angle_deg", None)
+                                            if mode == "attitude_cone" else None),
+        payload_cone_period_s=(getattr(config, "cone_period_s", None) if mode == "attitude_cone" else None),
+        payload_cone_transition_s=(getattr(config, "cone_transition_s", None) if mode == "attitude_cone" else None),
+        payload_cone_tracking_sample_count=len(body_z_errors),
+        payload_cone_body_z_rmse_deg=(float(np.sqrt(np.mean(np.square(body_z_errors))))
+                                      if body_z_errors else None),
+        payload_cone_body_z_max_error_deg=max(body_z_errors) if body_z_errors else None,
+        payload_cone_half_angle_rmse_deg=(float(np.sqrt(np.mean(np.square(half_angle_errors))))
+                                          if half_angle_errors else None),
+        payload_cone_half_angle_max_error_deg=max(map(abs, half_angle_errors)) if half_angle_errors else None,
+    )
+    return result
+
+
+def circle_observation_failure(summary, earlier_failure=None):
+    """A generated moving reference must be fully observed to pass the replay."""
+    if earlier_failure is not None:
+        return earlier_failure
+    mode = summary["payload_trajectory_mode"]
+    if (mode in ("circle", "figure_eight", "attitude_cone")
+            and not summary.get("payload_trajectory_reference_completion_observed",
+                                summary["payload_circle_reference_completion_observed"])):
+        return mode + "_reference_incomplete"
+    return None
+
+
 def run_simulation(directory, parameter_overrides=None, pose_delay_s=None,
-                   command_delay_s=None, rate_bandwidth=(35.0, 35.0, 20.0),
+                   command_delay_s=None, *,
                    post_handoff_s=None, time_limit_s=None, initial_tilt_deg=0.0,
                    mocap_rate_alpha=0.2, render=False, record=None,
-                   target_payload_height_m=None, verify_controlled_fault_descent=False):
+                   target_payload_height_m=None, verify_controlled_fault_descent=False,
+                   simulation_config_path=None):
     """Return measurable handoff outcomes and save truth + real controller CSVs."""
+    simulation_input = load_simulation_config(simulation_config_path, parameter_overrides)
+    simulation = resolve_simulation_settings(
+        simulation_input, pose_delay_s, command_delay_s, time_limit_s)
+    if post_handoff_s is None:
+        post_handoff_s = float(simulation["post_handoff_s"])
+    if not np.isfinite(post_handoff_s) or post_handoff_s <= 0.0:
+        raise ValueError("post_handoff_s must be positive and finite")
     import mujoco
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[5] / "simulate_uav" / "udaan"))
@@ -323,12 +577,10 @@ def run_simulation(directory, parameter_overrides=None, pose_delay_s=None,
     directory.mkdir(parents=True, exist_ok=True)
     module = _controller_module()
     original_time = module.time.monotonic
-    manager, anchors = _slung_manager(module, directory, parameter_overrides)
+    manager, anchors = _slung_manager(module, directory, parameter_overrides,
+                                      use_live_payload_trajectory=True)
     validation_enabled = bool(manager.payload_flight_validation_enabled)
     validation_transport_s = float(manager.payload_flight_validation_transport_s)
-    simulation = resolve_simulation_settings(
-        module.rospy.get_param("/slung_payload"), pose_delay_s, command_delay_s, time_limit_s,
-    )
     pose_delay_s = float(simulation["pose_delay_s"])
     command_delay_s = float(simulation["command_delay_s"])
     time_limit_s = float(simulation["time_limit_s"])
@@ -340,12 +592,6 @@ def run_simulation(directory, parameter_overrides=None, pose_delay_s=None,
         minimum_interval_s=float(min(interval_pattern)),
         maximum_interval_s=float(max(interval_pattern)), nominal_control_rate_hz=manager.rate_hz,
     )
-    if post_handoff_s is None:
-        post_handoff_s = float(module.rospy.get_param(
-            "/slung_payload/post_handoff_s", 60.0
-        ))
-    if not np.isfinite(post_handoff_s) or post_handoff_s <= 0.0:
-        raise ValueError("post_handoff_s must be positive and finite")
     # The replay's observation window owns the end time. Prevent the normal
     # mission trajectory (which defaults to a 30 s hover) from entering its
     # landing phase before the requested post-handoff window has elapsed.
@@ -405,6 +651,7 @@ def run_simulation(directory, parameter_overrides=None, pose_delay_s=None,
         "ctbr_controller", "ctbr_trajectory", "slung_payload",
         "ctbr_controller_cf3", "ctbr_controller_cf4", "ctbr_controller_cf5",
     ) if module.rospy.has_param("/" + root)}
+    snapshot["slung_simulation"] = deepcopy(simulation_input)
     snapshot["simulation_runtime"] = dict(
         simulation, post_handoff_s=float(post_handoff_s),
         control_schedule=schedule_metadata,
@@ -415,7 +662,7 @@ def run_simulation(directory, parameter_overrides=None, pose_delay_s=None,
     )
     snapshot["simulation_runtime"]["initial_vehicle_positions_m"] = anchors.tolist()
     base = default_config()
-    config = build_physics_config(base, manager, simulation, rate_bandwidth)
+    config = build_physics_config(base, manager, simulation)
     validation_ground_center_z = float(config.body_size[2]) / 2.0
     if validation_enabled or verify_controlled_fault_descent:
         set_validation_ground_reference(
@@ -477,6 +724,7 @@ def run_simulation(directory, parameter_overrides=None, pose_delay_s=None,
     validation_landing_started_time = None
     controlled_fault_landing_started_time = None
     validation_monitor = ValidationLandingMonitor(validation_ground_center_z)
+    observed_circle_reference = None
     trace = []
     previous_control_time = None
     actual_control_intervals = []
@@ -610,6 +858,10 @@ def run_simulation(directory, parameter_overrides=None, pose_delay_s=None,
             if ekf_link is not None:
                 ekf_link.deliver(now, manager.vehicles)
             manager._timer_callback(None)
+            # The normal landing clears the manager's cooperative caches.
+            # Keep metadata from a reference actually produced by the replay.
+            if manager.payload_circle_reference is not None:
+                observed_circle_reference = manager.payload_circle_reference
             phase = manager.vehicles[0].flight_phase
             if not phases or phases[-1] != phase:
                 phases.append(phase)
@@ -688,6 +940,9 @@ def run_simulation(directory, parameter_overrides=None, pose_delay_s=None,
                     physical_cable_length_m=float(model.data.ten_length[model._tendon_ids[index]]),
                     physical_cable_limit_m=float(config.cable_lengths[index]),
                     **actuator_trace_fields(model, index),
+                    **payload_reference_trace_fields(
+                        manager, manager.last_transport_overrides.get(id(vehicle), {}),
+                        payload_rotation=payload_rotation),
                     **{f"payload_position_{a}": v for a, v in zip("xyz", payload["position"])},
                     **{f"payload_body_rate_{a}": v for a, v in zip("xyz", payload["body_rate"])},
                     **{f"position_{a}": v for a, v in zip("xyz", state["position"])},
@@ -756,6 +1011,8 @@ def run_simulation(directory, parameter_overrides=None, pose_delay_s=None,
             elif not validation_enabled and not verify_controlled_fault_descent and (
                     position_error is None or not np.isfinite(position_error) or position_error > 0.10):
                 failure = "hover_position_error"
+        circle_summary = payload_circle_summary(manager, trace, observed_circle_reference)
+        failure = circle_observation_failure(circle_summary, failure)
         final_vehicle_states = model.vehicle_states()
         final_thrusts = [float(vehicle.last_control_command["collective_thrust"])
                          for vehicle in manager.vehicles]
@@ -771,7 +1028,10 @@ def run_simulation(directory, parameter_overrides=None, pose_delay_s=None,
             observed_control_interval_max_s=(max(actual_control_intervals) if actual_control_intervals else None),
             success_category=(None if failure is not None else
                               "controlled_fault_descent" if verify_controlled_fault_descent else
-                              "short_flight_validation" if validation_enabled else "post_handoff_hover"),
+                              "short_flight_validation" if validation_enabled else
+                              "post_handoff_payload_" + circle_summary["payload_trajectory_mode"]
+                              if circle_summary["payload_trajectory_mode"] in ("circle", "figure_eight", "attitude_cone")
+                              else "post_handoff_hover"),
             verify_controlled_fault_descent=bool(verify_controlled_fault_descent),
             controlled_fault_landing_started_time_s=controlled_fault_landing_started_time,
             controlled_fault_descent_completed=bool(
@@ -800,7 +1060,7 @@ def run_simulation(directory, parameter_overrides=None, pose_delay_s=None,
             initial_physical_cable_error_min_m=float(np.min(initial_cable_errors)),
             initial_physical_cable_error_max_m=float(np.max(initial_cable_errors)),
             **initial_payload_metadata,
-            onboard_controller=config.onboard_controller,
+            **circle_summary,
             motor_model=config.motor_model,
             effective_plant=snapshot["simulation_runtime"]["effective_plant"],
             ekf_feedback_mode=ekf_mode,
@@ -818,7 +1078,7 @@ def run_simulation(directory, parameter_overrides=None, pose_delay_s=None,
             mellinger_rate_derivative_gain=config.mellinger_rate_derivative_gain,
             physics_timestep_s=config.timestep, pose_sample_rate_hz=1.0/pose_period,
             pose_delay_s=pose_delay_s, command_delay_s=command_delay_s,
-            rate_loop_bandwidth=list(rate_bandwidth), initial_tilt_deg=initial_tilt_deg,
+            initial_tilt_deg=initial_tilt_deg,
             handoff_time_s=handoff_time, final_time_s=float(model.data.time), phases=phases,
             minimum_clearance_m=minimum_clearance if np.isfinite(minimum_clearance) else None,
             maximum_prelift_xy_error_m=maximum_xy_error,
@@ -855,12 +1115,12 @@ def run_simulation(directory, parameter_overrides=None, pose_delay_s=None,
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--candidate", type=Path, help="ROS parameter YAML overlay, used only in simulation")
-    parser.add_argument("--pose-delay", type=float, default=None, help="Override simulation.pose_delay_s")
-    parser.add_argument("--command-delay", type=float, default=None, help="Override simulation.command_delay_s")
-    parser.add_argument("--rate-bandwidth", type=float, nargs=3, default=(35.0, 35.0, 20.0))
+    parser.add_argument("--candidate", type=Path, help="Flight roots and slung_simulation YAML overlay, used only in replay")
+    parser.add_argument("--simulation-config", type=Path, help="Offline slung_simulation YAML (defaults to config/slung_simulation.yaml)")
+    parser.add_argument("--pose-delay", type=float, default=None, help="Override slung_simulation.pose_delay_s")
+    parser.add_argument("--command-delay", type=float, default=None, help="Override slung_simulation.command_delay_s")
     parser.add_argument("--initial-tilt", type=float, default=0.0,
-                        help="Initial aircraft roll disturbance (deg); load uses simulation.initial_payload_rpy_deg")
+                        help="Initial aircraft roll disturbance (deg); load uses slung_simulation.initial_payload_rpy_deg")
     parser.add_argument("--render", action="store_true", help="Open the MuJoCo window during replay")
     parser.add_argument("--record", type=Path, help="Save the MuJoCo window as GIF or MP4")
     parser.add_argument(
@@ -870,8 +1130,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
     overrides = yaml.safe_load(args.candidate.read_text()) if args.candidate else None
     summary = run_simulation(args.output, overrides, args.pose_delay, args.command_delay,
-                             args.rate_bandwidth, initial_tilt_deg=args.initial_tilt,
+                             initial_tilt_deg=args.initial_tilt,
                              render=args.render, record=args.record,
-                             target_payload_height_m=args.target_payload_height)
+                             target_payload_height_m=args.target_payload_height,
+                             simulation_config_path=args.simulation_config)
     print(json.dumps(summary, indent=2))
     sys.exit(0 if summary["success"] else 1)

@@ -169,7 +169,10 @@ def test_failed_profile_evaluation_cannot_restart_the_retry_budget(tmp_path, mon
                     raise ValueError("landing evaluation failed")
                 return np.full(3, np.nan), np.zeros(3), np.zeros(3)
 
-        monkeypatch.setattr(module, "SlungLandingProfile", BrokenEvaluation)
+        # Inject the failing planner where the extracted reference builder
+        # resolves it; the public entry only reexports compatibility symbols.
+        import ctbr_payload_reference
+        monkeypatch.setattr(ctbr_payload_reference, "SlungLandingProfile", BrokenEvaluation)
         for now in (18.02, 18.04, 18.06):
             tick(now)
         assert all(len(commands) == 4 for commands in published.values())
