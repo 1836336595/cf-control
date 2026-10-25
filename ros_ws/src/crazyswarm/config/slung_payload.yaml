@@ -12,7 +12,7 @@ slung_payload:
   target_payload_height_m: 0.60
   # 吊运轨迹由负载参考统一驱动；ctbr_controller.yaml 的普通飞机轨迹保持 hover。
   trajectory:
-    mode: hover           # hover / circle / figure_eight / attitude_cone
+    mode: attitude_cone           # hover / circle / figure_eight / attitude_cone
     radius_m: 0.50
     center_xy: [0.0, 0.0]        # 圆锥模式为固定质心 XY；八字模式为交点。
     # circle 模式时本项表示单圆圆心；注释掉本项则恢复单圆的自动圆心。

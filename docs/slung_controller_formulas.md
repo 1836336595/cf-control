@@ -11,11 +11,11 @@
 | 主机任务 | `slung_load`，主机控制频率 70 Hz |
 | 负载力构造 | `reference_cascade` |
 | 飞机运输反馈 | `native_position_pid`，运输积分速度权重 1.0 |
-| 负载参考 | 当前 `circle`；轨迹参数与普通飞机 `hover` 分别配置 |
+| 负载参考 | 当前 `attitude_cone`；轨迹参数与普通飞机 `hover` 分别配置 |
 | 圆锥切换配置 | 15°、两圈各 30 s、倾斜/恢复各 5 s，中心固定在世界 `[0,0,0.6]` m |
 | 圆锥接管后的时钟 | h20 倾斜，h25/55 分别开始两圈，h85 恢复水平，h100 计划下降 |
-| 动态构型补偿 | `transport_attitude_trim_dynamic_enabled: false`，显式启用后使用世界系端点学习 |
-| 名义几何 | 负载质量 0.023 kg，尺寸 `[0.08,0.06,0.05]` m，三绳均 0.850 m |
+| 动态构型补偿 | 动态开关和抬升期间更新均为 `true`，使用世界系端点学习 |
+| 名义几何 | 负载质量 0.023 kg，尺寸 `[0.08,0.06,0.05]` m，CF3/CF4/CF5 绳长为 `[0.857,0.860,0.854]` m |
 | 负载姿态带宽 | `[1.5,1.5,0.7]` Hz，阻尼比 0.90 |
 
 这里的 h0 是 `TAUT_RAMP` 开始，不是解锁、离地或到达 0.6 m 的时刻。
@@ -312,63 +312,216 @@ $\arccos(e_3^TR_0e_3)$；仅检查 Euler yaw 无法判断是否正确扫描圆�
 
 ## 8. 飞机运输 native PID、差分积分与支撑 trim
 
-保持误差使用 $x_{i,\rm hold},v_{i,\rm hold}$；设
-$p_i=-K_{p,i}e_{p,i}-K_{v,i}e_{v,i}$，保持倍率 $\lambda$ 从 2.0 衔接到 1.5。
-当前运输 native PID 的专用积分满足：
+本节对应 `GeometricCtbrController` 内的运输位置反馈，源码为
+[ctbr_transport_vehicle_controller.py](../ros_ws/src/crazyswarm/scripts/ctbr_transport_vehicle_controller.py)
+和 [native_position_pid.py](../ros_ws/src/crazyswarm/scripts/native_position_pid.py)。
+当前启用 `native_position_pid`；第 8.6 节仅保留另一分支的对照说明。
+每个公式下逐行给出符号、单位及当前取值；实测状态、轨迹参考、在线积分没有固定常数值。
+向量按世界 XYZ 排列，增益向量在公式中写为对角矩阵。
 
-$$I_{t,i}^+=\operatorname{clip}_{\pm L_I}
-[I_{t,i}+\Delta t(w_ve_{v,i}+0.5e_{p,i})],\qquad \|e_{p,i}\|<0.23\ \mathrm{m}.$$
+### 8.1 构型位置与速度误差
 
-当前 $w_v=1.0$，$K_{It}=3K_{I,\rm independent}$，$L_I=(10/3)L_{I,\rm independent}$。
-逐轴反馈加速度限幅算子记为 $C_a$，则：
+$$e_{p,i}=x_i-x_{i,\mathrm{hold}}.$$
 
-$$a_{PD}=C_a(\lambda p_i),\quad a_{PID}=C_a(\lambda p_i-K_{It}I_{t,i}),
-\qquad b_i^{\rm req}=m_i(a_{PID}-a_{PD}).$$
+- $i$：飞机编号，依次为 CF3、CF4、CF5。
+- $e_{p,i}$：构型位置误差，单位 m；在线计算，目标为 $[0,0,0]^T$。
+- $x_i$：飞机动捕刚体原点的世界位置，单位 m；取 NOKOV 实测值。
+- $x_{i,\mathrm{hold}}$：当前构型位置参考，单位 m；取 `position_hold_position`，包含第 9 节的构型 trim。
 
-先将 $b_i^{\rm req}$ 按三维范数限制到 0.06 N，再把相对上一实际偏置的增量限制为
-$0.004\Delta t$ N；得到 $b_i$。预算只限制新增 I 力，整个 PD/PID 还受反馈、合力和推力限制。
-由于先作加速度裁剪，$b_i^{\rm req}$ 不一定等于未饱和的 $-m_iK_{It}I_{t,i}$。
-同 tick 重算可更新 PD，但不得再次积分或消耗变化率预算。
+$$e_{v,i}=v_i-v_{i,\mathrm{hold}}.$$
 
-当前运输反馈为 $F_{\rm fb,i}=m_i a_{PD}+w_u b_i$。
-卸载权重 $w_u$ 空中为 1，触地后沿 2 s 五次曲线降到 0；其导数必须包含
-$\frac{d}{dt}(w_ub_i)=w_u\dot b_i+\dot w_ub_i$。
-PID 反馈导数还包含 $-\lambda K_v(\ddot x_i-\ddot x_{i,\rm hold})$、$\dot\lambda p_i$，
-不是把参考加速度额外再加入一份力前馈。
-这里 $\ddot x_i$ 为测量/反馈飞机加速度，不是第 5 节包含重力的核心比力 $a_i$。
+- $e_{v,i}$：构型速度误差，单位 m/s；在线计算，目标为 $[0,0,0]^T$。
+- $v_i$：飞机平移控制速度，单位 m/s；取经过主机滤波的 EKF 速度，CSV 对应 `control_velocity`。
+- $v_{i,\mathrm{hold}}$：构型速度参考，单位 m/s；取 `position_hold_velocity`，由第 7、9 节的参考解析生成。
 
-保留的 `differential_integral` 分支使用 $F_{\rm fb,i}=m_iC_a(\lambda p_i)+w_ub_{d,i}$：
+静态参考建立后，名义构型速度为零；动态圆锥或 trim 平滑段中的速度参考一般非零。
+导数未就绪时，代码暂设速度误差为零并禁止积分学习，不能将其理解为已测得零速度。
 
-$$\widetilde e_i=e_{p,i}-{1\over3}\sum_j e_{p,j},\qquad
-\dot b_{d,i}^{\rm req}=-k_d\widetilde e_i,\qquad \sum_i b_{d,i}=0.$$
+### 8.2 位置 PD 反馈与当前增益
 
-用全组三机共同缩放分别限制最大每机范数与更新范数，维持零和；配置为
-$k_d=0.05$ N/(m·s)、每机 0.04 N、0.002 N/s。
-当前 native 模式即使保留 `transport_hold_integral_enabled: true`，也不叠加该差分偏置或第二份 PD。
+$$p_i=-K_{p,i}e_{p,i}-K_{v,i}e_{v,i}.$$
 
-两种运输反馈都保留独立的竖直支撑 trim：
+- $p_i$：尚未乘保持倍率的 PD 反馈加速度，单位 m/s²；在线计算。
+- $K_{p,3}$：CF3 位置增益，取 $\operatorname{diag}(3.0,3.0,4.0)$ s⁻²，对应 `independent_position_gain`。
+- $K_{p,4}$：CF4 位置增益，取 $\operatorname{diag}(4.0,4.0,4.0)$ s⁻²。
+- $K_{p,5}$：CF5 位置增益，取 $\operatorname{diag}(4.0,4.0,4.0)$ s⁻²。
+- $K_{v,3}$：CF3 速度增益，取 $\operatorname{diag}(3.12,3.12,3.60)$ s⁻¹，对应 `independent_velocity_gain`。
+- $K_{v,4}$：CF4 速度增益，取 $\operatorname{diag}(3.60,3.60,3.60)$ s⁻¹。
+- $K_{v,5}$：CF5 速度增益，取 $\operatorname{diag}(3.60,3.60,3.60)$ s⁻¹。
+- $e_{p,i}$：位置误差，定义及来源见第 8.1 节。
+- $e_{v,i}$：速度误差，定义及来源见第 8.1 节。
 
-$$b_{z,i}^{\rm req}(0)=\max(F_{i,h,z}-u_{i,z},0),\qquad
-H_i=\max(T_{\max,i}-u_{i,z},0),$$
+$$a_{PD,i}=\mathcal C_{a_{\max}}(\lambda p_i).$$
 
-$$L_i=\min\!\left(\max(0.25,b_{z,i}^{\rm req}(0)),H_i\right),\qquad
-b_{z,i}(0)=\min(b_{z,i}^{\rm req}(0),L_i).$$
+- $a_{PD,i}$：实际使用的 PD 反馈加速度，单位 m/s²；在线计算。
+- $\mathcal C_{a_{\max}}$：逐轴裁剪算子，各分量裁剪到 $[-a_{\max,j},a_{\max,j}]$。
+- $a_{\max}$：三机均取 $[6.0,6.0,8.0]^T$ m/s²，对应 `independent_max_feedback_acceleration`。
+- $\lambda$：无量纲保持倍率；张力渐增时取 2.0，随后在 12 s 抬升段内平滑过渡到 1.5，稳态取 1.5。
+- $p_i$：式中上一条 PD 加速度，不是飞机滚转角速度符号。
 
-$$\dot b_{z,i}^{\rm req}=\operatorname{clip}_{\pm0.03}[0.20(x_{0d,z}-x_{0,z})].$$
+上述增益先产生加速度，再乘飞机质量得到力。
+稳态 CF3 的有效 P/D 分别为 $[4.5,4.5,6.0]$、$[4.68,4.68,5.40]$；
+CF4、CF5 分别为 $[6.0,6.0,6.0]$、$[5.40,5.40,5.40]$。
+这里不使用普通非吊运分支的 `position_gain`、`velocity_gain` 替代这两组增益。
 
-其状态限制在 $[0,L_i]$；普通预算为 0.25 N，接管初值可在可用竖直推力余量内提高该上限，
-但实际初值仍受该余量裁剪。上一周期命令总推力达到 $T_{\max,i}-0.01\ \mathrm{N}$ 时停止正向更新，
-仍允许负向消退，直至状态下限。初值可逐机不同，既非零和也非额外再加负载重量。
-实现见 [slung_transport_guard.py](../ros_ws/src/crazyswarm/scripts/slung_transport_guard.py) 和
-[slung_transport_integral.py](../ros_ws/src/crazyswarm/scripts/slung_transport_integral.py)。
+### 8.3 运输专用位置积分
 
-运输 native I、差分 I 在参考建立完成后才更新；姿态参考 trim 的提前更新选项见第9.3节。
-学习还要求负载/车辆反馈新鲜、
-EKF/滤波导数有效、各绳带符号张力为正、
-上一周期主机各输出未限幅，且未进入下降、故障或验证截止。
-native I 允许在健康的运动参考期间学习；差分 I 在圆周/八字/圆锥期间冻结学习。
-姿态参考 trim 默认也冻结，显式启用动态模式后才允许在健康的运动参考期间继续更新，且额外使用第 9.3 节门控。
-冻结学习保留状态；缓存保持另设显式力保持，触地后才卸载和复位。
+$$I_{t,i}^{k+1}=\mathcal C_{L_I}\!\left(I_{t,i}^{k}+\chi_i^k\Delta t_k\left[w_v e_{v,i}^{k}+c_Ie_{p,i}^{k}\right]\right).$$
+
+- $I_{t,i}^{k}$：第 $k$ 个控制周期的运输位置积分状态，等效单位 m；接管初始化为 $[0,0,0]^T$，随后在线更新。
+- $\mathcal C_{L_I}$：逐轴积分状态限幅，将每轴裁剪到 $[-L_{I,j},L_{I,j}]$。
+- $L_I$：三机均取 $[2/3,2/3,2/3]^T$ m，来自 $[0.2,0.2,0.2]\times3.3333333333333335$。
+- $\chi_i^k$：积分准入量，满足全部学习条件且 $\|e_{p,i}\|<0.23$ m 时取 1，否则取 0；同一 tick 不重复积分。
+- $\Delta t_k$：实际积分步长，单位 s；代码裁剪到 $[0.001,0.05]$，70 Hz 名义值约 0.014286 s。
+- $w_v$：积分中的速度误差权重，当前取 1.0，对应 `transport_position_pid_integral_velocity_weight`；只缩放 I 输入中的速度项。
+- $c_I$：积分中的位置误差系数，代码固定取 0.5 s⁻¹；与普通位置环的 `position_integral_c1: 0.35` 不同。
+- $e_{v,i}^{k}$：本周期速度误差，单位 m/s；来源同第 8.1 节。
+- $e_{p,i}^{k}$：本周期位置误差，单位 m；来源同第 8.1 节。
+
+$$a_{PID,i}=\mathcal C_{a_{\max}}\!\left(\lambda p_i-K_{It,i}I_{t,i}^{k+1}\right).$$
+
+- $a_{PID,i}$：包含运输积分后的限幅反馈加速度，单位 m/s²；在线计算。
+- $K_{It,i}$：三机均取 $\operatorname{diag}(2.4,2.4,2.4)$ s⁻²，由 `independent_integral_gain: [0.8,0.8,0.8]` 乘 `transport_position_pid_integral_gain_scale: 3.0`。
+- $I_{t,i}^{k+1}$：本周期更新后的积分状态，来源为上一公式；冻结时保留原状态。
+- $\lambda$：保持倍率，张力渐增 2.0、稳态 1.5；只乘 P/D，不再额外乘积分项。
+- $p_i$：第 8.2 节定义的 PD 加速度。
+- $a_{\max}$：逐轴反馈限幅，当前为 $[6.0,6.0,8.0]^T$ m/s²。
+
+学习条件还包括参考建立完成、负载和飞机反馈新鲜、EKF/滤波导数有效、
+各绳带符号张力为正、上一周期主机输出未限幅，且未进入下降、故障或验证截止。
+当前参考建立时间为接管后约 17 s；健康的动态参考允许 native I 学习。
+普通单机位置积分与运输积分使用不同状态，运输阶段不重复更新普通位置积分。
+
+### 8.4 新增积分力的幅值和变化率限制
+
+$$b_i^{\mathrm{req}}=m_i(a_{PID,i}-a_{PD,i}).$$
+
+- $b_i^{\mathrm{req}}$：运输积分请求增加的三维反馈力，单位 N；在线计算。
+- $m_3$：CF3 质量，取 0.0434 kg，对应 CF3 的 `mass_kg`。
+- $m_4$：CF4 质量，取 0.0440 kg。
+- $m_5$：CF5 质量，取 0.0424 kg。
+- $a_{PID,i}$：第 8.3 节的含积分反馈加速度，单位 m/s²。
+- $a_{PD,i}$：第 8.2 节的纯 PD 反馈加速度，单位 m/s²。
+
+$$\mathcal B_r(y)=y\min\!\left(1,\frac{r}{\max(\|y\|,\varepsilon_b)}\right).$$
+
+- $\mathcal B_r$：向量范数限幅算子，保持向量方向，使输出范数不超过 $r$。
+- $y$：待限制的三维力或力增量，单位 N；由当前控制计算得到。
+- $r$：该次限制使用的非负范数上限，单位 N；下两式分别取 $B_I$ 和 $\rho_I\Delta t_k$。
+- $\varepsilon_b$：分母数值保护量，代码取 $10^{-30}$ N。
+
+$$\bar b_i=\mathcal B_{B_I}(b_i^{\mathrm{req}}).$$
+
+- $\bar b_i$：只经过幅值限制的积分力，单位 N；在线计算。
+- $B_I$：三机均取 0.06 N，对应 `transport_position_pid_force_limit_n`；限制的是三维范数，不是每轴各 0.06 N。
+- $b_i^{\mathrm{req}}$：上一请求力公式的输出，单位 N。
+- $\mathcal B_{B_I}$：上述范数限幅算子，以 0.06 N 为半径。
+
+$$b_i^{k+1}=b_i^k+\mathcal B_{\rho_I\Delta t_k}(\bar b_i-b_i^k).$$
+
+- $b_i^{k+1}$：本周期实际增加的运输积分力，单位 N；作为持久状态保存。
+- $b_i^k$：上一周期实际积分力，单位 N；初始化为 $[0,0,0]^T$。
+- $\bar b_i$：当前幅值受限的目标积分力，单位 N。
+- $\rho_I$：三机均取 0.004 N/s，对应 `transport_position_pid_force_rate_limit_nps`。
+- $\Delta t_k$：本周期步长，名义 70 Hz 下每步最大力增量约 $5.7143\times10^{-5}$ N。
+- $\mathcal B_{\rho_I\Delta t_k}$：对积分力增量作范数限制；显式缓存保持或重复 tick 时增量预算取零。
+
+先裁剪加速度，再取 PID 与 PD 的差，因此发生加速度饱和时，
+请求积分力一般不等于直接计算的负质量乘积分增益乘积分状态。
+冻结积分状态和冻结实际力是两种不同操作；缓存保持显式冻结后者。
+
+### 8.5 实际运输位置反馈力与卸载
+
+$$F_{\mathrm{fb},i}=m_i a_{PD,i}+w_u b_i.$$
+
+- $F_{\mathrm{fb},i}$：当前 `native_position_pid` 提供的位置反馈力，单位 N；加入第 10 节的协同基础力。
+- $m_i$：飞机质量，CF3/CF4/CF5 分别为 0.0434/0.0440/0.0424 kg。
+- $a_{PD,i}$：限幅后的 PD 加速度，单位 m/s²；当前保持倍率已包含在内。
+- $w_u$：积分力卸载权重，无量纲；空中取 1，负载触地确认后在 2.0 s 内按五次曲线降到 0。
+- $b_i$：第 8.4 节的实际受限积分力，单位 N；空中范数不超过 0.06 N。
+
+$$\frac{\mathrm d}{\mathrm dt}(w_u b_i)=w_u\dot b_i+\dot w_u b_i.$$
+
+- $\dot b_i$：实际受限积分力变化率，单位 N/s；当前有限预算下由本周期实际力增量除以实际步长计算。
+- $\dot w_u$：卸载权重变化率，单位 s⁻¹；空中取 0，卸载时取 2.0 s 五次曲线的解析导数。
+- $w_u$：当前卸载权重，空中为 1、卸载完成为 0。
+- $b_i$：本周期实际受限积分力，单位 N；不是无限制的请求力。
+
+PD 力导数另包含参考加速度误差和保持倍率的变化率。
+参考加速度的动力学前馈已由基础力及第 7 节构型补偿负责，不在位置 PID 中重复添加。
+
+### 8.6 保留的差分积分分支：当前未启用
+
+$$\widetilde e_i=e_{p,i}-\frac13\sum_{j\in\mathcal V}e_{p,j}.$$
+
+- $\widetilde e_i$：去除三机共同平移后的相对构型误差，单位 m；在线计算。
+- $e_{p,i}$：本机位置误差，定义同第 8.1 节。
+- $e_{p,j}$：第 $j$ 架飞机的位置误差，单位 m；$j$ 遍历集合 $\mathcal V$。
+- $\mathcal V$：当前飞机编号集合，取 $\{3,4,5\}$，对应 CF3、CF4、CF5。
+- $1/3$：三机算术平均系数，当前飞机数量为 3。
+
+$$\dot b_{d,i}^{\mathrm{req}}=-k_d\widetilde e_i.$$
+
+- $\dot b_{d,i}^{\mathrm{req}}$：差分力补偿的请求更新率，单位 N/s；仅对照分支使用。
+- $k_d$：取 0.05 N/(m·s)，对应 `transport_hold_integral_gain_npm_s`。
+- $\widetilde e_i$：上式的相对构型位置误差，单位 m。
+
+该分支共同缩放三机更新，保持三机补偿力之和为零。
+每机力范数上限取 0.04 N，变化率范数上限取 0.002 N/s。
+当前 `transport_feedback_controller: native_position_pid`，所以即使
+`transport_hold_integral_enabled: true`，也不叠加这份差分力或第二份 PD。
+
+### 8.7 竖直支撑残差的初始化
+
+$$b_{z,i}^{\mathrm{req}}(0)=\max(F_{i,h,z}-u_{i,z}(0),0).$$
+
+- $b_{z,i}^{\mathrm{req}}(0)$：接管时希望继承的竖直支撑残差，单位 N；由接管前实际命令在线计算，不是固定负载重量。
+- $F_{i,h,z}$：预抬结束时冻结的本机期望合力 Z 分量，单位 N；来自 `payload_handoff_forces`。
+- $u_{i,z}(0)$：接管初次计算的协同基础力 Z 分量，单位 N；由第 5 节实时模型计算。
+- $0$：残差下限，取 0 N，初始化不额外施加向下的支撑残差。
+
+$$H_i=\max(T_{\max,i}-u_{i,z}(0),0).$$
+
+- $H_i$：初始化可用的竖直命令余量，单位 N；由当前基础力与推力上限计算。
+- $T_{\max,i}$：三机主机命令上限均取 1.00 N，对应 `max_command_thrust_newton`。
+- $u_{i,z}(0)$：接管初次协同基础力 Z 分量，单位 N；不固定为三机相同值。
+- $0$：可用余量下限，取 0 N。
+
+$$L_{z,i}=\min\!\left(\max(B_z,b_{z,i}^{\mathrm{req}}(0)),H_i\right).$$
+
+- $L_{z,i}$：本次运行的支撑残差上限，单位 N；逐机在线冻结，不一定相同。
+- $B_z$：普通支撑残差预算，取 0.25 N，对应 `transport_support_trim_limit_n`。
+- $b_{z,i}^{\mathrm{req}}(0)$：初始化请求残差，单位 N；较大时允许在可用余量内完整继承。
+- $H_i$：初始化可用竖直余量，单位 N；对提高后的预算仍有约束。
+
+$$b_{z,i}(0)=\min(b_{z,i}^{\mathrm{req}}(0),L_{z,i}).$$
+
+- $b_{z,i}(0)$：实际接受的初始竖直支撑残差，单位 N；在线计算并保存。
+- $b_{z,i}^{\mathrm{req}}(0)$：请求初值，单位 N。
+- $L_{z,i}$：上式得到的本次运行上限，单位 N。
+
+### 8.8 竖直支撑残差的后续更新
+
+$$\dot b_{z,i}^{\mathrm{req}}=\operatorname{clip}_{[-\rho_z,\rho_z]}\!\left(k_z(x_{0d,z}-x_{0,z})\right).$$
+
+- $\dot b_{z,i}^{\mathrm{req}}$：本周期请求的支撑力变化率，单位 N/s；在线计算。
+- $\rho_z$：取 0.03 N/s，对应 `transport_support_trim_rate_nps`。
+- $k_z$：取 0.20 N/(m·s)，对应 `transport_support_integral_gain_npm_s`。
+- $x_{0d,z}$：负载几何中心参考高度，单位 m；抬升后取 0.60 m，下降中随参考变化。
+- $x_{0,z}$：实测负载几何中心高度，单位 m；由 NOKOV 上表面位置和姿态换算。
+
+$$b_{z,i}^{k+1}=\operatorname{clip}_{[0,L_{z,i}]}\!\left(b_{z,i}^{k}+\Delta t_k\dot b_{z,i}^{\mathrm{req}}\right).$$
+
+- $b_{z,i}^{k+1}$：本周期实际支撑残差，单位 N；加入本机世界 Z 方向合力。
+- $b_{z,i}^{k}$：上一周期支撑残差，单位 N；初值来自第 8.7 节。
+- $\Delta t_k$：该支撑更新实际使用的机群控制步长，单位 s；名义 70 Hz 时约 0.014286 s。
+- $\dot b_{z,i}^{\mathrm{req}}$：受变化率约束后的更新请求，单位 N/s。
+- $L_{z,i}$：初始化时冻结的本机上限，单位 N。
+
+上一周期总推力达到上限减 0.01 N 时，正向更新率改为零，负向消退仍允许。
+负载触地确认后的 2.0 s 卸载阶段另按冻结残差作五次消退，最终复位。
+此支撑项不要求零和，也不是再次给三机叠加一份负载重力。
+实现见 [slung_transport_guard.py](../ros_ws/src/crazyswarm/scripts/slung_transport_guard.py)。
 
 ## 9. 姿态到构型的慢修正与下降衔接
 
@@ -484,39 +637,196 @@ $\Omega=J_r(\xi)\dot\xi$、$\dot\Omega=J_r\ddot\xi+\dot J_r\dot\xi$，
 
 ## 10. 合力限制、滤波与最终 CTBR
 
-令 $\Delta u_i=m_i\Delta a_i$，则运输接管期间可概括为：
+本节说明“各机几何控制器”的最后计算步骤：三维合力先决定飞机期望姿态，
+姿态误差再决定机体系角速度命令，同时将合力投影到实际机体推力轴得到总推力。
+对应 [ctbr_geometric_controller.py](../ros_ws/src/crazyswarm/scripts/ctbr_geometric_controller.py)
+及 [ctbr_transport_vehicle_controller.py](../ros_ws/src/crazyswarm/scripts/ctbr_transport_vehicle_controller.py)。
 
-$$F_{i,\rm raw}=(1-\beta)F_{i,h}
-+\beta[u_i+\Delta u_i+b_{z,i}e_3+F_{\rm fb,i}].$$
+### 10.1 构型运动补偿与原始合力
 
-$F_{i,h}$ 优先使用冻结的接管实际期望力；没有该快照时按原独立保持关系计算。
-对 $\beta$、保持倍率与卸载权重的乘积求导时均保留乘积导数项。
-先限制竖直合力至 $[0,T_{\max}]$，再限制水平模长至 $F_z\tan\theta_{\max}$；
-相同活动分支用于期望力导数。该操作限制倾角与竖直分量，不直接把完整合力模长限制到 $T_{\max}$。
+$$\Delta u_i=m_i\Delta a_i.$$
 
-当前运输力滤波时间常数 $\tau_F=0.005$ s：
+- $\Delta u_i$：构型运动产生的附加惯性补偿力，单位 N；在线计算。
+- $m_i$：飞机质量，CF3/CF4/CF5 分别取 0.0434/0.0440/0.0424 kg。
+- $\Delta a_i$：第 7 节的完整构型加速度补偿，单位 m/s²；静态名义参考取零，运动或构型平滑修正时按参考计算。
 
-$$F_f^+=F_f+{\Delta t\over\tau_F+\Delta t}(F_{\rm limited}-F_f),\qquad
-\dot F_f=(F_f^+-F_f)/\Delta t.$$
+$$F_{i,\mathrm{raw}}=(1-\beta)F_{i,h}+\beta\left(u_i+\Delta u_i+b_{z,i}e_3+F_{\mathrm{fb},i}\right).$$
 
-复位时直接继承输入，导数取零；机体角速度命令滤波当前为 0。
-以 $b_{3c}=F_f/\|F_f\|$，将 yaw 参考在垂直 $b_{3c}$ 的平面正交化，得到 $R_{ic}$。
-低力模长或航向投影退化时使用上一有效轴/航向回退。
+- $F_{i,\mathrm{raw}}$：限幅前的世界系期望合力，单位 N；在线计算。
+- $\beta$：接管权重，无量纲；从 0 平滑增加到 1，当前渐增时间为 5.0 s。
+- $F_{i,h}$：接管前冻结的本机期望合力，单位 N；本次任务取预抬结束时的实际命令快照，不是固定常数。
+- $u_i$：第 5 节的协同基础力，单位 N；当前 `reference_cascade` 包含分配绳力、重力和挂点运动等模型项。
+- $\Delta u_i$：上一公式给出的构型附加补偿力，单位 N；按第 7 节避免重复补偿挂点和向心运动。
+- $b_{z,i}$：第 8.7、8.8 节的竖直支撑残差，单位 N；在线状态，普通预算为 0.25 N。
+- $e_3$：世界 Z 轴单位向量，固定取 $[0,0,1]^T$。
+- $F_{\mathrm{fb},i}$：第 8.5 节的 native 位置反馈力，单位 N；包含 PD 和有界运输 I。
 
-$$e_{R,i}={1\over2}(R_{ic}^TR_i-R_i^TR_{ic})^\vee,\qquad
-\Omega_i^{\rm cmd}=-K_{R,i}e_{R,i}-K_{\Omega,i}\Omega_i.$$
+代码没有接管力快照时，$F_{i,h}$ 按原独立控制关系回退计算。
+计算合力导数时，接管权重、保持倍率、卸载权重都保留乘积导数项。
 
-当前运输分支显式取 $\Omega_{ic}=0$；`use_body_rate_feedforward` 不覆盖这个分支。
-CF3/CF4 的主机 $K_R=[12,12,6]$，CF5 为 `[8,8,6]`；三机 $K_\Omega=[0.25,0.25,0.125]$。
-接管时与独立命令混合，之后按每轴机体速率上限裁剪。
-普通几何飞行仍保留解析/对数差分 $\Omega_c$ 与姿态积分；独立分支使用自己的姿态 P 增益。
+$$\beta=S_5\!\left(\operatorname{clip}_{[0,1]}\!\left(\frac{h}{T_r}\right)\right).$$
 
-$$T_i^{\rm cmd}=\operatorname{clip}
-\left(\max(F_f^TR_ie_3,T_{\min}),0,T_{\max}\right),\qquad T_{\max}=1.0\ \mathrm{N}.$$
+- $\beta$：本次接管权重；h=0 时为 0，h≥5 s 时为 1。
+- $h$：从进入 TAUT_RAMP 开始计的实际单调时钟时间，单位 s；在线计算。
+- $T_r$：张力渐增时间，取 5.0 s，对应 `tension_ramp_s`。
+- $S_5$：归一化五次平滑函数，其表达式为下一公式。
 
-绳张力 $T_i$ 与飞机总推力 $T_i^{\rm cmd}$ 是不同量。
-主机输出总推力 N 和物理机体系角速度 rad/s；C++ 桥接完成 PWM/符号/包格式转换，
-固件负责机载环与电机混控，主机没有直接发送完整飞机力矩。
+$$S_5(s)=10s^3-15s^4+6s^5.$$
+
+- $s$：归一化进度，范围为 $[0,1]$；在上式中取裁剪后的 $h/T_r$。
+- $S_5(s)$：无量纲平滑权重；起终点为 0、1，起终点一阶与二阶导数均为零。
+- $10,-15,6$：五次平滑曲线的固定系数，不是可调控制增益。
+
+### 10.2 合力与倾角限制
+
+$$F_{i,z}^{\mathrm{lim}}=\operatorname{clip}_{[0,T_{\max,i}]}(F_{i,z}^{\mathrm{raw}}).$$
+
+- $F_{i,z}^{\mathrm{lim}}$：受限后的世界 Z 方向合力，单位 N；在线计算。
+- $F_{i,z}^{\mathrm{raw}}$：原始合力 Z 分量，单位 N；取第 10.1 节的输出。
+- $T_{\max,i}$：三机命令推力上限均为 1.00 N，对应 `max_command_thrust_newton`。
+- $0$：竖直命令力下限，取 0 N。
+
+$$F_{i,xy}^{\mathrm{lim}}=F_{i,xy}^{\mathrm{raw}}\min\!\left(1,\frac{F_{i,z}^{\mathrm{lim}}\tan\theta_{\max,i}}{\|F_{i,xy}^{\mathrm{raw}}\|}\right).$$
+
+- $F_{i,xy}^{\mathrm{lim}}$：受限后的世界 XY 水平合力向量，单位 N；在线计算。
+- $F_{i,xy}^{\mathrm{raw}}$：原始水平合力向量，单位 N；为零时直接保留零向量，不作除法。
+- $F_{i,z}^{\mathrm{lim}}$：上一公式的受限竖直合力，单位 N；其大小决定当前水平力预算。
+- $\theta_{\max,i}$：飞机倾角上限；当前接管初段取 12°，在 12 s 抬升段内平滑降至三机均为 10° 的稳态值。
+- $\tan\theta_{\max,i}$：竖直力与允许水平力之间的比例；计算时角度转换为 rad。
+
+代码对极小水平模长采用数值保护，低于 $10^{-12}$ N 且进入受限分支时直接输出零水平力。
+限制后的三维向量由水平分量和竖直分量组合为 $F_i^{\mathrm{lim}}$。
+这一步限制竖直分量与倾角；完整合力模长不一定小于 1.00 N，最终总推力仍单独裁剪。
+下降阶段沿用切入时冻结的倾角保护配置，不能直接套用上述抬升过渡时间。
+
+### 10.3 运输合力低通滤波
+
+$$F_{i,f}^{k+1}=F_{i,f}^{k}+\frac{\Delta t_k}{\tau_F+\Delta t_k}\left(F_i^{\mathrm{lim}}-F_{i,f}^{k}\right).$$
+
+- $F_{i,f}^{k+1}$：本周期用于构造期望姿态和推力的滤波合力，单位 N；在线状态。
+- $F_{i,f}^{k}$：上一周期滤波合力，单位 N；复位时直接继承当前限幅合力，不从零缓慢启动。
+- $F_i^{\mathrm{lim}}$：第 10.2 节限制后的三维合力，单位 N。
+- $\Delta t_k$：本周期控制步长，单位 s；代码裁剪到 $[0.001,0.05]$。
+- $\tau_F$：三机均取 0.005 s，对应 `transport_force_filter_tau_s`。
+
+$$\dot F_{i,f}=\frac{F_{i,f}^{k+1}-F_{i,f}^{k}}{\Delta t_k}.$$
+
+- $\dot F_{i,f}$：与实际滤波力一致的离散力导数，单位 N/s；在线计算。
+- $F_{i,f}^{k+1}$：本周期实际滤波力，单位 N。
+- $F_{i,f}^{k}$：上一周期实际滤波力，单位 N。
+- $\Delta t_k$：当前控制步长，单位 s；不是固定写死的 1/70。
+
+滤波复位当周期的力导数取零。
+下文为简洁记 $F_{i,f}=F_{i,f}^{k+1}$，始终使用本周期实际滤波输出。
+
+### 10.4 从三维合力构造期望姿态
+
+$$b_{3c,i}=\frac{F_{i,f}}{\|F_{i,f}\|}.$$
+
+- $b_{3c,i}$：飞机期望机体 Z 轴在世界系中的方向，为单位向量；在线计算。
+- $F_{i,f}$：第 10.3 节的当前滤波合力，单位 N。
+- $\|F_{i,f}\|$：当前合力模长，单位 N；低于 $10^{-7}$ N 时使用上一有效 Z 轴，无历史时取 $[0,0,1]^T$。
+
+$$b_{1r,i}=\begin{bmatrix}\cos\psi_{i,d}&\sin\psi_{i,d}&0\end{bmatrix}^{T}.$$
+
+- $b_{1r,i}$：用于确定期望航向的世界水平参考向量，模长为 1；在线计算。
+- $\psi_{i,d}$：本机航向参考，单位 rad；来自飞机任务的 `yaw`，当前 hover 任务保存各机起飞航向，不是负载的 15° 锥角。
+
+$$\bar b_{1c,i}=(I_3-b_{3c,i}b_{3c,i}^{T})b_{1r,i}.$$
+
+- $\bar b_{1c,i}$：航向参考在垂直于期望 Z 轴平面上的投影，尚未归一化；在线计算。
+- $I_3$：三阶单位矩阵，固定取 $\operatorname{diag}(1,1,1)$。
+- $b_{3c,i}$：当前期望机体 Z 轴，来源为本节第一条公式。
+- $b_{1r,i}$：上一公式的水平航向参考。
+
+$$b_{1c,i}=\frac{\bar b_{1c,i}}{\|\bar b_{1c,i}\|}.$$
+
+- $b_{1c,i}$：归一化的飞机期望 X 轴，为单位向量；在线计算。
+- $\bar b_{1c,i}$：上一公式的航向投影。
+- $\|\bar b_{1c,i}\|$：投影模长；小于 $10^{-6}$ 时使用上一有效航向，无历史时回退到世界 $[1,0,0]^T$，随后仍执行数值归一化与正交化。
+
+$$b_{2c,i}=b_{3c,i}\times b_{1c,i}.$$
+
+- $b_{2c,i}$：飞机期望 Y 轴，为单位向量；在线计算。
+- $b_{3c,i}$：飞机期望 Z 轴，方向与当前合力一致。
+- $b_{1c,i}$：上一公式得到的期望 X 轴。
+- $\times$：向量叉乘，顺序保证右手坐标系。
+
+$$R_{ic}=\begin{bmatrix}b_{1c,i}&b_{2c,i}&b_{3c,i}\end{bmatrix}.$$
+
+- $R_{ic}$：把期望机体系变换到世界系的旋转矩阵，维度 3×3；在线计算，不是固定欧拉角。
+- $b_{1c,i}$：期望 X 轴，作为第一列。
+- $b_{2c,i}$：期望 Y 轴，作为第二列。
+- $b_{3c,i}$：期望 Z 轴，作为第三列。
+
+代码会再次归一化 Y 轴、以 Y/Z 轴重算 X 轴，并将矩阵投影到 SO(3)，消除数值误差。
+
+### 10.5 几何姿态误差与运输角速度命令
+
+$$e_{R,i}=\frac12\left(R_{ic}^{T}R_i-R_i^{T}R_{ic}\right)^{\vee}.$$
+
+- $e_{R,i}$：机体系表达的几何姿态误差，无量纲，接近目标时可近似理解为 rad 角误差；在线计算，目标为零向量。
+- $R_{ic}$：本周期期望旋转矩阵，来自第 10.4 节。
+- $R_i$：本机实际旋转矩阵，将实际机体系变换到世界系；取 NOKOV 姿态。
+- $(\cdot)^{\vee}$：反对称矩阵到三维向量的逆映射，定义见第 2 节。
+- $1/2$：SO(3) 几何姿态误差的固定系数。
+
+$$\Omega_{i,\mathrm{tr}}=-K_{R,i}^{\mathrm{tr}}e_{R,i}-K_{\Omega,i}^{\mathrm{tr}}\Omega_i.$$
+
+- $\Omega_{i,\mathrm{tr}}$：运输分支要求的三轴机体系角速度，单位 rad/s；是角速度命令，不是力矩。
+- $K_{R,3}^{\mathrm{tr}}$：CF3 主机姿态增益，取 $\operatorname{diag}(12,12,6)$ s⁻¹，对应 `transport_attitude_gain`。
+- $K_{R,4}^{\mathrm{tr}}$：CF4 主机姿态增益，取 $\operatorname{diag}(12,12,6)$ s⁻¹。
+- $K_{R,5}^{\mathrm{tr}}$：CF5 主机姿态增益，取 $\operatorname{diag}(8,8,6)$ s⁻¹。
+- $K_{\Omega,i}^{\mathrm{tr}}$：三机角速度阻尼系数均取 $\operatorname{diag}(0.25,0.25,0.125)$，无量纲，对应 `transport_rate_gain`。
+- $e_{R,i}$：上一公式的几何姿态误差；不直接使用欧拉角相减代替。
+- $\Omega_i$：本机实际机体系角速度，单位 rad/s；来自 NOKOV 姿态差分滤波后的 `twist.angular`，不是机载陀螺仪遥测。
+
+当前运输分支的期望角速度前馈固定为零，也不增加飞机姿态积分。
+`use_body_rate_feedforward: true` 不会改变运输分支这一设置。
+因此该层是几何姿态 P 加实际角速度阻尼；第 8 节的位置层仍然包含 I。
+
+### 10.6 接管角速度混合与逐轴限幅
+
+$$\Omega_{i,\mathrm{raw}}=(1-\beta)\Omega_{i,\mathrm{ind}}+\beta\Omega_{i,\mathrm{tr}}.$$
+
+- $\Omega_{i,\mathrm{raw}}$：限幅前的机体系角速度命令，单位 rad/s；在线计算。
+- $\beta$：第 10.1 节接管权重，0–5 s 从 0 增加到 1，之后为 1。
+- $\Omega_{i,\mathrm{ind}}$：独立分支的角速度命令，单位 rad/s；当前有接管力快照时，按下一公式计算。
+- $\Omega_{i,\mathrm{tr}}$：第 10.5 节的运输角速度命令，单位 rad/s。
+
+$$\Omega_{i,\mathrm{ind}}=-K_{R,i}^{\mathrm{ind}}e_{R,i}.$$
+
+- $\Omega_{i,\mathrm{ind}}$：当前接管路径使用的独立姿态命令，单位 rad/s；在线计算。
+- $K_{R,i}^{\mathrm{ind}}$：三机均取 $\operatorname{diag}(12,12,6)$ s⁻¹，对应 `independent_attitude_gain`。
+- $e_{R,i}$：相对于当前混合合力生成姿态的几何误差，不是另一个旧姿态目标的误差。
+
+$$\Omega_i^{\mathrm{cmd}}=\mathcal C_{\Omega_{\max}}(\Omega_{i,\mathrm{raw}}).$$
+
+- $\Omega_i^{\mathrm{cmd}}$：最终输出的物理机体系角速度，单位 rad/s；依次为滚转、俯仰、偏航角速度。
+- $\mathcal C_{\Omega_{\max}}$：逐轴限幅算子，将各轴裁剪到对应的正负角速度上限。
+- $\Omega_{\max}$：三机均取 $[3.0,3.0,2.0]^T$ rad/s，对应 `max_body_rate_radps`。
+- $\Omega_{i,\mathrm{raw}}$：上一混合公式的输出，单位 rad/s；接管完成后等于运输分支输出。
+
+当前 `transport_body_rate_filter_tau_s: 0.0`，即不额外滤波角速度命令。
+没有接管力快照的兼容路径保留旧独立姿态关系；普通非运输几何模式的解析角速度前馈和姿态积分
+也仍保留，但不是本节当前实际接管路径。
+
+### 10.7 总推力投影与最终输出
+
+$$T_i^{\mathrm{cmd}}=\operatorname{clip}_{[0,T_{\max,i}]}\!\left(\max(F_{i,f}^{T}R_i e_3,T_{\min,i})\right).$$
+
+- $T_i^{\mathrm{cmd}}$：整架飞机的总推力命令，单位 N；在线计算，不是单个电机推力。
+- $F_{i,f}$：当前世界系滤波合力，单位 N；由第 10.3 节给出。
+- $R_i e_3$：飞机实际机体 Z 轴在世界系中的单位方向，来自 NOKOV 实测姿态。
+- $e_3$：机体系 Z 轴单位向量，固定取 $[0,0,1]^T$；与 $R_i$ 相乘后才转到世界系。
+- $T_{\min,i}$：任务阶段规定的最低推力，当前空中 hover 任务取 0.30 N；下降/停推阶段按任务参考调整，控制计算缺省为 0 N。
+- $T_{\max,i}$：三机主机命令推力上限均取 1.00 N；不同于推力映射参考值 1.176798 N。
+
+投影使用实际飞机姿态，因此飞机尚未倾斜到期望方向时，不能直接把合力模长当成总推力发送。
+绳张力与这里的飞机总推力是两个不同物理量。
+最终主机接口是总推力 N 与三轴机体系角速度 rad/s；
+C++ 桥接负责固件推力值、角速度单位/符号及包格式转换，机载 Mellinger 负责执行与电机混控。
+主机不直接发送本机完整姿态力矩。
 
 ## 11. 仿真机载环与适用范围
 
