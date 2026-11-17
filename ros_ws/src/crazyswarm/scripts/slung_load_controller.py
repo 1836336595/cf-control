@@ -801,6 +801,12 @@ class SlungLoadConfig:
     link_force_correction_rate_limit_nps: float = 5.0
     link_lengths_m: object = None
     transport_force_mode: str = "coupled"
+    se3_kx: float = 1.0
+    se3_kxtilde: float = 16.0
+    se3_W: object = None
+    se3_d: object = None
+    se3_force_limit_n: float = 7.060788
+    se3_moment_limit_nm: object = None
 
     def __post_init__(self):
         raw_inertia = np.asarray(self.payload_inertia_kgm2, dtype=object)
@@ -815,6 +821,34 @@ class SlungLoadConfig:
         if (not isinstance(self.transport_force_mode, str) or
                 self.transport_force_mode not in ("coupled", "reference_cascade")):
             raise ValueError("transport_force_mode must be coupled or reference_cascade")
+        self.se3_kx = float(self.se3_kx)
+        self.se3_kxtilde = float(self.se3_kxtilde)
+        if (not math.isfinite(self.se3_kx) or self.se3_kx <= 0. or
+                not math.isfinite(self.se3_kxtilde) or self.se3_kxtilde < 0.):
+            raise ValueError("SE(3) feedback gains must be finite and nonnegative")
+        if self.se3_W is None:
+            self.se3_W = np.diag([1.0, 1.1, 1.2])
+        else:
+            self.se3_W = np.asarray(self.se3_W, dtype=float).reshape(3, 3)
+        if (not np.all(np.isfinite(self.se3_W)) or
+                not np.allclose(self.se3_W, self.se3_W.T, atol=1.e-12) or
+                np.min(np.linalg.eigvalsh(self.se3_W)) <= 0.):
+            raise ValueError("SE(3) attitude weight W must be symmetric positive definite")
+        if self.se3_d is None:
+            position_stiffness_scale = max(float(np.mean(np.abs(self.position_gain))), 1.0)
+            self.se3_d = (2. * self.payload_mass_kg *
+                          position_stiffness_scale / self.se3_kx)
+        self.se3_d = float(self.se3_d)
+        self.se3_force_limit_n = float(self.se3_force_limit_n)
+        if (not math.isfinite(self.se3_d) or self.se3_d <= 0. or
+                not math.isfinite(self.se3_force_limit_n) or self.se3_force_limit_n <= 0.):
+            raise ValueError("SE(3) translation weight and wrench limits must be positive and finite")
+        if self.se3_moment_limit_nm is None:
+            rho_typical = float(np.max(np.linalg.norm(self.attachment_points_m, axis=0)))
+            self.se3_moment_limit_nm = self.se3_force_limit_n * rho_typical
+        self.se3_moment_limit_nm = float(self.se3_moment_limit_nm)
+        if not math.isfinite(self.se3_moment_limit_nm) or self.se3_moment_limit_nm <= 0.:
+            raise ValueError("SE(3) moment limit must be positive and finite")
         source = self.link_length_m if self.link_lengths_m is None else self.link_lengths_m
         self.link_lengths_m = link_lengths_vector(source)
         self.link_length_m = float(np.mean(self.link_lengths_m))
@@ -899,6 +933,80 @@ class SlungLoadController:
             matrix[:3, 3 * index:3 * index + 3] = np.eye(3)
             matrix[3:, 3 * index:3 * index + 3] = _hat(rho[:, index])
         return matrix
+
+    def _velocity_free_wrench(self, payload_state, target, rotation, position,
+                              desired_rotation, desired_position,
+                              desired_velocity, desired_acceleration,
+                              desired_body_rate, desired_body_rate_dot):
+        """MATLAB SE(3) full-load wrench law, expressed in ROS z-up axes."""
+        try:
+            auxiliary_rotation = _project_so3(payload_state["auxiliary_rotation"])
+            auxiliary_position = _as_vector(
+                payload_state["auxiliary_position"], "auxiliary_position")
+        except (KeyError, TypeError, ValueError, np.linalg.LinAlgError):
+            return None
+
+        error_rotation = desired_rotation.T @ rotation
+        error_position = desired_rotation.T @ (position - desired_position)
+        inverse_error_rotation = error_rotation.T
+        inverse_error_position = -inverse_error_rotation @ error_position
+        adjoint_inverse_error = np.zeros((6, 6))
+        adjoint_inverse_error[:3, :3] = inverse_error_rotation
+        adjoint_inverse_error[3:, :3] = _hat(inverse_error_position) @ inverse_error_rotation
+        adjoint_inverse_error[3:, 3:] = inverse_error_rotation
+
+        reference_twist = np.concatenate((
+            desired_body_rate, desired_rotation.T @ desired_velocity))
+        reference_twist_derivative = np.concatenate((
+            desired_body_rate_dot,
+            -_hat(desired_body_rate) @ (desired_rotation.T @ desired_velocity)
+            + desired_rotation.T @ desired_acceleration))
+        error_reference_twist = adjoint_inverse_error @ reference_twist
+
+        adjoint_bracket = np.zeros((6, 6))
+        adjoint_bracket[:3, :3] = _hat(error_reference_twist[:3])
+        adjoint_bracket[3:, :3] = _hat(error_reference_twist[3:])
+        adjoint_bracket[3:, 3:] = _hat(error_reference_twist[:3])
+        spatial_inertia = np.zeros((6, 6))
+        inertia = np.diag(self.config.payload_inertia_kgm2)
+        spatial_inertia[:3, :3] = inertia
+        spatial_inertia[3:, 3:] = self.config.payload_mass_kg * np.eye(3)
+        upsilon = (
+            -adjoint_bracket.T @ spatial_inertia @ error_reference_twist
+            + spatial_inertia @ adjoint_inverse_error @ reference_twist_derivative)
+
+        psi_error = np.concatenate((
+            0.5 * _vee(self.config.se3_W @ error_rotation
+                       - error_rotation.T @ self.config.se3_W),
+            0.5 * self.config.se3_d * error_rotation.T @ error_position))
+        tilde_rotation = auxiliary_rotation.T @ rotation
+        tilde_position = auxiliary_rotation.T @ (position - auxiliary_position)
+        psi_tilde = np.concatenate((
+            0.5 * _vee(self.config.se3_W @ tilde_rotation
+                       - tilde_rotation.T @ self.config.se3_W),
+            0.5 * self.config.se3_d * tilde_rotation.T @ tilde_position))
+
+        gravity = np.array([0., 0., self.config.gravity_mps2])
+        gravity_wrench = np.concatenate((np.zeros(3),
+            self.config.payload_mass_kg * rotation.T @ gravity))
+        control_wrench = (upsilon - self.config.se3_kx * psi_error
+                          - self.config.se3_kxtilde * psi_tilde + gravity_wrench)
+        desired_moment = self.config.se3_moment_limit_nm * np.tanh(
+            control_wrench[:3] / self.config.se3_moment_limit_nm)
+        desired_force = rotation @ (
+            self.config.se3_force_limit_n * np.tanh(
+                control_wrench[3:] / self.config.se3_force_limit_n))
+        if not bool(target.get("payload_yaw_enabled", True)):
+            desired_moment[2] = 0.
+        if not (np.all(np.isfinite(desired_force)) and
+                np.all(np.isfinite(desired_moment))):
+            return None
+        return desired_force, desired_moment, {
+            "payload_se3_upsilon": upsilon,
+            "payload_se3_psi_error": psi_error,
+            "payload_se3_psi_tilde": psi_tilde,
+            "payload_se3_control_wrench": control_wrench,
+        }
 
     def _internal_bias(self, matrix, payload_mass, gravity):
         desired = np.zeros((3, 3), dtype=float)
@@ -1070,47 +1178,51 @@ class SlungLoadController:
 
         ep = p0 - pd
         ev = v0 - vd
-        integral_rate = ev + self.config.c1 * ep
-        self.position_integral = np.clip(
-            self.position_integral + dt * integral_rate,
-            -self.config.integral_limit,
-            self.config.integral_limit,
-        )
-        desired_load_acceleration = (
-            ad - self.config.position_gain * ep
-            - self.config.velocity_gain * ev
-            - self.config.integral_gain * self.position_integral
-        )
         gravity = np.array([0.0, 0.0, self.config.gravity_mps2])
-        desired_force = self.config.payload_mass_kg * (
-            desired_load_acceleration + gravity
-        )
-
         e_r = 0.5 * _vee(rd.T @ r0 - r0.T @ rd)
         e_omega = omega0 - r0.T @ rd @ omegad
         inertia = np.diag(self.config.payload_inertia_kgm2)
-        feedforward = r0.T @ rd @ omegad
-        # The velocity-free note and MATLAB branch omit measured gyroscopic
-        # cancellation: do not feed a delayed beta into omega x J*omega.
         beta_feedback = payload_state.get("feedback_mode") == "velocity_free_beta"
-        gyroscopic_moment = (np.zeros(3) if beta_feedback else
-                             np.cross(omega0, inertia @ omega0))
-        # Desired rates live in Rd's body frame.  Their derivative after
-        # transport into the measured body includes -omega x feedforward;
-        # cancel measured gyroscopic coupling before commanding that rate.
-        desired_moment = (
-            gyroscopic_moment
-            - inertia @ np.cross(omega0, feedforward)
-            + inertia @ r0.T @ rd @ omegadd
-        )
-        # Payload attitude gains are supplied by the caller in target.  This
-        # keeps the same configured inertia in the gain and dynamics paths.
-        desired_moment += (
-            -_as_vector(target["payload_attitude_gain"], "payload_attitude_gain") * e_r
-            -_as_vector(target["payload_rate_gain"], "payload_rate_gain") * e_omega
-        )
-        if not bool(target.get("payload_yaw_enabled", True)):
-            desired_moment[2] = 0.0
+        se3_diagnostics = {}
+        if beta_feedback:
+            self.position_integral[:] = 0.0
+            se3_wrench = self._velocity_free_wrench(
+                payload_state, target, r0, p0, rd, pd, vd, ad, omegad, omegadd)
+            if se3_wrench is None:
+                return None
+            desired_force, desired_moment, se3_diagnostics = se3_wrench
+            # Fd/m0 is the requested (a0 + g e3) term used by the MATLAB
+            # cable-force construction, expressed in ROS z-up coordinates.
+            desired_load_acceleration = desired_force / self.config.payload_mass_kg - gravity
+            gyroscopic_moment = np.zeros(3)
+        else:
+            integral_rate = ev + self.config.c1 * ep
+            self.position_integral = np.clip(
+                self.position_integral + dt * integral_rate,
+                -self.config.integral_limit,
+                self.config.integral_limit,
+            )
+            desired_load_acceleration = (
+                ad - self.config.position_gain * ep
+                - self.config.velocity_gain * ev
+                - self.config.integral_gain * self.position_integral
+            )
+            desired_force = self.config.payload_mass_kg * (
+                desired_load_acceleration + gravity
+            )
+            feedforward = r0.T @ rd @ omegad
+            gyroscopic_moment = np.cross(omega0, inertia @ omega0)
+            # Desired rates live in Rd's body frame. Their derivative after
+            # transport into the measured body includes -omega x feedforward.
+            desired_moment = (
+                gyroscopic_moment
+                - inertia @ np.cross(omega0, feedforward)
+                + inertia @ r0.T @ rd @ omegadd
+                - _as_vector(target["payload_attitude_gain"], "payload_attitude_gain") * e_r
+                - _as_vector(target["payload_rate_gain"], "payload_rate_gain") * e_omega
+            )
+            if not bool(target.get("payload_yaw_enabled", True)):
+                desired_moment[2] = 0.0
         matrix = self._allocation_matrix()
         gram = matrix @ matrix.T
         if np.linalg.cond(gram) > 1.0 / self.config.tension_pinv_tolerance:
@@ -1135,8 +1247,11 @@ class SlungLoadController:
                 @ relative_velocity / max(float(np.linalg.norm(relative)), 1.0e-6)
             )
 
+        integral_target = target
+        if beta_feedback:
+            integral_target = dict(target, payload_attitude_integral_enabled=False)
         attitude_integral = self._update_attitude_integral(
-            r0, rd, target, dt, desired_force, desired_moment, matrix, gram,
+            r0, rd, integral_target, dt, desired_force, desired_moment, matrix, gram,
             internal_bias, link_units)
         desired_moment += attitude_integral["payload_attitude_integral_body_moment"]
         omega0_dot_cmd = np.linalg.solve(
@@ -1269,6 +1384,7 @@ class SlungLoadController:
         self.previous_link_units = link_units.copy()
         return {
             **attitude_integral,
+            **se3_diagnostics,
             "force_mode": self.config.transport_force_mode,
             "vehicles": outputs,
             "payload_position_error": ep,

@@ -1,6 +1,5 @@
 """Pose-only SE(3) auxiliary system; beta = [body omega, body velocity].
 
-This is an observation/feedback substitution, not the note's full wrench law.
 No measured twist, pose difference divided by dt, or acceleration enters beta.
 The inherited snapshot contract keeps the flight manager's freshness gates.
 """
@@ -38,12 +37,15 @@ class VelocityFreePayloadObserver(PayloadStateObserver):
     """
 
     def __init__(self, kappa_position=12., kappa_attitude=20.,
-                 attitude_weights=(1., 1.1, 1.2), **quality_options):
+                 attitude_weights=(1., 1.1, 1.2), initial_offset_m=.001,
+                 **quality_options):
         self.kappa_position = float(kappa_position)
         self.kappa_attitude = float(kappa_attitude)
         self.weights = _as_vector(attitude_weights, "velocity_free_attitude_weights")
+        self.initial_offset_m = float(initial_offset_m)
         if (not all(math.isfinite(v) and v > 0. for v in
                     (self.kappa_position, self.kappa_attitude))
+                or not math.isfinite(self.initial_offset_m) or self.initial_offset_m < 0.
                 or np.any(self.weights <= 0.)
                 or len(np.unique(self.weights)) != 3):
             raise ValueError("velocity-free kappa must be positive; W needs distinct positive weights")
@@ -117,7 +119,8 @@ class VelocityFreePayloadObserver(PayloadStateObserver):
         return state
 
     def _initialize(self, position, rotation, timestamp, status):
-        self.auxiliary_position = position.copy()
+        self.auxiliary_position = position + rotation @ (
+            self.initial_offset_m * np.ones(3) / math.sqrt(3.))
         self.auxiliary_rotation = rotation.copy()
         # Start without an invented initial speed; TAKEUP already has a warmup.
         self.beta[:] = 0.

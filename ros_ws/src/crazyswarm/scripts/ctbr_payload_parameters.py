@@ -140,6 +140,9 @@ class PayloadParametersMixin:
         self.payload_velocity_filter_lock = threading.Lock()
         self.payload_state_observer = None
         self.payload_state_observer_lock = threading.Lock()
+        self.payload_velocity_free_W = None
+        self.payload_velocity_free_d = None
+        self.payload_velocity_free_force_limit_n = 7.060788
         self.payload_fault_since = None
         self.last_transport_overrides = {}
         self.payload_transport_active = False
@@ -281,6 +284,12 @@ class PayloadParametersMixin:
                         "link_force_correction_rate_limit_nps", 5.0
                     )),
                     transport_force_mode=str(payload.get("transport_force_mode", "coupled")),
+                    se3_kx=float(payload.get("velocity_free_kx", 1.0)),
+                    se3_kxtilde=float(payload.get("velocity_free_kxtilde", 16.0)),
+                    se3_W=getattr(self, "payload_velocity_free_W", None),
+                    se3_d=getattr(self, "payload_velocity_free_d", None),
+                    se3_force_limit_n=getattr(
+                        self, "payload_velocity_free_force_limit_n", 7.060788),
                 )
                 self.slung_controller = SlungLoadController(load_cfg)
                 self.payload_height_m = float(size[2])
@@ -351,11 +360,65 @@ class PayloadParametersMixin:
                         raise ValueError("observer_position_innovation_margin_m 必须为正的有限数")
                     observer_class = (VelocityFreePayloadObserver if feedback_mode == "velocity_free_beta"
                                       else PayloadStateObserver)
-                    beta_options = (dict(
-                        kappa_position=payload.get("velocity_free_kappa_position_per_s", 12.),
-                        kappa_attitude=payload.get("velocity_free_kappa_attitude_per_s", 20.),
-                        attitude_weights=payload.get("velocity_free_attitude_weights", [1., 1.1, 1.2]),
-                    ) if feedback_mode == "velocity_free_beta" else {})
+                    beta_options = {}
+                    if feedback_mode == "velocity_free_beta":
+                        self.payload_velocity_free_kx = float(payload.get("velocity_free_kx", 1.0))
+                        self.payload_velocity_free_kxtilde = float(
+                            payload.get("velocity_free_kxtilde", 16.0))
+                        if (not math.isfinite(self.payload_velocity_free_kx)
+                                or self.payload_velocity_free_kx <= 0.
+                                or not math.isfinite(self.payload_velocity_free_kxtilde)
+                                or self.payload_velocity_free_kxtilde < 0.):
+                            raise ValueError("velocity_free_kx/kxtilde 无效")
+                        inertia_diag = load_cfg.payload_inertia_kgm2
+                        se3_kR = inertia_diag * (2.0 * math.pi * attitude_bandwidth) ** 2
+                        wbar = se3_kR / self.payload_velocity_free_kx
+                        wbar[:2] = float(np.mean(wbar[:2]))
+                        yaw_ratio = float(wbar[2] / wbar[0])
+                        if not math.isfinite(yaw_ratio) or yaw_ratio <= 0.:
+                            raise ValueError("SE(3) 姿态权重无法从当前姿态刚度派生")
+                        wbar[1] = wbar[0] * (1.0 + min(.4 * yaw_ratio, .15))
+                        se3_weight_diagonal = np.sum(wbar) - 2.0 * wbar
+                        if (np.any(se3_weight_diagonal <= 0.)
+                                or len(np.unique(se3_weight_diagonal)) != 3):
+                            raise ValueError("SE(3) W 必须正定且三个特征值互异")
+                        self.payload_velocity_free_W = np.diag(se3_weight_diagonal)
+                        self.payload_velocity_free_d = (
+                            2.0 * load_cfg.payload_mass_kg
+                            * float(np.mean(load_cfg.position_gain))
+                            / self.payload_velocity_free_kx)
+                        if (not math.isfinite(self.payload_velocity_free_d)
+                                or self.payload_velocity_free_d <= 0.):
+                            raise ValueError("SE(3) 平移刚度无法从当前负载参数派生")
+                        vehicle_thrust_budget = sum(float(rospy.get_param(
+                            "/ctbr_controller_cf%d/max_total_thrust_newton" % int(entry["id"]),
+                            1.176798)) for entry in self.vehicle_configs)
+                        self.payload_velocity_free_force_limit_n = float(payload.get(
+                            "velocity_free_force_limit_n", 2.0 * vehicle_thrust_budget))
+                        if (not math.isfinite(self.payload_velocity_free_force_limit_n)
+                                or self.payload_velocity_free_force_limit_n <= 0.):
+                            raise ValueError("velocity_free_force_limit_n 必须为正有限值")
+                        # The controller object already holds this mutable config;
+                        # keep its potential weights identical to beta's observer.
+                        load_cfg.se3_kx = self.payload_velocity_free_kx
+                        load_cfg.se3_kxtilde = self.payload_velocity_free_kxtilde
+                        load_cfg.se3_W = self.payload_velocity_free_W.copy()
+                        load_cfg.se3_d = self.payload_velocity_free_d
+                        load_cfg.se3_force_limit_n = self.payload_velocity_free_force_limit_n
+                        default_moment_limit = (
+                            self.payload_velocity_free_force_limit_n
+                            * float(np.max(np.linalg.norm(attachment_points, axis=0))))
+                        load_cfg.se3_moment_limit_nm = float(payload.get(
+                            "velocity_free_moment_limit_nm", default_moment_limit))
+                        if (not math.isfinite(load_cfg.se3_moment_limit_nm)
+                                or load_cfg.se3_moment_limit_nm <= 0.):
+                            raise ValueError("velocity_free_moment_limit_nm 必须为正有限值")
+                        beta_options = dict(
+                            kappa_position=payload.get("velocity_free_kappa_position_per_s", 12.),
+                            kappa_attitude=payload.get("velocity_free_kappa_attitude_per_s", 20.),
+                            attitude_weights=se3_weight_diagonal,
+                            initial_offset_m=payload.get("velocity_free_initial_offset_m", .001),
+                        )
                     self.payload_state_observer = observer_class(
                         **beta_options,
                         position_gain=float(payload.get("observer_position_gain", 0.35)),

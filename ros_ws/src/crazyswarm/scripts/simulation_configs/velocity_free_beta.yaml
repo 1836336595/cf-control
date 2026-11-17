@@ -3,6 +3,5 @@ slung_payload:
   state_feedback_mode: velocity_free_beta
   velocity_free_kappa_position_per_s: 12.0
   velocity_free_kappa_attitude_per_s: 20.0
-  velocity_free_attitude_weights: [1.0, 1.1, 1.2]
 slung_simulation:
   post_handoff_s: 100.0

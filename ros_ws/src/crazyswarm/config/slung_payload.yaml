@@ -92,7 +92,12 @@ slung_payload:
   state_feedback_mode: velocity_free_beta
   velocity_free_kappa_position_per_s: 12.0
   velocity_free_kappa_attitude_per_s: 20.0
-  velocity_free_attitude_weights: [1.0, 1.1, 1.2]
+  # 按当前位置/姿态刚度派生 d、W；这里保留 MATLAB 全驱动律的外环增益。
+  velocity_free_initial_offset_m: 0.001
+  velocity_free_kx: 1.0
+  velocity_free_kxtilde: 16.0
+  # 默认力限幅按 MATLAB 的 2 * 所有飞机最大推力预算派生；需要时可显式覆盖。
+  # velocity_free_force_limit_n: 7.060788
   # 以下五个残差增益仅 pose_observer 使用；velocity_free_beta 使用上面两个 kappa。
   observer_position_gain: 0.35       # 位置残差修正比例，alpha。
   observer_velocity_gain: 0.20       # 与稳定 Udaan 仿真一致，速度残差修正比例，beta。

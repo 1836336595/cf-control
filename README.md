@@ -1,204 +1,191 @@
-# Crazyswarm CTBR 与三机吊运控制
+# Crazyflie 三机吊运与 SE(3) Velocity-free 控制
 
-基于 [Crazyswarm](https://github.com/USC-ACTLab/crazyswarm) 的 Crazyflie 主机端控制项目，支持 NOKOV 动捕、CTBR 指令和三机协同吊运。主机读取飞机位置、姿态及 EKF 运动学状态，计算整机总推力和机体系角速度，经 Crazyswarm server 与 Crazyradio 发送到飞机。
+基于 Crazyswarm 的 ROS Noetic 主机控制项目，面向 **NOKOV 动捕下 CF3、CF4、CF5 通过三根绳索协同搬运刚体负载**。主机生成负载和飞机参考，计算每架飞机的总推力及机体系角速度（CTBR），经 Crazyswarm server / Crazyradio 发送；飞机固件完成速率控制与电机混控。
 
-当前三机吊运采用 `reference_cascade` 与 `native_position_pid`。实飞机载控制器和离线机载模型均使用 Mellinger；仿真物理与传感器参数已经从实飞参数中分离。
+当前开发重点是把 MATLAB 的六维 SE(3) velocity-free 负载外环接入实际吊运流程，并通过同一套主机控制代码进行离线验证。项目也保留独立飞行、普通编队和旧负载观测器分支。
 
-本页提供配置、运行和代码导航。控制公式集中在 [控制器公式说明](docs/slung_controller_formulas.md)，模块职责见 [控制器模块与参数入口](docs/ctbr_controller_modules.md)。
-
-## 功能
-
-- 单机独立起飞、位置保持、收绳预抬和降落。
-- CF3、CF4、CF5 三点吊运，包含负载位姿观测、张力分配、构型跟踪和接管混合。
-- 负载定点悬停、圆周、双圆八字和固定质心圆锥姿态轨迹。
-- NOKOV、EKF、电压预检、机间距保护、状态失效处理和协同放载。
-- 实飞 CSV、飞机与负载位姿绘图、RViz 路径。
-- 使用实际主机控制代码的 Udaan/MuJoCo 离线回放。
-
-普通 CTBR 任务另有 `hover`、`circle` 和 `figure_eight_triangle`；它们与负载轨迹分别配置。
-
-## 环境与依赖
-
-| 用途 | 环境 |
-|---|---|
-| 实飞主机 | Ubuntu、ROS Noetic、系统 Python 3.8、C++ Crazyswarm server |
-| 硬件与定位 | Crazyflie、Crazyradio、NOKOV SDK 与相应网络配置 |
-| 无刷机 ARM | `cf_arm.py` 所用 Python 环境中可导入支持当前飞机的 `cflib` 和 PyYAML |
-| 离线动力学 | 本项目修改版 Udaan、Python 3.10 或更高、MuJoCo、NumPy、SciPy、Matplotlib、PyYAML |
-| 自动测试 | 对应 Python 环境中的 pytest；部分检查还需要 ROS 或 MuJoCo |
-
-基础依赖与 USB 配置参考 [Crazyswarm 安装文档](https://crazyswarm.readthedocs.io/en/latest/installation.html)。本项目的 ROS Noetic 实飞环境与 Udaan 仿真环境应分别准备。
-
-**离线回放依赖仓库外的修改版 Udaan。** 当前脚本按以下相邻目录布局查找模型；仅克隆本仓库或安装上游同名包，不代表已经包含本项目的吊运模型。
+当前默认组合为：
 
 ```text
-workspace/
-├── crazyswarm/                 # 本仓库
-└── simulate_uav/
-    └── udaan/                 # 本项目使用的修改版 Udaan
+velocity_free_beta → 六维负载合力/力矩 → 张力分配
+                  → reference_cascade → 每机 native_position_pid
+                  → feedforward_pi 姿态命令 → CTBR → 机载 Mellinger
 ```
 
-## 编译
+六维外环已接入代码；当前仍有合力限幅坐标、辅助增益、异步采样和下游执行差异。新外环尚无完整整机回放及实飞通过记录，详见 [与 MATLAB / 笔记的差异](docs/slung_velocity_free.md#4-与-matlab--笔记的差异)。
 
-在已准备好 ROS 和 NOKOV 依赖的环境中，从本仓库根目录执行：
+## 项目能力与控制分工
+
+- 完整吊运流程：预检、独立起飞、收绳、负载预抬、张力渐增、运输、协同放载、卸载和三机下降。
+- 负载轨迹：定点悬停、圆周、双圆八字、固定质心圆锥姿态扫描。
+- 负载反馈：位姿驱动的 SE(3) 辅助系统与六维控制律；保留原位姿观测器和位置 PID / 姿态 PD 作对照。
+- 三机协调：张力分配、构型参考、运输位置反馈、动态姿态构型补偿和支撑配平。
+- 状态与诊断：NOKOV / EKF / 电压预检、绳长统计、机间距与状态失效处理、CSV 和 RViz 路径。
+- 离线验证：Udaan / MuJoCo 调用实际主机控制器与任务状态机，支持延迟、初态和候选参数覆盖。
+
+```mermaid
+flowchart LR
+    Mocap["NOKOV：飞机与负载位姿"] --> Server["Crazyswarm server"]
+    Server --> Host["ROS 主机：参考、负载外环、分配、每机 CTBR"]
+    CF["Crazyflie：Mellinger 与电机混控"] -->|"EKF / 电池遥测"| Server
+    Host -->|"总推力 N + 体角速度 rad/s"| Server
+    Server -->|"Crazyradio / CRTP"| CF
+    Host --> Logs["CSV / Path / 绘图"]
+```
+
+| 数据 | 当前来源与坐标 |
+|---|---|
+| 飞机位置、姿态 | NOKOV；世界系 z 向上，旋转矩阵将体系向量变换到世界系 |
+| 飞机平移速度、加速度 | 机载 EKF 位置/速度日志，经主机速度过滤及差分得到加速度 |
+| 主机可用的飞机角速度反馈 | 动捕姿态差分与过滤；不是机载陀螺仪遥测 |
+| 负载几何中心位姿 | NOKOV `load` 上表面原点，经负载尺寸和姿态转换 |
+| β 模式的负载运动反馈 | 位姿和参考驱动的辅助量 β；顺序为体系角速度、体系线速度；加速度为不可用的零占位 |
+| 绳索速度 | 负载 β 重建挂点速度，再减去各机独立 EKF 速度 |
+
+因此 velocity-free 指负载反馈不用测得的速度、角速度或加速度；飞机仍使用自身 EKF，机载内环仍使用自身传感器。
+
+## 当前配置
+
+以下数值来自当前仓库 YAML，是本实验装置的设置。修改配置后，实际运行以加载值及每次仿真的参数快照为准。
+
+| 项目 | 当前值 |
+|---|---|
+| 机队 | CF3 / CF4 / CF5，同一 radio、80 信道，固定挂点顺序 |
+| 主机任务 | `ctbr_controller.transport_mode: slung_load` |
+| 负载反馈与外环 | `state_feedback_mode: velocity_free_beta`，六维 SE(3) 控制律 |
+| 吊运力构造 | `transport_force_mode: reference_cascade` |
+| 飞机运输位置反馈 | `transport_feedback_controller: native_position_pid` |
+| 飞机运输姿态命令 | `feedforward_pi`，`log_difference` 参考前馈 |
+| 负载质量 / 尺寸 | 0.023 kg / `[0.08, 0.06, 0.05]` m |
+| 负载对角惯量 | `[3.4132e-5, 3.0394e-5, 4.0119e-5]` kg·m² |
+| 名义绳长，CF3 / CF4 / CF5 | `[0.865, 0.863, 0.860]` m；可在接管前校准一次运行有效值 |
+| 负载轨迹 / 几何中心目标高度 | `hover` / 0.60 m |
+| 预抬门槛 | 负载最低点离地间隙 0.20 m |
+| 辅助系统 κ / 六维反馈增益 | 平移 12、旋转 20 s⁻¹；`kX=1`、`kXtilde=16` |
+| 动态构型补偿 | 已启用，允许张力渐增完成后在抬升期间更新 |
+| 主机 / EKF 遥测 / 电池遥测 | 70 Hz / 50 Hz / 2 Hz |
+| 实飞计划降落 | 进入 `TAUT_RAMP` 后 60 s |
+| 仿真采样与窗口 | 位姿 100 Hz、Mellinger 500 Hz；`post_handoff_s: 100.0` |
+
+### 参数入口
+
+| 文件 | 配置内容 |
+|---|---|
+| [crazyflies.yaml](ros_ws/src/crazyswarm/launch/crazyflies.yaml) | 飞机 ID、URI、信道、`ctbr_enabled` 与挂点对应顺序 |
+| [hover_swarm.launch](ros_ws/src/crazyswarm/launch/hover_swarm.launch) | NOKOV 网络、固件参数、外部位姿广播、遥测周期和 CTBR 桥接 |
+| [ctbr_controller.yaml](ros_ws/src/crazyswarm/config/ctbr_controller.yaml) | 主机频率、预检、反馈质量、普通飞机轨迹和可视化 |
+| [ctbr_vehicle.yaml](ros_ws/src/crazyswarm/config/ctbr_vehicle.yaml) | `ctbr_controller_cf<ID>`：各机质量、推力标定、位置与姿态控制 |
+| [slung_payload.yaml](ros_ws/src/crazyswarm/config/slung_payload.yaml) | 负载质量、惯量、挂点、绳长、外环、负载参考和任务时限 |
+| [slung_simulation.yaml](ros_ws/src/crazyswarm/config/slung_simulation.yaml) | 仅离线使用：电机模型、采样、延迟、物理参数与观察窗口 |
+
+实飞 launch 不加载 `slung_simulation.yaml`。离线回放以实飞控制配置为基线，另外加载仿真物理和传感器参数。
+
+负载 `inertia_diag_kgm2` 必须显式填写；修改质量或尺寸不会自动重算惯量。`attachment_points_m` 以负载几何中心为原点，每行依次对应 CF3 / CF4 / CF5。当前飞机端点使用动捕刚体原点，没有自动加入飞机挂点偏移。
+
+### 模式选择的含义
+
+| 配置 | 选择 | 影响 |
+|---|---|---|
+| `state_feedback_mode` | `velocity_free_beta` / `pose_observer` | **同时切换负载反馈源和外环**：前者为 SE(3) 辅助系统与六维控制律，后者为原观测器与 PID/PD |
+| `transport_force_mode` | `reference_cascade` / `coupled` | 前者以参考挂点加速度支撑飞机、绳向反馈倍率为零；后者保留耦合绳向控制 |
+| `transport_feedback_controller` | `native_position_pid` / `differential_integral` | 选择飞机运输位置反馈；两个积分方案不叠加 |
+| 每机 `transport_attitude_mode` | `feedforward_pi` / `feedforward_p` / `rate_damping` | 选择运输姿态 PI、P 或旧阻尼分支；与负载控制模式分别设置 |
+
+β 分支使用 `Upsilon-kX*PsiE-kXtilde*PsiT` 加重力补偿生成负载广义力，关闭旧负载位置积分和可选负载姿态积分。飞机运输积分、动态构型 trim 和支撑 trim 仍按各自门控工作。`W/d` 从实飞负载刚度派生，旧的 `velocity_free_attitude_weights` YAML 键不再生效。
+
+三机 `feedforward_pi` 需同时使用 `omega_c_method: log_difference` 和 `use_body_rate_feedforward: true`。姿态 I 的限值单位是附加角速度，与位置积分和负载构型 trim 分开。切换参数需要重启控制节点。
+
+## 环境与编译
+
+| 用途 | 本项目使用的环境 |
+|---|---|
+| 实飞主机 | Ubuntu / ROS Noetic / 系统 Python 3.8，C++ Crazyswarm server |
+| 定位与无线 | NOKOV SDK、动捕网络、Crazyradio USB 与飞机固件 |
+| 无刷飞机 ARM | 能导入支持当前飞机 ARM 接口的 `cflib` 和 PyYAML 的 Python 环境 |
+| 离线回放 | Python ≥3.10、本项目修改版 Udaan、MuJoCo、NumPy、SciPy、Matplotlib、PyYAML、pytest |
+
+本仓库保留了上游 Crazyswarm 的目录和示例。上游安装说明位于 [docs/installation.rst](docs/installation.rst)；其中旧 Python 和环境示例不能直接代替本项目的 ROS Noetic / Udaan 环境。
+
+在准备好 ROS、catkin 依赖及子模块后，从仓库根目录编译：
 
 ```bash
-git submodule update --init --recursive
 source /opt/ros/noetic/setup.bash
 cd ros_ws
-catkin_make
+catkin_make -DPYTHON_EXECUTABLE=/usr/bin/python3 -DLIBMOTIONCAPTURE_ENABLE_NOKOV=ON
 source devel/setup.bash
 ```
 
-子模块更新不能替代 NOKOV 厂商 SDK 的准备。修改消息、C++ server 或安装配置后需重新编译；修改 Python 或 YAML 后需重启相应节点。
+新克隆的仓库可先执行 `git submodule update --init --recursive`。NOKOV 后端需要 `ros_ws/src/crazyswarm/externalDependencies/libmotioncapture/deps/nokov_sdk/` 中对应平台的头文件和库；底层子模块中的本地修改也需要随项目版本保存。
 
-## 参数文件
+实飞 Python 依赖应安装到 ROS 节点实际使用的系统解释器。修改消息或 C++ server 后重新编译；Python / YAML 修改后重启相应节点。server 参数与主机控制器参数分属两个进程，仅重启控制器不会更新 server 的遥测周期或桥接配置。
 
-文件位于 [ros_ws/src/crazyswarm/config](ros_ws/src/crazyswarm/config)。
+## 离线运行
 
-| 文件 | 主要内容 | 读取范围 |
-|---|---|---|
-| [ctbr_controller.yaml](ros_ws/src/crazyswarm/config/ctbr_controller.yaml) | 主机频率、反馈过滤、预检、全局轨迹与可视化 | 实飞；仿真沿用控制设置 |
-| [ctbr_vehicle.yaml](ros_ws/src/crazyswarm/config/ctbr_vehicle.yaml) | 每机质量、推力映射、独立及运输控制增益 | 实飞；仿真沿用控制设置 |
-| [slung_payload.yaml](ros_ws/src/crazyswarm/config/slung_payload.yaml) | 负载质量、转动惯量、挂点、绳长、负载控制及任务参考 | 实飞；仿真沿用控制设置 |
-| [slung_simulation.yaml](ros_ws/src/crazyswarm/config/slung_simulation.yaml) | 电机物理、惯量、Mellinger 模型、采样、延迟和观察窗口 | 仅离线仿真 |
+回放复用本仓库的控制器和任务状态机，替换 ROS I/O，并由 MuJoCo 提供物理状态。脚本还导入本仓库的测试辅助模块，因此运行回放也需要 pytest。
 
-实飞 launch 不加载 `slung_simulation.yaml`。仿真读取实飞控制配置作为基线，再独立加载物理与传感器设置；仿真不会回写实飞文件。
+吊运物理模型来自**仓库外的修改版 Udaan**，脚本按以下相邻目录查找：
 
-负载转动惯量在 `slung_payload.inertia_diag_kgm2` 中填写，顺序为 `[Jxx, Jyy, Jzz]`，单位 kg·m²。
-该参数为质心处、负载坐标系轴上的对角惯量；主机姿态增益、力矩补偿和吊运回放的物理负载共用它。
-质量或尺寸变化后需单独核对惯量，程序不再自动按长方体公式计算。省略或填写无效值会在初始化时报错。
+```text
+workspace/
+├── crazyswarm/                  # 本仓库：主机控制、ROS、测试与回放入口
+└── simulate_uav/
+    └── udaan/                  # 修改版模型：含 crazyswarm_slung 模块
+```
 
-飞机条目在 [crazyflies.yaml](ros_ws/src/crazyswarm/launch/crazyflies.yaml) 中设置。每个启用的飞机 ID 都应有对应的 `ctbr_controller_cf<ID>` 参数块；`ctbr_enabled`、`takeoff_vehicle_count`、radio URI 和实际飞机必须匹配。当前吊运任务要求 CF3、CF4、CF5。
+仅安装上游同名 Udaan 包不一定包含所需模型。在 Python ≥3.10 的独立环境中，从仓库根目录安装已有本地模型：
 
-### 当前吊运基线
+```bash
+python -m pip install -e ../simulate_uav/udaan
+python -m pip install pyyaml pytest
+```
 
-| 项目 | 当前配置 |
+以下命令均在 `ros_ws/src/crazyswarm/scripts` 目录执行；不需要启动 ROS server，也不连接 radio 或发送 ARM。
+
+```bash
+cd ros_ws/src/crazyswarm/scripts
+
+# 按当前 YAML 运行：β + 六维外环、hover、接管 60 s 后计划放载。
+python simulate_slung_handoff.py --output ctbr_logs/se3_hover
+
+# 查看接管、负载运动与控制输出。
+python plot_slung_handoff_trace.py ctbr_logs/se3_hover/simulation_trace.csv \
+  --save ctbr_logs/se3_hover/handoff.png --no-show
+```
+
+对照旧负载外环、动态参考及较大延迟：
+
+```bash
+python simulate_slung_handoff.py \
+  --candidate simulation_configs/velocity_free_baseline.yaml \
+  --output ctbr_logs/pose_observer_hover
+
+python simulate_slung_handoff.py \
+  --candidate simulation_configs/velocity_free_cone.yaml \
+  --output ctbr_logs/se3_cone
+
+python simulate_slung_handoff.py --pose-delay 0.02 --command-delay 0.01 \
+  --output ctbr_logs/se3_delay
+
+python plot_slung_circle_trace.py ctbr_logs/se3_cone/simulation_trace.csv \
+  --save ctbr_logs/se3_cone/trajectory.png --no-show
+```
+
+`velocity_free_baseline.yaml` 现在切换的是反馈源和负载控制律，不能再解释为“只比较观测器”。`velocity_free_cone.yaml` 明确覆盖为 **10°、两圈、100 s 接管窗口**；它不等于实飞 YAML 中预设的 15° 圆锥参数。
+
+需要实时窗口和视频时可增加 `--render --record ctbr_logs/se3_hover.mp4`。`--simulation-config` 可指定另一份离线配置，`--candidate` 可覆盖控制参数根和独立的 `slung_simulation` 根；覆盖只作用于本次回放，不回写实飞 YAML。
+
+| 输出 | 用途 |
 |---|---|
-| 主机模式 / 飞机运输反馈 | `slung_load` / `native_position_pid` |
-| 吊运力构造 | `reference_cascade` |
-| 运输姿态命令 | `feedforward_pi`：`log_difference` 前馈加姿态 P 和有界 I |
-| 负载总质量 | 0.023 kg |
-| 名义绳长 | 三根均为 0.850 m，可在接管前校准一次运行有效值 |
-| 负载几何中心目标高度 | 0.60 m |
-| 主机控制 / EKF 样本 / 电池样本 | 70 Hz / 50 Hz / 2 Hz |
-| 仿真机载模型 | 固定 Mellinger，500 Hz |
-| 当前负载轨迹 | `hover`；切换到圆锥时已配置 15°、两圈、每圈 30 s |
-| 动态构型补偿 | 动态与抬升期间更新均启用，反馈健康与限幅门控继续生效 |
-| 实飞计划降落 | 进入 `TAUT_RAMP` 后 60 s |
-| 离线观察窗口 | `slung_simulation.post_handoff_s: 100.0` |
+| `input_parameters.yaml` | 本次控制配置、仿真配置与实际模型设置快照 |
+| `simulation_trace.csv` | 模型真值、负载目标、飞机指令及任务进度 |
+| `multi_ctbr_*.csv` | 实际主机代码生成的诊断日志 |
+| `summary.json` | 成功/结束原因、限幅与跟踪误差 |
 
-这些数值是当前实验配置，不是其他飞机或负载可直接使用的通用标定。
+默认物理模型使用 Graefe 电机模型和 500 Hz Mellinger，EKF 遥测模式为 `sampled_filtered`。它没有模拟完整固件 EKF。修改输入后需要重新运行，旧输出不会自动更新；运行结果应连同参数快照查看。
 
-三机 `ctbr_vehicle.yaml` 均启用 `transport_attitude_mode: feedforward_pi`、
-`omega_c_method: log_difference` 和 `use_body_rate_feedforward: true`。
-该模式加入运输专用姿态积分，不叠加 `transport_rate_gain` 阻尼，输出仍为总推力和机体系角速度。
-`transport_attitude_integral_gain` 控制学习增益，`transport_attitude_integral_limit_rps` 限制 I 附加角速度，
-`transport_attitude_integral_rate_limit_rps2` 限制其变化率。积分针对飞机姿态误差，和位置 I、负载姿态 trim 分开。
-启动日志打印当前模式；CSV 的 `transport_attitude_mode` 应为 `feedforward_pi`，
-`omega_c_method` 应为 `transport_log_difference`。独立起飞/预抬仍标记 `independent_matlab`。
-将三机模式改成 `feedforward_p` 可关闭姿态 I，改成 `rate_damping` 可恢复旧姿态 P 加阻尼公式。
+## 实飞启动与任务时钟
 
-### 坐标与反馈
-
-- 世界坐标采用 ROS 的 Z 轴向上约定；位置为米，角度为弧度，推力为整机牛顿。
-- NOKOV 的 `load` 刚体原点定义在负载上表面中心；控制器结合尺寸和姿态换算为几何中心。
-- `attachment_points_m` 使用负载几何中心坐标系。当前飞机端几何使用动捕刚体原点，未自动加入飞机挂点偏移。
-- 飞机位置、姿态来自 NOKOV；平移控制速度、加速度来自机载 EKF 日志的主机过滤与差分。
-- 运输使用的飞机角速度来自动捕姿态差分与过滤，不能当作机载陀螺仪遥测。
-- 负载反馈可选原位姿观测器或新增的 SE(3) velocity-free β 辅助系统；动捕消息中的原始导数另作诊断。
-
-换绳后可启用 `link_length_report_enabled`：实际负载调平并保持稳定后，终端输出
-`[调平后绳长统计]`，包含 CF3/CF4/CF5 的距离中位数、波动区间和配置值。
-它使用负载挂点到飞机动捕原点的实测距离，不自动修改绳长参数。
-在线门槛、CSV 字段及历史数据计算方法见 [有效绳长统计](docs/slung_link_length_measurement.md)。
-
-负载观测器拒绝重复/倒序时间戳、异常位姿和达到物理边界的候选导数。
-小于 5 ms 的间隔先累积时间；正常 100 Hz 保留原观测增益响应。
-被拒绝的帧不会继续进入负载姿态 PD。短异常复用完整运输指令，缓存预算耗尽后
-转入保留支撑残差的受控下降。CSV 将控制输入快照与最新源帧分开记录，
-可用 `payload_control_reused` 和 `payload_source_observer_status` 查明保持原因。
-预抬期间的短采样等待可在最多 50 ms 内复用最近可信状态，保持上升和已有支撑连续；
-新积分更新冻结，接管仍需新接受样本。该修复不延长 60 s 预抬超时。
-配置、状态和推导见 [负载观测与诊断](docs/slung_payload_observer.md)。
-
-`slung_payload.yaml` 的 `state_feedback_mode` 可在 `pose_observer` 和 `velocity_free_beta` 间选择。
-当前选择 `velocity_free_beta`，实飞轨迹仍为 hover。
-后者只用负载位姿和轨迹参考产生 β，再替代负载的速度、角速度反馈；飞机自己的 EKF 和 CTBR 接口保持原设计。
-这次保留了现有负载反馈控制及构型补偿，与 MATLAB 完整 SE(3) 合力控制有区别。
-公式、每项参数和差异见 [Velocity-free 设计](docs/slung_velocity_free.md)，
-仿真结果见 [验证记录](docs/slung_velocity_free_verification.md)。
-
-## 负载轨迹
-
-在 `slung_payload.yaml` 的 `trajectory` 中选择模式。普通飞机的 `ctbr_trajectory.trajectory_mode` 保持 `hover`，由负载参考统一带动三机。
-
-| 模式 | 路径 | 负载朝向参考 |
-|---|---|---|
-| `hover` | 固定位置 | 水平、零航向 |
-| `circle` | 单圆 | 指向圆心 |
-| `figure_eight` | 两个精确相切圆 | 沿运行切线 |
-| `attitude_cone` | 质心固定，自身 +Z 绕世界 +Z 扫锥 | 采用起止闭合姿态参考 |
-
-当前 `trajectory.mode` 为 `circle`。切换到固定质心圆锥姿态时，可使用已配置的 15°、两圈参考：
-
-```yaml
-slung_payload:
-  target_payload_height_m: 0.60
-  trajectory:
-    mode: attitude_cone
-    center_xy: [0.0, 0.0]
-    cone_half_angle_deg: 15.0
-    cone_period_s: 30.0
-    cone_transition_s: 5.0
-    direction: ccw
-    revolutions: 2.0
-    ramp_s: 5.0
-    settle_s: 3.0
-  flight_validation_enabled: true
-  flight_validation_transport_s: 100.0
-```
-
-这里的 `center_xy` 是固定质心的世界 XY，目标高度为 0.6 m。自身 +Z 在扫描期间与世界 +Z 保持 15° 夹角。`revolutions` 指定完整圈数，当前为两圈，每圈由 `cone_period_s` 指定为 30 秒；每增加一圈，扫描时间增加 30 秒。
-
-从进入 `TAUT_RAMP` 开始计时，该圆锥配置在第 20–25 秒倾斜到 15°，第 25–55 秒扫描第一圈，第 55–85 秒扫描第二圈，第 85–90 秒恢复水平，第 100 秒开始计划降落。每圈采用相同的平滑起停；圈与圈之间保持 15° 倾斜，角速度和角加速度归零后开始下一圈。参考固定不代表实际质心没有误差。`settle_s` 规定参考等待时间，不表示实际负载姿态已经收敛。
-
-启用 `flight_validation_enabled` 时，实飞吊运任务时长统一修改 `slung_payload.flight_validation_transport_s`，程序自动为普通飞机悬停时钟留足该时长。三圈圆锥参考在接管后第 120 秒完成，须将负载任务窗口至少设为 120 秒，并留出所需的水平保持时间；完整轨迹的窗口校验仍然有效。离线仿真的总时间上限还需覆盖接管前过程及下降。
-
-圆周模式中的 `center_xy` 表示单圆圆心。省略该项时自动确定圆心；不要填写 `null`，ROS1 参数服务器不支持空值。
-
-详细轨迹、时间和切换方法见 [圆锥姿态说明](docs/slung_payload_attitude_cone.md)、[圆周说明](docs/slung_payload_circle.md) 与 [八字说明](docs/slung_payload_figure_eight.md)。
-
-### 姿态构型补偿
-
-`reference_cascade` 的慢姿态 trim 修正三机位置、速度和加速度参考，负载目标姿态继续由轨迹指定。
-在 `slung_payload.yaml` 中，动态模式需同时启用以下两个开关：
-
-```yaml
-slung_payload:
-  transport_attitude_trim_enabled: true
-  transport_attitude_trim_dynamic_enabled: true
-  transport_attitude_trim_during_lift_enabled: true
-  transport_attitude_trim_feedback_max_rate_rps: 0.50
-  transport_attitude_trim_feedback_pose_jump_deg: 1.0
-  transport_attitude_trim_feedback_recovery_s: 0.50
-```
-
-动态开关当前为 `true`；设为 `false` 可沿用原静态策略：运动期间冻结学习，圆周/八字旋转已有偏置，圆锥保持已有世界系偏置。
-设为 `true` 后，补偿使用瞬时完整目标姿态，可在健康的运动参考期间继续学习；已有偏置直接保存在世界系，圆周/八字不再额外按 yaw 旋转它。
-每机偏置范数、速度和加速度分别限制为当前配置的 10 mm、1.5 mm/s 和 2 mm/s²；各机偏置之和为零，每个 1 s 五次段在连接处保持位置、速度和加速度连续。冻结时完成当前段，再保持端点。
-
-`transport_attitude_trim_during_lift_enabled: true` 允许动态补偿在张力渐增完成、协同混合达到 100% 后继续更新，当前最早接管后第 5 秒，覆盖随后抬升和调平阶段。设为 `false` 恢复参考全部建立后才更新，当前第 17 秒。该开关不提前放开单机位置 I 或差分力积分；反馈健康和限幅门控仍生效。
-
-动态 trim 额外检查负载角速度范数和相邻源位姿旋转步长，异常后需连续恢复 0.5 s 才重新学习；步长门限还包含源样本间隔允许的转动量。
-这些 trim 门控只暂停新更新；负载核心输入另受[观测质量准入](docs/slung_payload_observer.md)保护。
-这是有界、低带宽的构型补偿；运动滞后也可能被慢积分学习，限幅和参考连续性不能保证闭环收敛或不振荡。使用前应对照相同轨迹的关闭、静态和动态回放，并检查真实几何及机体差异。
-推导、健康门控和诊断坐标见 [控制器公式说明](docs/slung_controller_formulas.md#9-姿态到构型的慢修正与下降衔接)。
-本次完整仿真对照、开关和适用范围见 [动态构型补偿](docs/slung_dynamic_attitude_trim.md)。
-
-## 实飞启动
-
-先核对飞机、负载几何、定位网络和每机参数。以下命令使用真实硬件。
+启动前在 `crazyflies.yaml` 核对 ID、URI、信道和启用条目，在 `ctbr_vehicle.yaml` 核对对应每机参数；吊运模式要求 CF3 / CF4 / CF5。NOKOV 的服务器地址、刚体名及桥接参数在 `hover_swarm.launch` 中配置，负载刚体当前为 `load`。
 
 从仓库根目录，在第一个终端执行：
 
@@ -208,106 +195,58 @@ source ros_ws/devel/setup.bash
 roslaunch crazyswarm hover_swarm.launch
 ```
 
-`hover_swarm.launch` 会通过 `cf_arm_wrapper.sh` 对配置中的无刷飞机发送 ARM，随后启动 server；它不是仅查看定位的启动方式。ARM 脚本使用的解释器须能加载正确的 `cflib`；如使用源码版库，可通过 `CFLIB_PATH` 指定其目录。
+该 launch 通过 `cf_arm_wrapper.sh` 先对配置中的无刷飞机发送 ARM，再启动 server，同时启动手柄节点和 RViz。它是硬件启动入口。wrapper 使用 `PYTHON` 选择 ARM 脚本解释器，使用 `CFLIB_PATH` 指向可选的 cflib 源码目录；这与 ROS 控制节点的系统解释器分别配置。server 退出后 wrapper 会尝试 DISARM。
 
-另开终端，从仓库根目录执行：
+另开终端，同样从仓库根目录执行：
 
 ```bash
 source /opt/ros/noetic/setup.bash
 source ros_ws/devel/setup.bash
-roslaunch crazyswarm ctbr_controller.launch target_confirmed:=true enable_realtime_visualization:=false
+roslaunch crazyswarm ctbr_controller.launch \
+  target_confirmed:=true enable_realtime_visualization:=false
 ```
 
-通过预检后会自动进入配置的任务。`target_confirmed:=true` 表示允许真实控制输出；设为 `false` 会拒绝启动控制节点，不是运行中的只读模式。需要实时绘图时，将 `enable_realtime_visualization` 设为 `true`。
+`target_confirmed:=true` 允许控制节点输出，预检通过后会自动执行配置任务；默认 `false` 会拒绝启动控制输出。需要 CSV 实时绘图时，将 `enable_realtime_visualization` 设为 `true`。
 
-任务流程为：全机预检、独立起飞、收绳和预抬、协同接管与轨迹、协同降负载、确认接地并卸载、三机独立下降停推。
+任务顺序为：
 
-`prelift_clearance_m` 是负载底面离地门槛，`target_payload_height_m` 是负载几何中心的最终目标高度。预抬通过独立位置控制建立拉力；协同阶段使用负载与三机参考。计划降落先放下负载，确认接地后才释放协同支撑。
-
-## 离线仿真
-
-先在单独的 Python 3.10 或更高版本环境中准备本项目修改版 Udaan，以及 PyYAML；开发测试还需要 pytest。若采用上述相邻目录布局，可从本仓库根目录安装已有的本地模型：
-
-```bash
-python -m pip install -e ../simulate_uav/udaan
-python -m pip install pyyaml pytest
+```text
+预检 → 独立起飞 → TAKEUP / 预抬 → TAUT_RAMP → 参考抬升 / 运输
+     → 协同下降负载 → 确认触地 → 卸载 → 三机独立下降停推
 ```
 
-以下命令均在 **本仓库的 scripts 目录** 执行，使用能导入 Udaan/MuJoCo 的解释器。离线回放不需要启动 `hover_swarm.launch`，不连接 radio，也不发送 ARM。
-
-```bash
-cd ros_ws/src/crazyswarm/scripts
-python simulate_slung_handoff.py --output ctbr_logs/trajectory_check
-python plot_slung_circle_trace.py ctbr_logs/trajectory_check/simulation_trace.csv
-```
-
-绘图包括实际与期望 XYZ、RPY 和误差；圆周/八字显示 XY 路径和朝向，圆锥模式显示自身 +Z 方向、锥角和轴方向误差。保存图像而不打开窗口：
-
-```bash
-python plot_slung_circle_trace.py ctbr_logs/trajectory_check/simulation_trace.csv \
-  --save ctbr_logs/trajectory_check/trajectory.png --no-show
-```
-
-实时 MuJoCo 窗口与视频录制：
-
-```bash
-python simulate_slung_handoff.py --render \
-  --record ctbr_logs/trajectory_check.mp4 \
-  --output ctbr_logs/trajectory_check
-```
-
-指定另一份仿真配置，或单独检查更大延迟：
-
-```bash
-python simulate_slung_handoff.py --simulation-config ../config/slung_simulation.yaml \
-  --output ctbr_logs/custom_simulation
-
-python simulate_slung_handoff.py --pose-delay 0.02 --command-delay 0.01 \
-  --output ctbr_logs/delay_check
-```
-
-默认读取独立的 `slung_simulation.yaml`。电机模型为 Graefe 2026 逐电机模型，机载环固定 Mellinger；`legacy_quadratic` 作为电机物理对照保留。
-
-每次输出包括：
-
-| 文件 | 内容 |
+| 时间或高度参数 | 含义 |
 |---|---|
-| `input_parameters.yaml` | 控制配置、独立仿真配置和实际模型设置的快照 |
-| `simulation_trace.csv` | 模型实际状态、控制指令、负载目标和轨迹进度 |
-| `multi_ctbr_*.csv` | 同一主机控制器生成的诊断日志 |
-| `summary.json` | 任务完成情况、限幅及实际轨迹跟踪误差 |
+| `prelift_clearance_m: 0.20` | 旋转负载最低点的离地门槛 |
+| `target_payload_height_m: 0.60` | 运输阶段负载几何中心的最终目标高度 |
+| `flight_validation_transport_s: 60.0` | 从进入 `TAUT_RAMP` 开始计时，到时启动计划放载 |
+| `tension_ramp_s: 5.0` / `reference_lift_s: 12.0` | 先建立张力，再抬升负载参考；60 s 窗口中参考抬升完成后的时间约为 43 s |
+| `slung_simulation.post_handoff_s: 100.0` | 离线观察窗口；不会把已启用的 60 s 实飞任务期限改成 100 s |
 
-修改输入文件后需重新运行才能生成新结果。输出目录中的 `input_parameters.yaml` 是快照，修改它不会改变下一次默认运行。
+任务时钟不等待实测调平后才开始。延长悬停需修改 `flight_validation_transport_s`，延长离线总时长还需检查 `slung_simulation.time_limit_s`。正常结束先放下负载并确认触地，再卸载支撑；持续状态异常使用相应受控退出流程。
 
-`post_handoff_s` 只控制离线观察窗口；实飞计划降落由 `flight_validation_transport_s` 控制。
-当前离线观察参数为 100 s，实飞接管时长为 60 s，分别保存在仿真和实飞文件中。
-启用实飞验证流程的回放仍在接管 60 s 后开始降落，不会因为离线参数为 100 s 而额外悬停。
+## 轨迹与构型补偿
 
-悬停实飞可直接修改 `slung_payload.yaml` 中的 `flight_validation_transport_s`。
-该时钟从 TAUT_RAMP 接管开始：当前前 5 s 建立张力、接着 12 s 抬升，
-设 100 s 对应抬升参考结束后约 83 s；希望此后悬停 120 s，可设 137 s。
-它不等待实测调平完成才计时。`flight_validation_enabled: false` 时则继续由普通轨迹时长结束任务。
+负载轨迹在 `slung_payload.trajectory.mode` 中选择；普通飞机 `ctbr_trajectory.trajectory_mode` 在吊运任务中保持 `hover`。
 
-候选覆盖文件使用独立参数根，传给 `--candidate` 后只影响本次回放：
+| 负载模式 | 路径与朝向 |
+|---|---|
+| `hover`，当前默认 | 固定位置，目标水平、零航向 |
+| `circle` | 单圆，负载朝向圆心 |
+| `figure_eight` | 两个精确相切圆，负载沿运行切线朝向 |
+| `attitude_cone` | 质心固定，自身 +Z 绕世界 +Z 扫描，姿态参考起止闭合 |
 
-```yaml
-slung_payload:
-  trajectory:
-    mode: hover
-  flight_validation_enabled: false
-slung_simulation:
-  post_handoff_s: 60.0
-  pose_delay_s: 0.02
-  command_delay_s: 0.01
-```
+实飞文件已预设圆锥半角 15°、两圈、每圈 30 s，但当前没有启用。若切到 `attitude_cone`，还需延长任务窗口，例如设 `flight_validation_transport_s: 100.0`，覆盖参考建立、两圈扫描和恢复水平。轨迹的 `settle_s` 是参考等待时间，不代表实测误差已经收敛。圆周/圆锥的 `center_xy` 含义不同，省略与填 `null` 也不同，ROS1 参数不能包含 `null`。
 
-历史候选文件可能覆盖控制增益、任务模式和时间，不能视为当前默认配置的等价验证。旧的嵌套仿真参数与已删除的机载控制器切换参数会提示迁移。
+当前动态构型 trim 和抬升期间更新均已启用：张力渐增完成且协同混合达到 100% 后，按负载姿态误差缓慢修正三机参考构型，仍受反馈健康、阶段和限幅门控。它不改变负载目标姿态，也不替代六维负载外环。换绳后的自动有效值校准与 `link_length_report_enabled` 统计分别管理；后者只报告实测距离，不自动写回配置。
 
-## 实飞日志与绘图
+轨迹与补偿的详细配置见 [圆周](docs/slung_payload_circle.md)、[八字](docs/slung_payload_figure_eight.md)、[圆锥姿态](docs/slung_payload_attitude_cone.md)、[动态构型补偿](docs/slung_dynamic_attitude_trim.md) 和 [有效绳长统计](docs/slung_link_length_measurement.md)。
 
-日志默认位于 `ros_ws/src/crazyswarm/scripts/ctbr_logs/`。单机文件为 `cf<ID>_ctbr_*.csv`，多机文件为 `multi_ctbr_*.csv`，通过 `vehicle_id` 区分飞机。
+## 日志与排查
 
-从仓库根目录绘制指定实飞 CSV：
+默认日志目录为 `ros_ws/src/crazyswarm/scripts/ctbr_logs/`。多机日志使用 `multi_ctbr_*.csv`，以 `vehicle_id` 区分飞机；单机日志为 `cf<ID>_ctbr_*.csv`。
+
+从仓库根目录绘制实飞日志，将下面文件名换成实际生成的 CSV：
 
 ```bash
 python3 ros_ws/src/crazyswarm/scripts/ctbr_visualization.py \
@@ -315,35 +254,32 @@ python3 ros_ws/src/crazyswarm/scripts/ctbr_visualization.py \
   --static --no-show --output /tmp/ctbr.png
 ```
 
-将文件名中的时间戳替换为实际日志；只看一架飞机可增加 `--vehicle-id 5`。有负载数据时会另存 `/tmp/ctbr_payload.png`，显示负载实际与期望 XYZ/RPY。旧 CSV 缺少的字段保持未知，不补造零目标。
+有负载数据时另存 `/tmp/ctbr_payload.png`；只看一架飞机可增加 `--vehicle-id 5`。
 
-| 诊断内容 | 主要字段或话题 |
+| 需要确认的状态 | 日志字段或话题 |
 |---|---|
-| 飞机实际/参考 | `position_*`、`target_*`、`desired_*` |
-| 负载实际/参考位姿 | `payload_position_*`、`payload_target_*`、负载 RPY 列 |
-| 轨迹运行 | `payload_trajectory_mode`、`payload_trajectory_phase`、`payload_trajectory_progress` |
-| 圆锥姿态 | `payload_body_z_*`、`payload_target_body_z_*`、`payload_cone_half_angle_deg`、`payload_cone_axis_error_deg` |
-| EKF 与反馈状态 | `ekf_status`、`ekf_state_age_s`、`mocap_sample_age_s` |
-| 运输积分与补偿 | `transport_full_pid_*`、`transport_attitude_trim_*`、`transport_support_trim_n` |
-| 动态 trim 质量 | `transport_attitude_trim_dynamic_enabled`、`transport_attitude_trim_feedback_healthy`、`transport_attitude_trim_feedback_quality_reason`、`transport_attitude_trim_body_rate_norm_rps`、`transport_attitude_trim_pose_step_deg`、`transport_attitude_trim_pose_step_limit_deg` |
-| 降落原因与阶段 | `emergency_landing_reason`、`flight_validation_landing_stage` |
-| RViz 实际路径 | `/cf<ID>/path`、`/load/path`，坐标系为 `world` |
+| 负载反馈模式 | `payload_state_feedback_mode` |
+| β 与参考新鲜度 | `payload_beta_omega_body_*`、`payload_beta_velocity_body_*`、`payload_beta_reference_active` |
+| 输出是否复用旧状态 | `payload_control_reused`、`payload_control_sample_time_s`、`payload_source_observer_status` |
+| 交给分配器的负载力/力矩 | `payload_desired_force_*`、`payload_desired_moment_*` |
+| 飞机平移反馈是否有效 | `ekf_status`、`ekf_state_age_s`、`mocap_sample_age_s` |
+| 飞机运输积分与配平 | `transport_full_pid_*`、`transport_attitude_trim_*`、`transport_support_trim_n` |
+| 降落阶段及原因 | `flight_validation_landing_stage`、`emergency_landing_reason` |
+| RViz 路径 | `/cf<ID>/path`、`/load/path`，坐标系 `world` |
 
-`emergency_landing_reason` 沿用原字段名，也记录计划结束；含 `flight_validation_complete` 表示验证时间到，不等于 EKF 故障。
-动态 trim 的 `transport_attitude_trim_integral_*` 是世界系小角增量累计诊断，不能用当前目标姿态重建已学偏置；实际补偿以每机世界系 `transport_attitude_trim_position/velocity/acceleration_*` 为准。
+`emergency_landing_reason` 也记录计划结束，`flight_validation_complete` 表示任务时间到。β 模式的 `payload_acceleration_available=0`，不能把对应零占位当作测量加速度。六维 `Upsilon/PsiE/PsiT/u_c` 中间量目前还没有接入 CSV，最终力/力矩列不能替代它们做逐项公式核对。
 
-## 常见问题
-
-| 现象 | 优先检查 |
+| 现象 | 检查入口 |
 |---|---|
-| launch 报 `cannot marshal None` | YAML 中是否存在 `null` 或没有值的参数 |
-| 电压预检样本数为零 | 对应 `/cf<ID>/battery` 是否持续收到数据、样本是否新鲜 |
-| EKF 起飞前对齐失败 | EKF 与 NOKOV 位置差、连续对齐时间和导数是否就绪 |
-| TAKEUP 无法接管 | 三根有效绳长、负载离地间隙、低竖直速度和当前诊断原因 |
-| 绘图报找不到 CSV | 仿真是否完成、实际输出目录及当前工作目录是否匹配 |
-| 运行时间短于观察窗口 | `summary.json` 中的结束原因、实飞验证期限、任务时长和保护条件 |
+| `cannot marshal None` | YAML 是否包含 `null` 或空值 |
+| 无刷飞机 ARM 失败 | wrapper 的解释器、cflib、飞机 URI 与无线连接 |
+| 电池样本为零或过期 | `/cf<ID>/battery`；目标日志频率 2 Hz |
+| EKF 对齐失败 | `/cf<ID>/ekf_kinematics`、NOKOV/EKF 位置差和连续对齐时间 |
+| TAKEUP / 预抬不接管 | 有效绳长、最低点离地间隙、β 竖直速度和状态质量 |
+| β 连续拒帧 | `beta_limit`、位姿跳变、源时间间隔及 `auxiliary_stale` 状态 |
+| 仿真提前结束 | `summary.json` 的结束原因、任务期限和保护触发情况 |
 
-server 启动后可使用只读话题检查，例如：
+server 启动后可只读检查遥测：
 
 ```bash
 rostopic hz /cf3/battery
@@ -351,59 +287,57 @@ rostopic hz /cf3/ekf_kinematics
 rostopic echo -n 5 /cf3/ctbr_timing
 ```
 
-当前电池目标为 2 Hz、EKF 目标为 50 Hz；实收频率会受链路影响。`ctbr_timing` 是主机发送链路诊断，不能直接当作飞机执行指令的单向延迟。修改 server 日志配置需重启 server；仅重启控制器不会改变已建立的机载日志周期。
+`ctbr_timing` 是主机桥接的发送链路诊断，不能直接当作飞机执行指令的单向延迟。
 
-## 代码结构与控制设计
+## 测试与验证范围
 
-控制计算分为三个职责模块：
+六维外环移植后的相关 Python 回归记录为 **98 项通过、1 项跳过**，包括辅助系统、负载核心、旧姿态前馈、积分、惯量和控制快照。它是专项记录，不是全仓库或所有 MuJoCo 测试通过的声明，也没有直接调用 MATLAB 运行相同轨迹。
 
-| 职责 | 文件 |
-|---|---|
-| 单机独立飞行、预抬和放载后降落 | [ctbr_independent_controller.py](ros_ws/src/crazyswarm/scripts/ctbr_independent_controller.py) |
-| 负载外环、张力分配和绳向处理 | [slung_load_controller.py](ros_ws/src/crazyswarm/scripts/slung_load_controller.py) |
-| 吊运时的每机位置反馈和姿态命令 | [ctbr_transport_vehicle_controller.py](ros_ws/src/crazyswarm/scripts/ctbr_transport_vehicle_controller.py) |
+[历史 β 验证记录](docs/slung_velocity_free_verification.md) 中的五组悬停、圆锥、噪声/延迟回放，使用的是此前“β 替换原 PID/PD 速度反馈”的实现。此前八字、圆锥和动态 trim 文档中的整机结果也对应各自参数快照，不能作为当前六维外环的验证结果。
 
-[ctbr_geometric_controller.py](ros_ws/src/crazyswarm/scripts/ctbr_geometric_controller.py) 组合独立与运输计算；[ctbr_controller.py](ros_ws/src/crazyswarm/scripts/ctbr_controller.py) 保留启动入口。ROS 收发、日志、参考和机群调度分别放在 `ctbr_vehicle_*`、`ctbr_payload_*`、`ctbr_fleet_node.py` 中。
+当前还需完成六维外环的整机回放与实飞验证；合力限幅坐标顺序、辅助带宽、异步时序和日志缺项见 [剩余差异](docs/slung_velocity_free.md#4-与-matlab--笔记的差异)。历史 MuJoCo 故障注入测试的已知失败及基线复现情况见上述验证记录。
 
-控制层次为负载位置与姿态反馈、协同张力分配、三机构型参考、单机位置反馈、CTBR 姿态接口、机载 Mellinger 与电机混控。`reference_cascade` 保留负载反馈，使用三机参考跟踪替代原绳向闭环；它与原始完整耦合几何控制律存在工程差别。
-
-`coupled` 和 `differential_integral` 保留作主机对照，当前默认使用 `reference_cascade` 与 `native_position_pid`。姿态 trim 默认沿用静态策略，动态学习需显式启用；差分积分继续在运动期间冻结。位置积分和支撑配平分别管理。
-
-| 文档 | 内容 |
-|---|---|
-| [控制器公式说明](docs/slung_controller_formulas.md) | 当前控制公式、坐标约定、积分、前馈和代码对应关系 |
-| [模块与参数入口](docs/ctbr_controller_modules.md) | 拆分后的文件职责、实飞/仿真配置和覆盖方式 |
-| [负载圆周](docs/slung_payload_circle.md) | 圆周配置、向心朝向和参考衔接 |
-| [负载八字](docs/slung_payload_figure_eight.md) | 双圆路径、切线朝向与完整任务时序 |
-| [圆锥姿态](docs/slung_payload_attitude_cone.md) | 固定质心、可配置锥角、每圈 30 秒的多圈扫描与方向误差检查 |
-| [设计推导对照](docs/slung_controller_design_comparison.md) | 原笔记与工程实现的差别、历史试验与边界 |
-| [MATLAB 参考实现](MATLAB/Multi-UAV-Transportation-Simulation) | 几何控制与吊运参考代码 |
-
-## 验证范围
-
-当前重构已通过控制公式、状态处理、起飞/接管、轨迹、降落和参数隔离测试。完整八字 MuJoCo 回放覆盖 100 s 接管窗口及降落停推；模块拆分前后记录逐项一致。
-
-圆锥姿态参考曾以单圈配置完成默认延迟和较大延迟的两组 100 s MuJoCo 回放，均降落停推。
-扫描期间质心位置误差 RMS 约 4.9–5.0 mm，+Z 轴方向误差 RMS 约 1.33°；
-这些是历史 10° 单圈结果，不代表当前 15° 两圈圆锥配置或动态构型补偿的验证。参考与实际锥角仍有差异，详细定义和历史结果见 [圆锥姿态说明](docs/slung_payload_attitude_cone.md)。
-
-模型中仍存在实际与期望姿态误差。仿真没有完整复现机载 EKF、无线随机丢包、所有动捕异常和机体差异；模型回放完成不能代替对应实飞验证。具体配置以各次生成的快照为准。
-
-在 scripts 目录运行当前主机测试：
+在 scripts 目录运行相关回归：
 
 ```bash
-python -m pytest -q test_ctbr*.py test_slung*.py \
-  test_native_position_pid*.py test_transport_native_pid_equivalence.py
+python -m pytest -q \
+  test_slung_velocity_free.py test_slung_load_controller.py \
+  test_slung_attitude_feedforward.py test_slung_attitude_integral_core.py \
+  test_slung_reference_cascade.py test_slung_payload_inertia.py \
+  test_slung_payload_control_snapshot.py
 ```
 
-绘图和飞机配置还可运行 `test_ctbr_visualization.py`、`test_vehicle_config.py`。ROS 实飞使用系统 Python 3.8，Udaan 使用独立环境；应同时检查实际解释器兼容性。
+需要完整测试时，在具备相应 ROS / MuJoCo / 修改版 Udaan 依赖的环境中执行 `python -m pytest -q`。ROS 节点使用系统 Python 3.8，离线环境的测试通过不能替代部署解释器的兼容性检查。
 
-## 数据与版本管理
+## 代码与文档导航
 
-飞行 CSV、仿真输出、分析图、视频和 ROS bag 属于运行数据，默认日志目录由 [.gitignore](.gitignore) 排除。README 的使用入口不依赖这些本地文件。
+| 位置 | 职责 |
+|---|---|
+| [ctbr_controller.py](ros_ws/src/crazyswarm/scripts/ctbr_controller.py) / [ctbr_fleet_node.py](ros_ws/src/crazyswarm/scripts/ctbr_fleet_node.py) | ROS 启动入口、机群同步与控制调度 |
+| [slung_velocity_free.py](ros_ws/src/crazyswarm/scripts/slung_velocity_free.py) | 负载 SE(3) 辅助系统、β、源时间与质量处理 |
+| [slung_load_controller.py](ros_ws/src/crazyswarm/scripts/slung_load_controller.py) | 六维负载外环、旧 PID/PD 分支、张力分配及每机基础力 |
+| [ctbr_payload_parameters.py](ros_ws/src/crazyswarm/scripts/ctbr_payload_parameters.py) | 参数校验、SE(3) 权重与限幅预算派生 |
+| [ctbr_payload_reference.py](ros_ws/src/crazyswarm/scripts/ctbr_payload_reference.py) / [ctbr_payload_mission.py](ros_ws/src/crazyswarm/scripts/ctbr_payload_mission.py) | 负载与三机参考、接管、任务退出和协同降落 |
+| [ctbr_independent_controller.py](ros_ws/src/crazyswarm/scripts/ctbr_independent_controller.py) | 独立飞行、预抬及放载后的下降 |
+| [ctbr_transport_vehicle_controller.py](ros_ws/src/crazyswarm/scripts/ctbr_transport_vehicle_controller.py) / [ctbr_geometric_controller.py](ros_ws/src/crazyswarm/scripts/ctbr_geometric_controller.py) | 飞机运输反馈、合力到姿态与 CTBR 命令 |
+| [simulate_slung_handoff.py](ros_ws/src/crazyswarm/scripts/simulate_slung_handoff.py) | 复用主机代码的离线整机回放入口 |
+| [crazyflie-firmware](crazyflie-firmware) | 固件子模块；机载控制及电机混控 |
+| [MATLAB/Multi-UAV-Transportation-Simulation](MATLAB/Multi-UAV-Transportation-Simulation) | 仓库内较早的几何吊运参考代码 |
 
-提交改动时应包含实际使用的新模块、参数文件和文档。底层库以子模块管理，子模块内部改动需要在对应仓库保存版本；父仓库仅记录其提交指针。
+六维外环对照使用的 `Multi-UAV-Transportation-Simulation-vel-free` 是工作区中另行下载的 MATLAB 目录，未包含在本仓库内。来源文件和 SHA256 记录在 [Velocity-free 说明](docs/slung_velocity_free.md#1-对照资料)，不要与上表的旧 MATLAB 目录混用。
 
-## 项目来源与许可
+| 文档 | 用途 |
+|---|---|
+| [Velocity-free 说明](docs/slung_velocity_free.md) | 当前负载 β 反馈、六维外环使用范围和剩余实现差异 |
+| [负载观测与诊断](docs/slung_payload_observer.md) | 旧 `pose_observer`、状态质量与控制快照 |
+| [控制器模块与参数入口](docs/ctbr_controller_modules.md) | 主机模块划分及参数根 |
+| [控制器公式说明](docs/slung_controller_formulas.md) | 坐标、分配、飞机控制和补偿推导；负载旧 PID/PD 公式适用于旧模式 |
+| [设计推导对照](docs/slung_controller_design_comparison.md) | 原几何设计与工程实现、历史实验 |
 
-本项目基于 [USC-ACTLab/Crazyswarm](https://github.com/USC-ACTLab/crazyswarm)，底层依赖与其许可证见相应子模块。仓库许可为 [MIT License](LICENSE)。
+专题文档可能包含历史参数和模式；当前默认值以本 README 的配置表及 YAML 为准，六维负载分支以 Velocity-free 说明和源码为准。
+
+## 数据、版本与许可
+
+飞行 CSV、仿真快照、图片、视频和 ROS bag 属于运行数据，默认输出目录由 [.gitignore](.gitignore) 排除。复现实验需同时保存实际代码版本、参数快照和日志，不能只保留结果图。
+
+底层库以子模块管理，父仓库只记录提交指针；子模块内部改动需要在相应仓库保存。项目基于 USC-ACTLab/Crazyswarm，仓库许可为 [MIT License](LICENSE)，各子模块遵循各自许可证。

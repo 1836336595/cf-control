@@ -42,7 +42,8 @@ def test_beta_matches_matlab_se3_adjoint_and_weighted_gradient():
     invxe = np.linalg.inv(xe)
     ad = np.zeros((6, 6)); ad[:3,:3] = ad[3:,3:] = invxe[:3,:3]
     ad[3:,:3] = _hat(invxe[:3,3]) @ invxe[:3,:3]
-    xt = np.eye(4); xt[:3,:3] = rh.T @ r; xt[:3,3] = rh.T @ (p-ph)
+    rh_aux = state['auxiliary_rotation']; ph_aux = state['auxiliary_position']
+    xt = np.eye(4); xt[:3,:3] = rh_aux.T @ r; xt[:3,3] = rh_aux.T @ (p-ph_aux)
     w = np.diag(o.weights); d = 2.
     m = w @ xt[:3,:3] - xt[:3,:3].T @ w
     psi = np.r_[.5*np.array([m[2,1],m[0,2],m[1,0]]), d/2*xt[:3,:3].T @ xt[:3,3]]
@@ -117,27 +118,136 @@ def test_beta_bound_rejects_candidate_instead_of_returning_clipped_healthy_rate(
     np.testing.assert_array_equal(state['body_rate'], np.zeros(3))
 
 
-def test_slung_core_uses_beta_and_omits_gyroscopic_cancellation_only_in_new_mode(tmp_path):
+def test_slung_core_uses_matlab_full_se3_wrench_in_beta_mode(tmp_path):
     module = _controller_module()
     manager, _ = _slung_manager(module, tmp_path,
         {'slung_payload': {'state_feedback_mode': 'velocity_free_beta'}})
     try:
         core = manager.slung_controller
+        np.testing.assert_allclose(
+            core.config.se3_W, np.diag(manager.payload_state_observer.weights), atol=0.)
+        expected_d = (2. * core.config.payload_mass_kg
+                      * np.mean(core.config.position_gain) / core.config.se3_kx)
+        assert core.config.se3_d == expected_d
         beta = np.array([.1, .2, -.15, .03, -.02, .01])
         state = dict(valid=True, position=np.array([0.,0.,.6]), rotation=np.eye(3),
             velocity=beta[3:].copy(), body_rate=beta[:3].copy(), acceleration=np.zeros(3),
+            auxiliary_position=np.array([0.,0.,.6]), auxiliary_rotation=np.eye(3),
             feedback_mode='velocity_free_beta', raw_velocity=np.full(3,99.), raw_body_rate=np.full(3,99.))
         vehicles = [dict(position=state['position']+core.config.attachment_points_m[:, i]+[0,0,.8],
                          velocity=np.zeros(3), mass=.043) for i in range(3)]
-        target = dict(position=state['position'].copy(), rotation=np.eye(3),
+        target = dict(position=state['position'].copy(), velocity=np.zeros(3),
+            acceleration=np.zeros(3), rotation=np.eye(3),
+            body_rate=np.zeros(3), body_rate_dot=np.zeros(3),
             payload_attitude_gain=np.ones(3)*.001, payload_rate_gain=np.ones(3)*.002)
         result = core.compute(state, vehicles, target, .01)
-        np.testing.assert_allclose(result['desired_moment'], -.002*beta[:3], atol=1.e-12)
+        force_limit = core.config.se3_force_limit_n
+        gravity_load = core.config.payload_mass_kg * core.config.gravity_mps2
+        expected_force = np.array([0., 0., force_limit * np.tanh(gravity_load / force_limit)])
+        np.testing.assert_allclose(result['desired_force'], expected_force, atol=1.e-12)
+        np.testing.assert_allclose(result['desired_moment'], np.zeros(3), atol=1.e-12)
         np.testing.assert_allclose(result['payload_velocity_error'], beta[3:])
+        assert np.linalg.norm(result['payload_se3_upsilon']) == 0.
+        assert np.linalg.norm(result['payload_se3_psi_error']) == 0.
+        assert np.linalg.norm(result['payload_se3_psi_tilde']) == 0.
+        np.testing.assert_array_equal(core.position_integral, np.zeros(3))
         core.reset();state['feedback_mode']='pose_observer'
+        state.pop('auxiliary_position'); state.pop('auxiliary_rotation')
         legacy = core.compute(state, vehicles, target, .01)
-        expected = np.cross(beta[:3], core.config.payload_inertia_kgm2*beta[:3])
-        np.testing.assert_allclose(legacy['desired_moment']-result['desired_moment'], expected, atol=1.e-12)
+        expected_legacy = (
+            np.cross(beta[:3], core.config.payload_inertia_kgm2*beta[:3])
+            - .002 * beta[:3])
+        np.testing.assert_allclose(legacy['desired_moment'], expected_legacy, atol=1.e-12)
+    finally:
+        manager.logger.close()
+
+
+def test_slung_core_se3_wrench_matches_matlab_adjoint_and_potential_terms(tmp_path):
+    module = _controller_module()
+    manager, _ = _slung_manager(module, tmp_path,
+        {'slung_payload': {'state_feedback_mode': 'velocity_free_beta'}})
+    try:
+        core = manager.slung_controller
+        rotation = _rotation_exp([.035, -.018, .052])
+        position = np.array([.014, -.009, .624])
+        auxiliary_rotation = _rotation_exp([-.012, .021, -.006])
+        auxiliary_position = np.array([.003, .004, .611])
+        beta = np.array([.08, -.05, .03, .04, -.02, .01])
+        state = dict(
+            valid=True, position=position, rotation=rotation,
+            velocity=rotation @ beta[3:], body_rate=beta[:3],
+            acceleration=np.zeros(3), auxiliary_rotation=auxiliary_rotation,
+            auxiliary_position=auxiliary_position, feedback_mode='velocity_free_beta')
+        vehicles = [dict(
+            position=position + core.config.attachment_points_m[:, i] + [0., 0., .8],
+            velocity=np.zeros(3), mass=.043) for i in range(3)]
+        target = dict(
+            position=np.array([-.006, .008, .605]),
+            velocity=np.array([.035, -.024, .012]),
+            acceleration=np.array([.004, -.002, .003]),
+            rotation=_rotation_exp([-.014, .027, .041]),
+            body_rate=np.array([.021, -.013, .009]),
+            body_rate_dot=np.array([-.003, .005, .002]),
+            payload_yaw_enabled=True)
+        result = core.compute(state, vehicles, target, .01)
+
+        def adjoint(r, p):
+            value = np.zeros((6, 6))
+            value[:3, :3] = value[3:, 3:] = r
+            value[3:, :3] = _hat(p) @ r
+            return value
+
+        def vee(matrix):
+            return np.array([matrix[2, 1], matrix[0, 2], matrix[1, 0]])
+
+        rd, pd = target['rotation'], target['position']
+        omega_d, alpha_d = target['body_rate'], target['body_rate_dot']
+        error_rotation = rd.T @ rotation
+        error_position = rd.T @ (position - pd)
+        inverse_error_rotation = error_rotation.T
+        inverse_error_position = -inverse_error_rotation @ error_position
+        adjoint_inverse_error = adjoint(inverse_error_rotation, inverse_error_position)
+        reference_twist = np.r_[omega_d, rd.T @ target['velocity']]
+        reference_twist_dot = np.r_[
+            alpha_d,
+            -_hat(omega_d) @ (rd.T @ target['velocity'])
+            + rd.T @ target['acceleration']]
+        transported_twist = adjoint_inverse_error @ reference_twist
+        ad = np.zeros((6, 6))
+        ad[:3, :3] = _hat(transported_twist[:3])
+        ad[3:, :3] = _hat(transported_twist[3:])
+        ad[3:, 3:] = _hat(transported_twist[:3])
+        spatial_inertia = np.zeros((6, 6))
+        spatial_inertia[:3, :3] = np.diag(core.config.payload_inertia_kgm2)
+        spatial_inertia[3:, 3:] = core.config.payload_mass_kg * np.eye(3)
+        upsilon = (-ad.T @ spatial_inertia @ transported_twist
+                   + spatial_inertia @ adjoint_inverse_error @ reference_twist_dot)
+
+        psi_error = np.r_[
+            .5 * vee(core.config.se3_W @ error_rotation
+                     - error_rotation.T @ core.config.se3_W),
+            .5 * core.config.se3_d * error_rotation.T @ error_position]
+        tilde_rotation = auxiliary_rotation.T @ rotation
+        tilde_position = auxiliary_rotation.T @ (position - auxiliary_position)
+        psi_tilde = np.r_[
+            .5 * vee(core.config.se3_W @ tilde_rotation
+                     - tilde_rotation.T @ core.config.se3_W),
+            .5 * core.config.se3_d * tilde_rotation.T @ tilde_position]
+        gravity = np.array([0., 0., core.config.gravity_mps2])
+        wrench = (upsilon - core.config.se3_kx * psi_error
+                  - core.config.se3_kxtilde * psi_tilde
+                  + np.r_[np.zeros(3), core.config.payload_mass_kg * rotation.T @ gravity])
+        expected_moment = core.config.se3_moment_limit_nm * np.tanh(
+            wrench[:3] / core.config.se3_moment_limit_nm)
+        expected_force = rotation @ (
+            core.config.se3_force_limit_n * np.tanh(
+                wrench[3:] / core.config.se3_force_limit_n))
+
+        np.testing.assert_allclose(result['payload_se3_upsilon'], upsilon, atol=1.e-12)
+        np.testing.assert_allclose(result['payload_se3_psi_error'], psi_error, atol=1.e-12)
+        np.testing.assert_allclose(result['payload_se3_psi_tilde'], psi_tilde, atol=1.e-12)
+        np.testing.assert_allclose(result['desired_moment'], expected_moment, atol=1.e-12)
+        np.testing.assert_allclose(result['desired_force'], expected_force, atol=1.e-12)
     finally:
         manager.logger.close()
 
