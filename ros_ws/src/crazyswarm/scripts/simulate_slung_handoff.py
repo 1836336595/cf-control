@@ -418,6 +418,15 @@ def payload_reference_trace_fields(manager, target, payload_rotation=None):
     for index, lobe_center in enumerate(lobe_centers, 1):
         result.update({"payload_lobe_center_{}_{}".format(index, axis): float(value)
                        for axis, value in zip("xyz", lobe_center)})
+    feedback = target.get("_payload_control_state", {})
+    result["payload_state_feedback_mode"] = feedback.get("feedback_mode", "pose_observer")
+    beta = feedback.get("beta_body", np.full(6, np.nan))
+    for prefix, vector in (("payload_beta_omega_body", beta[:3]),
+                           ("payload_beta_velocity_body", beta[3:]),
+                           ("payload_feedback_velocity_world", feedback.get("velocity", np.full(3, np.nan))),
+                           ("payload_feedback_body_rate", feedback.get("body_rate", np.full(3, np.nan)))):
+        result.update({prefix + "_" + axis: float(value) for axis, value in zip("xyz", vector)})
+    result["payload_beta_reference_active"] = int(bool(feedback.get("beta_reference_active", False)))
     return result
 
 

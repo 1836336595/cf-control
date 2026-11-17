@@ -1,0 +1,8 @@
+slung_payload:
+  state_feedback_mode: velocity_free_beta
+slung_simulation:
+  post_handoff_s: 100.0
+  pose_delay_s: 0.02
+  command_delay_s: 0.01
+  payload_rotation_noise_std_rad: [0.003, 0.003, 0.003]
+  pose_noise_seed: 20261117

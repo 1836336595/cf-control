@@ -229,6 +229,12 @@ class FlightCsvLogger:
     FIELDS += [prefix+axis for prefix in ("transport_attitude_integral_rate_",
                                         "transport_attitude_integral_applied_rate_") for axis in "xyz"]
 
+    FIELDS += ["payload_state_feedback_mode", "payload_beta_reference_active",
+               "payload_beta_reference_age_s", "payload_acceleration_available"]
+    FIELDS += [prefix + "_" + axis for prefix in (
+        "payload_beta_omega_body", "payload_beta_velocity_body",
+        "payload_beta_reference_omega_body", "payload_beta_reference_velocity_body") for axis in "xyz"]
+
     def __init__(self, directory, prefix):
         directory = os.path.expanduser(directory)
         os.makedirs(directory, exist_ok=True)

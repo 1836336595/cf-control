@@ -15,6 +15,7 @@ from slung_landing import PayloadTouchdownDetector
 from slung_link_calibration import SlungLinkCalibrator
 from slung_link_length_report import SlungLinkLengthReporter
 from slung_load_controller import PayloadStateObserver
+from slung_velocity_free import VelocityFreePayloadObserver
 from slung_load_controller import SecondOrderVelocityFilter as PayloadVelocityFilter
 from slung_load_controller import SlungLoadConfig
 from slung_load_controller import SlungLoadController
@@ -327,6 +328,11 @@ class PayloadParametersMixin:
                 observer_enabled = payload.get("state_observer_enabled", True)
                 if not isinstance(observer_enabled, bool):
                     raise ValueError("state_observer_enabled 必须为布尔值")
+                feedback_mode = payload.get("state_feedback_mode", "pose_observer")
+                if feedback_mode not in ("pose_observer", "velocity_free_beta"):
+                    raise ValueError("state_feedback_mode must be pose_observer or velocity_free_beta")
+                if feedback_mode == "velocity_free_beta" and not observer_enabled:
+                    raise ValueError("velocity_free_beta requires state_observer_enabled=true")
                 if observer_enabled:
                     sampling = {}
                     for name, default in (
@@ -343,7 +349,15 @@ class PayloadParametersMixin:
                     position_margin = payload.get("observer_position_innovation_margin_m", .02)
                     if np.asarray(position_margin).dtype.kind == "b":
                         raise ValueError("observer_position_innovation_margin_m 必须为正的有限数")
-                    self.payload_state_observer = PayloadStateObserver(
+                    observer_class = (VelocityFreePayloadObserver if feedback_mode == "velocity_free_beta"
+                                      else PayloadStateObserver)
+                    beta_options = (dict(
+                        kappa_position=payload.get("velocity_free_kappa_position_per_s", 12.),
+                        kappa_attitude=payload.get("velocity_free_kappa_attitude_per_s", 20.),
+                        attitude_weights=payload.get("velocity_free_attitude_weights", [1., 1.1, 1.2]),
+                    ) if feedback_mode == "velocity_free_beta" else {})
+                    self.payload_state_observer = observer_class(
+                        **beta_options,
                         position_gain=float(payload.get("observer_position_gain", 0.35)),
                         velocity_gain=float(payload.get("observer_velocity_gain", 0.08)),
                         acceleration_gain=float(payload.get("observer_acceleration_gain", 0.02)),
@@ -367,8 +381,9 @@ class PayloadParametersMixin:
                             sampling["observer_attitude_innovation_margin_deg"]),
                     )
                     rospy.loginfo(
-                        "负载状态观测器已启用：仅使用 NOKOV 位姿/姿态估计速度、加速度和角速度；"
+                        "负载状态反馈 %s：仅使用 NOKOV 位姿；"
                         "至少等待 %d 个样本。",
+                        feedback_mode,
                         self.payload_state_observer.min_samples,
                     )
                 self.payload_activation_hold_s = float(

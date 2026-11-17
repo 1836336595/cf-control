@@ -1,0 +1,5 @@
+# 与 beta 对照使用相同实飞参数、物理模型、采样率与延迟，仅切换负载观测。
+slung_payload:
+  state_feedback_mode: pose_observer
+slung_simulation:
+  post_handoff_s: 100.0

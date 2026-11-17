@@ -686,6 +686,9 @@ def _slung_manager(module, directory, parameter_overrides=None, use_live_payload
     # Unit cases declare the legacy stationary mission; simulation explicitly
     # opts into the live configured trajectory before applying its candidate.
     if not use_live_payload_trajectory:
+        # Legacy mission fixtures test the original derivative observer unless
+        # a test explicitly requests the new beta branch in its overrides.
+        roots["slung_payload"]["state_feedback_mode"] = "pose_observer"
         roots["slung_payload"]["trajectory"] = {"mode": "hover"}
         # Legacy unit cases keep the original post-reference adaptation gate;
         # live replay and explicit feature cases opt into the new early gate.

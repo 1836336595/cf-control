@@ -52,6 +52,18 @@ class VehicleLoggingMixin:
         row["payload_control_reused"] = int(bool(
             getattr(self, "payload_control_reused", False)))
         row["payload_control_sample_time_s"] = number(payload, "sample_time")
+        feedback = payload or {}
+        row["payload_state_feedback_mode"] = feedback.get("feedback_mode", "pose_observer")
+        row["payload_beta_reference_active"] = int(bool(feedback.get("beta_reference_active", False)))
+        row["payload_beta_reference_age_s"] = number(feedback, "beta_reference_age_s")
+        row["payload_acceleration_available"] = int(bool(feedback.get("acceleration_available", True)))
+        beta = feedback.get("beta_body", [math.nan] * 6)
+        beta_ref = feedback.get("beta_reference_body", [math.nan] * 6)
+        for name, vector in (("payload_beta_omega_body", beta[:3]),
+                             ("payload_beta_velocity_body", beta[3:]),
+                             ("payload_beta_reference_omega_body", beta_ref[:3]),
+                             ("payload_beta_reference_velocity_body", beta_ref[3:])):
+            self._with_xyz(row, name, vector)
         row["payload_source_stamp_s"] = number(source, "source_stamp")
         row["payload_source_received_age_s"] = float(now) - number(source, "received_time")
         for prefix, sample in (("payload_observer_", payload),

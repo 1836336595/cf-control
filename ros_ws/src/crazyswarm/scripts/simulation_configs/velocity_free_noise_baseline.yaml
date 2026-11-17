@@ -1,0 +1,9 @@
+# 与 velocity_free_noise_delay.yaml 相同物理与噪声，只使用旧观测器。
+slung_payload:
+  state_feedback_mode: pose_observer
+slung_simulation:
+  post_handoff_s: 100.0
+  pose_delay_s: 0.02
+  command_delay_s: 0.01
+  payload_rotation_noise_std_rad: [0.003, 0.003, 0.003]
+  pose_noise_seed: 20261117

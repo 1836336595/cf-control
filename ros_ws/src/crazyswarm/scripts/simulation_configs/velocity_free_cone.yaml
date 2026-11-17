@@ -1,0 +1,11 @@
+# 完整动态参考验证：只覆盖离线运行，实飞默认仍为 hover。
+slung_payload:
+  state_feedback_mode: velocity_free_beta
+  flight_validation_transport_s: 100.0
+  trajectory:
+    mode: attitude_cone
+    cone_half_angle_deg: 10.0
+    cone_period_s: 30.0
+    revolutions: 2.0
+slung_simulation:
+  post_handoff_s: 100.0

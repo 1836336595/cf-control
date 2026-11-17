@@ -1,5 +1,9 @@
 # 负载观测的采样保护、控制准入与诊断
 
+2026-11-17 新增 `state_feedback_mode: velocity_free_beta`。
+下文的 alpha-beta-gamma / SO(3) 更新公式对应 `pose_observer`；新模式的 β、加速度零占位、
+共用质量准入和与 MATLAB 的差异见 [Velocity-free 设计](slung_velocity_free.md)。
+
 本说明对应 `PayloadStateObserver`、`ctbr_payload_state.py` 和机群控制入口。
 观测器只消费 NOKOV 的位置、姿态和源时间戳；消息原始速度、加速度保留作诊断。
 正常接受的位姿继续采用原始几何中心位置和原始旋转矩阵，避免另加一层位姿滤波滞后；

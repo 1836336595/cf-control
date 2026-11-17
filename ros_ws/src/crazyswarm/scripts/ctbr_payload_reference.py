@@ -612,6 +612,12 @@ class PayloadReferenceMixin:
             "transport_blend_dot": transport_blend_dot,
         }
         payload_control_dt = getattr(self, "payload_control_dt", now - self.last_tick)
+        observer = getattr(self, "payload_state_observer", None)
+        if hasattr(observer, "set_reference"):
+            # Callback consumes this causal reference at the next pose sample.
+            # Keep the auxiliary state across TAKEUP -> ramp -> lift -> landing.
+            with self.payload_state_observer_lock:
+                observer.set_reference(target, payload_state["sample_time"])
         result = self.slung_controller.compute(
             payload_state, vehicle_states, target,
             payload_control_dt,

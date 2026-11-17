@@ -230,6 +230,7 @@ install(PROGRAMS
   scripts/ctbr_payload_mission.py
   scripts/native_position_pid.py
   scripts/slung_load_controller.py
+  scripts/slung_velocity_free.py
   scripts/slung_attitude_integral.py
   scripts/slung_circle_reference.py
   scripts/slung_attitude_cone_reference.py

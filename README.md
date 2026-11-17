@@ -85,7 +85,7 @@ source devel/setup.bash
 | 仿真机载模型 | 固定 Mellinger，500 Hz |
 | 当前负载轨迹 | `hover`；切换到圆锥时已配置 15°、两圈、每圈 30 s |
 | 动态构型补偿 | 动态与抬升期间更新均启用，反馈健康与限幅门控继续生效 |
-| 实飞计划降落 | 进入 `TAUT_RAMP` 后 100 s |
+| 实飞计划降落 | 进入 `TAUT_RAMP` 后 60 s |
 | 离线观察窗口 | `slung_simulation.post_handoff_s: 100.0` |
 
 这些数值是当前实验配置，不是其他飞机或负载可直接使用的通用标定。
@@ -106,7 +106,7 @@ source devel/setup.bash
 - `attachment_points_m` 使用负载几何中心坐标系。当前飞机端几何使用动捕刚体原点，未自动加入飞机挂点偏移。
 - 飞机位置、姿态来自 NOKOV；平移控制速度、加速度来自机载 EKF 日志的主机过滤与差分。
 - 运输使用的飞机角速度来自动捕姿态差分与过滤，不能当作机载陀螺仪遥测。
-- 负载导数由位姿观测器估计；动捕消息中的原始导数另作诊断。
+- 负载反馈可选原位姿观测器或新增的 SE(3) velocity-free β 辅助系统；动捕消息中的原始导数另作诊断。
 
 换绳后可启用 `link_length_report_enabled`：实际负载调平并保持稳定后，终端输出
 `[调平后绳长统计]`，包含 CF3/CF4/CF5 的距离中位数、波动区间和配置值。
@@ -121,6 +121,13 @@ source devel/setup.bash
 预抬期间的短采样等待可在最多 50 ms 内复用最近可信状态，保持上升和已有支撑连续；
 新积分更新冻结，接管仍需新接受样本。该修复不延长 60 s 预抬超时。
 配置、状态和推导见 [负载观测与诊断](docs/slung_payload_observer.md)。
+
+`slung_payload.yaml` 的 `state_feedback_mode` 可在 `pose_observer` 和 `velocity_free_beta` 间选择。
+当前选择 `velocity_free_beta`，实飞轨迹仍为 hover。
+后者只用负载位姿和轨迹参考产生 β，再替代负载的速度、角速度反馈；飞机自己的 EKF 和 CTBR 接口保持原设计。
+这次保留了现有负载反馈控制及构型补偿，与 MATLAB 完整 SE(3) 合力控制有区别。
+公式、每项参数和差异见 [Velocity-free 设计](docs/slung_velocity_free.md)，
+仿真结果见 [验证记录](docs/slung_velocity_free_verification.md)。
 
 ## 负载轨迹
 
@@ -272,7 +279,9 @@ python simulate_slung_handoff.py --pose-delay 0.02 --command-delay 0.01 \
 
 修改输入文件后需重新运行才能生成新结果。输出目录中的 `input_parameters.yaml` 是快照，修改它不会改变下一次默认运行。
 
-`post_handoff_s` 只控制离线观察窗口；实飞计划降落由 `flight_validation_transport_s` 控制。当前两个窗口均为 100 s，分别保存在仿真和实飞文件中。
+`post_handoff_s` 只控制离线观察窗口；实飞计划降落由 `flight_validation_transport_s` 控制。
+当前离线观察参数为 100 s，实飞接管时长为 60 s，分别保存在仿真和实飞文件中。
+启用实飞验证流程的回放仍在接管 60 s 后开始降落，不会因为离线参数为 100 s 而额外悬停。
 
 悬停实飞可直接修改 `slung_payload.yaml` 中的 `flight_validation_transport_s`。
 该时钟从 TAUT_RAMP 接管开始：当前前 5 s 建立张力、接着 12 s 抬升，

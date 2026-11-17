@@ -1090,11 +1090,16 @@ class SlungLoadController:
         e_omega = omega0 - r0.T @ rd @ omegad
         inertia = np.diag(self.config.payload_inertia_kgm2)
         feedforward = r0.T @ rd @ omegad
+        # The velocity-free note and MATLAB branch omit measured gyroscopic
+        # cancellation: do not feed a delayed beta into omega x J*omega.
+        beta_feedback = payload_state.get("feedback_mode") == "velocity_free_beta"
+        gyroscopic_moment = (np.zeros(3) if beta_feedback else
+                             np.cross(omega0, inertia @ omega0))
         # Desired rates live in Rd's body frame.  Their derivative after
         # transport into the measured body includes -omega x feedforward;
         # cancel measured gyroscopic coupling before commanding that rate.
         desired_moment = (
-            np.cross(omega0, inertia @ omega0)
+            gyroscopic_moment
             - inertia @ np.cross(omega0, feedforward)
             + inertia @ r0.T @ rd @ omegadd
         )
@@ -1135,7 +1140,7 @@ class SlungLoadController:
             internal_bias, link_units)
         desired_moment += attitude_integral["payload_attitude_integral_body_moment"]
         omega0_dot_cmd = np.linalg.solve(
-            inertia, desired_moment - np.cross(omega0, inertia @ omega0)
+            inertia, desired_moment - gyroscopic_moment
         )
         rhs = np.concatenate([r0.T @ desired_force, desired_moment])
         mu_body = matrix.T @ np.linalg.solve(gram, rhs)

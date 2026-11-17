@@ -33,8 +33,8 @@ slung_payload:
   # 圆锥模式：h20–25 倾斜，h25–55 第一圈，h55–85 第二圈，h85–90 回水平，h100 降落。
   # 实飞吊运时长统一由下方 flight_validation_transport_s 控制；普通飞机悬停时钟会自动留足时间。
   # 增加圈数时需延长本项以覆盖完整轨迹；仿真的 time_limit_s 总时限仍需覆盖起飞、任务和下降。
-  # 【悬停时长入口】从进入 TAUT_RAMP 开始计时，当前总窗口为 100 s。
-  # hover 模式下前 5 s 建立张力、随后 12 s 抬升，因此当前目标高度参考悬停约为 100-17=83 s。
+  # 【悬停时长入口】从进入 TAUT_RAMP 开始计时，当前总窗口为 60 s。
+  # hover 模式下前 5 s 建立张力、随后 12 s 抬升，因此当前目标高度参考悬停约为 60-17=43 s。
   # 若希望抬升参考结束后悬停 120 s，本项设为 137.0；不会等待“实测已调平”才启动计时。
   # 到时从当前实测位置受控降落；不是从起飞时或到达实测 0.60 m 的时刻开始。
   # 先协同放下负载，确认负载落地稳定后，再保持三机 XY 分别下降并停推。
@@ -86,6 +86,14 @@ slung_payload:
   velocity_jump_limit_mps: [0.8, 0.8, 0.8]  # 旧版速度样本最大跳变，m/s。
   # 负载状态观测器只读取 NOKOV 位姿和姿态；twist/acceleration 只写入 CSV 诊断。
   state_observer_enabled: true
+  # pose_observer：原 alpha-beta-gamma/SO(3) 观测；velocity_free_beta：SE(3) 辅助位姿。
+  # beta=[负载体坐标角速度, 负载体坐标线速度]，仅用位姿和参考，不用动捕 twist。
+  # 参数说明/与原笔记差异见 docs/slung_velocity_free.md。
+  state_feedback_mode: velocity_free_beta
+  velocity_free_kappa_position_per_s: 12.0
+  velocity_free_kappa_attitude_per_s: 20.0
+  velocity_free_attitude_weights: [1.0, 1.1, 1.2]
+  # 以下五个残差增益仅 pose_observer 使用；velocity_free_beta 使用上面两个 kappa。
   observer_position_gain: 0.35       # 位置残差修正比例，alpha。
   observer_velocity_gain: 0.20       # 与稳定 Udaan 仿真一致，速度残差修正比例，beta。
   observer_acceleration_gain: 0.02   # 加速度残差修正比例，gamma。
