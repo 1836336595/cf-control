@@ -321,6 +321,7 @@ def build_physics_config(base, manager, simulation):
                        for v, n in zip(base.vehicles, manager.vehicles)),
         cable_lengths=tuple(float(value) for value in physical_lengths), payload_mass=cfg.payload_mass_kg,
         payload_size=tuple(cfg.payload_size_m),
+        payload_inertia_kgm2=tuple(float(value) for value in cfg.payload_inertia_kgm2),
         attachment_points=tuple(map(tuple, cfg.attachment_points_m.T)),
     )
 
@@ -687,6 +688,7 @@ def run_simulation(directory, parameter_overrides=None, pose_delay_s=None,
     snapshot["simulation_runtime"]["effective_plant"]["vehicle_masses_kg"] = config.vehicle_masses.tolist()
     snapshot["simulation_runtime"]["effective_plant"]["thrust_reference_n"] = [v.max_total_thrust for v in config.vehicles]
     snapshot["simulation_runtime"]["effective_plant"]["physical_link_lengths_m"] = list(config.cable_lengths)
+    snapshot["simulation_runtime"]["effective_plant"]["payload_inertia_kgm2"] = list(config.payload_inertia_kgm2)
     for index, vehicle in enumerate(manager.vehicles):
         vehicle.thrust_raw_scale = config.bridge_thrust_raw_scale[index]
     model = CrazySwarmSlungModel(

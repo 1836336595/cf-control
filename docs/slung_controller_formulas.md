@@ -123,7 +123,16 @@ $$M_d=-K_Re_R-K_\Omega e_\Omega
 +\Omega_0\times J_0\Omega_0
 -J_0(\Omega_0\times Q\Omega_{0d})+J_0Q\dot\Omega_{0d}.$$
 
-均匀箱体 $J_{0,xx}=m_0(b^2+h^2)/12$，其余轴循环置换。
+$$J_0=\operatorname{diag}(J_{xx},J_{yy},J_{zz}).$$
+
+- $J_{xx}$：负载质心处绕负载 X 轴的惯量，当前取 $1.1691666666666667\times10^{-5}$ kg·m²。
+- $J_{yy}$：负载质心处绕负载 Y 轴的惯量，当前取 $1.7058333333333336\times10^{-5}$ kg·m²。
+- $J_{zz}$：负载质心处绕负载 Z 轴的惯量，当前取 $1.9166666666666667\times10^{-5}$ kg·m²。
+
+三项从 `slung_payload.inertia_diag_kgm2` 显式读取；当前假设惯量积为零。
+主机增益、刚体力矩补偿及 `simulate_slung_handoff.py` 的 MuJoCo 负载均使用同一组值。
+修改 `mass_kg` 或 `size_m` 不会再自动改变惯量；更换负载后需分别核对质量、几何和惯量。
+
 按轴设置 $K_{R,j}=J_{0,jj}(2\pi f_j)^2$、
 $K_{\Omega,j}=2\zeta J_{0,jj}(2\pi f_j)$；当前 $f=[1.5,1.5,0.7]$ Hz、$\zeta=0.90$。
 关闭 yaw 通道时清零请求力矩 Z；当前运动任务要求该通道开启。
@@ -771,19 +780,77 @@ $$e_{R,i}=\frac12\left(R_{ic}^{T}R_i-R_i^{T}R_{ic}\right)^{\vee}.$$
 - $(\cdot)^{\vee}$：反对称矩阵到三维向量的逆映射，定义见第 2 节。
 - $1/2$：SO(3) 几何姿态误差的固定系数。
 
-$$\Omega_{i,\mathrm{tr}}=-K_{R,i}^{\mathrm{tr}}e_{R,i}-K_{\Omega,i}^{\mathrm{tr}}\Omega_i.$$
+$$\Omega_{ic,k}=\frac{\operatorname{Log}(R_{ic,k-1}^{T}R_{ic,k})^{\vee}}{t_k-t_{k-1}}.$$
+
+- $\Omega_{ic,k}$：通过 `log_difference` 得到的期望角速度前馈，单位 rad/s。
+- $R_{ic,k}$：由本周期最终限幅、滤波合力及飞机航向构造的期望旋转矩阵。
+- $R_{ic,k-1}$：上一有效运输控制周期的期望旋转矩阵；不是负载实测姿态矩阵。
+- $t_k-t_{k-1}$：相邻实际控制周期的时间差，单位 s；使用节点单调控制时间，不使用缓存负载时间或裁剪后的积分步长。
+- $\operatorname{Log}(\cdot)^{\vee}$：SO(3) 主值旋转向量；这里计算相邻姿态的有限步长角速度。
+
+$$\Omega_{i,\mathrm{tr}}=R_i^{T}R_{ic}\Omega_{ic}-K_{R,i}^{\mathrm{tr}}e_{R,i}.$$
 
 - $\Omega_{i,\mathrm{tr}}$：运输分支要求的三轴机体系角速度，单位 rad/s；是角速度命令，不是力矩。
 - $K_{R,3}^{\mathrm{tr}}$：CF3 主机姿态增益，取 $\operatorname{diag}(12,12,6)$ s⁻¹，对应 `transport_attitude_gain`。
 - $K_{R,4}^{\mathrm{tr}}$：CF4 主机姿态增益，取 $\operatorname{diag}(12,12,6)$ s⁻¹。
 - $K_{R,5}^{\mathrm{tr}}$：CF5 主机姿态增益，取 $\operatorname{diag}(8,8,6)$ s⁻¹。
-- $K_{\Omega,i}^{\mathrm{tr}}$：三机角速度阻尼系数均取 $\operatorname{diag}(0.25,0.25,0.125)$，无量纲，对应 `transport_rate_gain`。
+- $R_i^{T}R_{ic}\Omega_{ic}$：将期望机体系角速度转换到当前实际机体系，单位 rad/s；前馈系数为 1。
 - $e_{R,i}$：上一公式的几何姿态误差；不直接使用欧拉角相减代替。
-- $\Omega_i$：本机实际机体系角速度，单位 rad/s；来自 NOKOV 姿态差分滤波后的 `twist.angular`，不是机载陀螺仪遥测。
 
-当前运输分支的期望角速度前馈固定为零，也不增加飞机姿态积分。
-`use_body_rate_feedforward: true` 不会改变运输分支这一设置。
-因此该层是几何姿态 P 加实际角速度阻尼；第 8 节的位置层仍然包含 I。
+2026-11-17 先接入 `transport_attitude_mode: feedforward_p`、
+`omega_c_method: log_difference`、`use_body_rate_feedforward: true`。
+此模式只有前馈和姿态 P，不叠加飞机姿态 I 或 `transport_rate_gain` 的实测角速度阻尼。
+第 8 节的位置 PID 和机载 Mellinger 仍然存在。
+
+随后增加 `feedforward_pi`，当前实飞配置选择此模式。它在上述前馈＋P 后加入运输专用有界积分：
+
+$$\dot b_{R,i}^{\mathrm{req}}=\operatorname{clip}_{\pm r_{R,I}}(-K_{R,I}e_{R,i}).$$
+
+- $b_{R,i}$：飞机机体系上的积分角速度补偿，单位 rad/s；初值为零，不复用普通姿态积分状态。
+- $K_{R,I}$：三机均为 $\operatorname{diag}(0.4,0.4,0.2)$ s⁻²，对应 `transport_attitude_integral_gain`。
+- $e_{R,i}$：飞机自身几何姿态误差；不是负载姿态误差或实际角速度误差。
+- $r_{R,I}$：逐轴取 $[0.02,0.02,0.01]$ rad/s²，对应 `transport_attitude_integral_rate_limit_rps2`。
+
+$$b_{R,i}^{k+1}=\operatorname{clip}_{\pm L_{R,I}}(b_{R,i}^{k}+\Delta t\dot b_{R,i}^{\mathrm{req}}).$$
+
+- $b_{R,i}^{k+1}$：本周期输出的有界积分角速度补偿，单位 rad/s。
+- $L_{R,I}$：三机均为 $[0.15,0.15,0.10]$ rad/s，对应 `transport_attitude_integral_limit_rps`；为逐轴上限。
+- $\Delta t$：积分步长不大于 0.05 s，也不大于本周期实际控制时间增量；重复、倒序或超过 0.10 s 的间断不学习。
+- $\dot b_{R,i}^{\mathrm{req}}$：上一公式的更新请求；冻结期间不推进积分状态。
+
+$$\Omega_i^{\mathrm{raw}}=(1-\beta)\Omega_{i,\mathrm{ind}}+\beta(\Omega_{i,\mathrm{tr}}+b_{R,i}).$$
+
+- $\Omega_i^{\mathrm{raw}}$：最终逐轴限幅之前的角速度命令，单位 rad/s。
+- $\beta$：原接管混合系数；新积分在接管和抬升参考建立完成前冻结。
+- $\Omega_{i,\mathrm{tr}}$：上文 `log_difference` 前馈＋姿态 P 的输出。
+- $b_{R,i}$：独立保存的运输姿态积分补偿；不改变期望合力和位置 PID 状态。
+
+学习要求公共负载/飞机反馈健康、未处于缓存或下降、参考建立完成、上一周期主机未限幅，
+且飞机实际与期望姿态的 SO(3) 夹角小于 `transport_attitude_integral_gate_deg: 15.0`。
+本周期力、推力或保持反馈限幅也冻结更新；候选 I 增量若继续加深角速度某轴饱和则拒绝该轴增量。
+本地逐轴检查允许反向消退，但公共门控因上一周期饱和而冻结时仍优先保持。
+暂停和协同下降保持已有补偿；退出运输、紧急复位或新任务清零。
+位置积分、此处飞机姿态积分、负载姿态 trim 是三个独立机制。
+
+CSV 的 `transport_attitude_integral_rate_*` 为保存的 I 补偿，
+`transport_attitude_integral_applied_rate_*` 为乘接管系数后的实际附加量；
+`transport_attitude_integral_learning` / `freeze_reason` 记录学习准入，
+`limit_active` / `antiwindup` 记录补偿上限和逐轴防饱和。
+把三机模式改回 `feedforward_p` 就关闭并清除此运输姿态 I。
+
+第一运输帧、完整复位、独立模式切回运输、力/航向退化、显式滤波重置或超过 0.10 s 的控制间断，
+前馈取零并重新建立历史。同控制时间戳重复计算不增加差分样本。
+普通短缓存期间仍根据实际发送时刻及最终期望姿态差分：如果最终姿态不变，前馈为零；
+如果飞机反馈或既有 trim 段使最终期望姿态变化，就对该变化计算前馈。
+
+保留 `transport_attitude_mode: rate_damping` 可回到旧的姿态 P 加角速度阻尼：
+
+$$\Omega_{i,\mathrm{tr}}^{\mathrm{old}}=-K_{R,i}^{\mathrm{tr}}e_{R,i}-K_{\Omega,i}^{\mathrm{tr}}\Omega_i.$$
+
+- $\Omega_{i,\mathrm{tr}}^{\mathrm{old}}$：仅旧模式使用的角速度命令，单位 rad/s，期望角速度前馈为零。
+- $K_{R,i}^{\mathrm{tr}}$：与上文相同的运输姿态 P 增益。
+- $K_{\Omega,i}^{\mathrm{tr}}$：原三机值为 $\operatorname{diag}(0.25,0.25,0.125)$，无量纲；对应 `transport_rate_gain`，当前新模式不使用。
+- $\Omega_i$：实际机体系角速度，单位 rad/s；来自动捕姿态差分滤波。
 
 ### 10.6 接管角速度混合与逐轴限幅
 
@@ -808,8 +875,8 @@ $$\Omega_i^{\mathrm{cmd}}=\mathcal C_{\Omega_{\max}}(\Omega_{i,\mathrm{raw}}).$$
 - $\Omega_{i,\mathrm{raw}}$：上一混合公式的输出，单位 rad/s；接管完成后等于运输分支输出。
 
 当前 `transport_body_rate_filter_tau_s: 0.0`，即不额外滤波角速度命令。
-没有接管力快照的兼容路径保留旧独立姿态关系；普通非运输几何模式的解析角速度前馈和姿态积分
-也仍保留，但不是本节当前实际接管路径。
+新模式的接管独立侧始终使用上述姿态 P，前馈按 $\beta$ 平滑混入，避免重复叠加前馈。
+普通非运输几何模式的解析/差分前馈与姿态积分保留，但不是运输分支的输出公式。
 
 ### 10.7 总推力投影与最终输出
 

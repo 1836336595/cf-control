@@ -232,6 +232,7 @@ class PayloadReferenceMixin:
                 "acceleration": control_state.get("control_acceleration", np.zeros(3)),
                 "body_rate": state.get("body_rate", np.zeros(3)),
                 "mass": vehicle.controller.config.mass,
+                "sample_time": state.get("mocap_sample_time_s", math.nan),
             })
             targets.append(target)
 
@@ -782,8 +783,15 @@ class PayloadReferenceMixin:
             raise
         self._apply_transport_hold_integral(now, payload_state, vehicle_states,
                                             control_states, overrides, landing)
+        attitude_i_reason = self._transport_learning_reason(
+            now, payload_state, control_states, overrides, landing, True, True,
+            allow_dynamic_reference=True)
+        for target in overrides.values():
+            target["transport_attitude_integral_learning"] = not bool(attitude_i_reason)
+            target["transport_attitude_integral_freeze_reason"] = attitude_i_reason
         if not all(self._finite_transport_override(target) for target in overrides.values()):
             raise ValueError("cooperative controller returned nonfinite command references")
+        self._report_payload_link_lengths(now, payload_state, vehicle_states, overrides, landing)
         for target in overrides.values():
             target["_payload_control_state"] = deepcopy(payload_state)
             target["_payload_control_time"] = float(now)

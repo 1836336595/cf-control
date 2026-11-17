@@ -5,6 +5,7 @@ from ctbr_control_math import quaternion_to_rotation
 from geometry_msgs.msg import PoseStamped
 from slung_load_controller import mocap_top_surface_to_center
 from slung_load_controller import payload_ground_clearance
+from slung_load_controller import cable_distances
 import math
 import numpy as np
 import rospy
@@ -14,6 +15,63 @@ import time
 
 class PayloadStateMixin:
     """Payload observation, paths, feedback validity and ground baseline."""
+
+    def _report_payload_link_lengths(self, now, payload, vehicles, overrides, landing):
+        """Diagnostic only: use the same geometry snapshot as the load core."""
+        positions = np.asarray([state["position"] for state in vehicles])
+        distances = cable_distances(payload["position"], payload["rotation"],
+            self.slung_controller.config.attachment_points_m, positions)
+        self.payload_link_measured_distances = distances.copy()
+        for i, vehicle in enumerate(self.vehicles):
+            overrides[id(vehicle)]["link_length_measured_m"] = float(distances[i])
+            overrides[id(vehicle)]["link_length_measurement_sample_time_s"] = float(
+                payload.get("sample_time", math.nan))
+        reporter = self.payload_link_length_reporter
+        if reporter is None:
+            return
+        first = next(iter(overrides.values()))
+        stamp = float(payload.get("sample_time", math.nan))
+        stamps = np.asarray([state.get("sample_time", math.nan) for state in vehicles])
+        target_rotation = first["payload_target_rotation"]
+        history = (payload.get("reset_count", 0), payload.get("rejected_count", 0))
+        if history != self.payload_link_length_report_history:
+            reporter.reset_window()
+            self.payload_link_length_report_history = history
+        eligible = bool(not landing and not self.payload_controlled_exit_reason
+            and now-self.payload_transport_start_time >= max(
+                self.payload_tension_ramp_s+self.payload_reference_lift_s,
+                self.payload_attitude_reference_s if self.payload_attitude_reference_enabled else 0.)
+            and all(item.get("transport_blend", 0.) >= 1. for item in overrides.values())
+            and self._payload_state_ready(payload, now)
+            and np.all(np.isfinite(stamps)) and math.isfinite(stamp)
+            and np.max(np.abs(stamps-stamp)) <= .03
+            and -.02 <= float(rospy.Time.now().to_sec())-stamp <= .10
+            and payload_ground_clearance(payload["position"], payload["rotation"],
+                self.slung_controller.config.payload_size_m) >= .10
+            and float(target_rotation[2, 2]) >= math.cos(math.radians(reporter.level_tolerance_deg))
+            and np.linalg.norm(first["payload_target_velocity"]) < .01
+            and np.linalg.norm(first["payload_target_body_rate"]) < .01
+            and all(item.get("desired_tension_signed", 0.) > 0. for item in overrides.values()))
+        result = reporter.update(stamp, payload["position"], payload["rotation"], positions, eligible)
+        if result is not None:
+            parts = ["CF%d %.4f m（P10–P90 %.4f–%.4f，配置 %.4f，有效 %.4f）" % (
+                vehicle.vehicle_id, result["median_m"][i], result["p10_m"][i], result["p90_m"][i],
+                self.payload_nominal_link_lengths[i], self.slung_controller.config.link_lengths_m[i])
+                for i, vehicle in enumerate(self.vehicles)]
+            rospy.loginfo("[调平后绳长统计] 窗口 %.2f s，%d 个独立样本，倾角中位数 %.2f°；%s；"
+                          "端点为负载挂点到飞机动捕原点，供核对参数，未自动修改绳长。",
+                          result["window_s"], result["samples"], result["median_tilt_deg"], "；".join(parts))
+        last = reporter.last_report
+        for i, vehicle in enumerate(self.vehicles):
+            overrides[id(vehicle)].update(
+                link_length_report_sequence=0 if last is None else last["sequence"],
+                link_length_report_sample_time_s=math.nan if last is None else last["sample_time"],
+                link_length_report_median_m=math.nan if last is None else last["median_m"][i],
+                link_length_report_p10_m=math.nan if last is None else last["p10_m"][i],
+                link_length_report_p90_m=math.nan if last is None else last["p90_m"][i],
+                link_length_report_samples=0 if last is None else last["samples"],
+                link_length_report_window_s=math.nan if last is None else last["window_s"],
+                link_length_report_status=reporter.status)
 
     def _payload_state_callback(self, message):
         """Cache accepted raw geometry and pose-only observer diagnostics.

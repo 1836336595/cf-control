@@ -44,7 +44,7 @@ h56.416 完成后保持终点，h60 由原验证流程开始协同降落。
 h20 的实际状态已经稳定，或把悬停结果当成圆周实飞验证。
 
 更改速度、圈数、等待时间后，若验证截止时间不足以完成圆周，节点会在启动时拒绝该配置，
-并输出所需最短时间；普通飞机的 `ctbr_trajectory.hover_duration_s` 也必须覆盖该保守时间预算。
+并输出所需最短时间。启用计划降落时，普通飞机的悬停时钟自动留足 `flight_validation_transport_s`；关闭计划降落时仍须单独保证 `ctbr_trajectory.hover_duration_s` 足够。
 关闭 `yaw_channel_enabled` 与朝向圆心目标不兼容，启动时会报错。
 `slung_simulation.post_handoff_s` 是独立文件中的离线观察窗口，`flight_validation_transport_s`
 是实飞验证的计划降落时间；生成目录中的 `input_parameters.yaml` 是输出快照。

@@ -68,7 +68,10 @@ def test_simulation_candidate_never_enters_flight_parameter_server(tmp_path, liv
         assert "simulation" not in payload
         assert "post_handoff_s" not in payload
         assert payload["mass_kg"] == .024
-        assert manager.payload_flight_validation_transport_s == (100. if live else 60.)
+        live_payload = yaml.safe_load((Path(__file__).resolve().parent.parent /
+            "config/slung_payload.yaml").read_text())["slung_payload"]
+        assert manager.payload_flight_validation_transport_s == (
+            live_payload["flight_validation_transport_s"] if live else 60.)
         assert overlay == original
     finally:
         manager.logger.close()

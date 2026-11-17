@@ -13,6 +13,7 @@ from ctbr_geometric_controller import ControllerConfig
 from ctbr_geometric_controller import GeometricCtbrController
 from ctbr_parameters import CtbrParameterResolver
 from ctbr_parameters import PAYLOAD_PARAMETER_ROOT
+from ctbr_parameters import payload_task_hover_duration
 from ctbr_state_feedback import SecondOrderVelocityFilter
 from ctbr_trajectory import CircularFlightTrajectory
 from ctbr_trajectory import CircularTrajectoryConfig
@@ -248,8 +249,10 @@ class CtbrControllerNode(VehicleLoggingMixin, VehicleStateMixin, VehiclePrefligh
             independent_takeoff_height_m = None
             independent_takeoff_duration_s = None
             takeup_duration_s = None
+            hover_duration_s = float(trajectory_param("hover_duration_s", 30.0))
             if transport_mode == "slung_load":
                 payload_param = rospy.get_param(PAYLOAD_PARAMETER_ROOT, {})
+                hover_duration_s = payload_task_hover_duration(hover_duration_s, payload_param)
                 # The trajectory position belongs to the aircraft.  For the
                 # MATLAB cable geometry, the aircraft must be one link length
                 # above the desired payload center before transport starts.
@@ -295,7 +298,7 @@ class CtbrControllerNode(VehicleLoggingMixin, VehicleStateMixin, VehiclePrefligh
                 circle_ramp_duration_s=float(
                     trajectory_param("circle_ramp_duration_s")
                 ),
-                hover_duration_s=float(trajectory_param("hover_duration_s", 30.0)),
+                hover_duration_s=hover_duration_s,
                 independent_takeoff_height_m=independent_takeoff_height_m,
                 independent_takeoff_duration_s=independent_takeoff_duration_s,
                 takeup_duration_s=takeup_duration_s,
@@ -427,6 +430,13 @@ class CtbrControllerNode(VehicleLoggingMixin, VehicleStateMixin, VehiclePrefligh
                 not math.isfinite(omega_c_heading_projection_epsilon) or
                 omega_c_heading_projection_epsilon <= 0.0):
             raise rospy.ROSInitException("Omega_c 数值保护参数必须为正数")
+        transport_attitude_mode = self.params.vehicle_param("transport_attitude_mode", "rate_damping")
+        if transport_attitude_mode not in ("rate_damping", "feedforward_p", "feedforward_pi"):
+            raise rospy.ROSInitException("transport_attitude_mode 必须为 rate_damping / feedforward_p / feedforward_pi")
+        if transport_attitude_mode in ("feedforward_p", "feedforward_pi") and (
+                omega_c_method != "log_difference"
+                or self.params.vehicle_param("use_body_rate_feedforward") is not True):
+            raise rospy.ROSInitException("feedforward_p 需要 log_difference 和 use_body_rate_feedforward=true")
         self.controller = GeometricCtbrController(ControllerConfig(
             mass=mass_kg,
             gravity=float(self.params.global_param("gravity_mps2")),
@@ -481,6 +491,11 @@ class CtbrControllerNode(VehicleLoggingMixin, VehicleStateMixin, VehiclePrefligh
                 self.params.vehicle_param("use_body_rate_feedforward")
             ),
             omega_c_method=omega_c_method,
+            transport_attitude_mode=transport_attitude_mode,
+            transport_attitude_integral_gain=self.params.vehicle_param("transport_attitude_integral_gain", [.4,.4,.2]),
+            transport_attitude_integral_limit_rps=self.params.vehicle_param("transport_attitude_integral_limit_rps", [.15,.15,.10]),
+            transport_attitude_integral_rate_limit_rps2=self.params.vehicle_param("transport_attitude_integral_rate_limit_rps2", [.02,.02,.01]),
+            transport_attitude_integral_gate_deg=self.params.vehicle_param("transport_attitude_integral_gate_deg", 15.),
             omega_c_force_norm_epsilon=omega_c_force_norm_epsilon,
             omega_c_heading_projection_epsilon=omega_c_heading_projection_epsilon,
             transport_body_rate_filter_tau_s=float(self.params.vehicle_param(
@@ -490,6 +505,9 @@ class CtbrControllerNode(VehicleLoggingMixin, VehicleStateMixin, VehiclePrefligh
                 "transport_force_filter_tau_s", 0.0
             )),
         ))
+        rospy.loginfo("CF%d 运输姿态控制：%s；Omega_c=%s", self.vehicle_id,
+                      transport_attitude_mode,
+                      "log_difference" if transport_attitude_mode in ("feedforward_p", "feedforward_pi") else "zero")
 
         # These static gains must not query the ROS master in the 70 Hz loop.
         for name, default in (("transport_attitude_gain", [240., 240., 120.]),
@@ -870,6 +888,7 @@ class CtbrControllerNode(VehicleLoggingMixin, VehicleStateMixin, VehiclePrefligh
             command = self._zero_command(control_state, target)
         else:
             compute_start = time.perf_counter()
+            target["attitude_control_time_s"] = float(now)
             command = self.controller.compute(control_state, target, dt)
             self.controller_compute_wall_s = time.perf_counter() - compute_start
         if target["flight_phase"] == "landed" or target.get("zero_output", False):

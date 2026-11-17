@@ -24,6 +24,7 @@ def _rotation(vector):
 
 def _config():
     return SlungLoadConfig(
+        payload_inertia_kgm2=np.array([1.1691666666666667e-05, 1.7058333333333336e-05, 1.9166666666666667e-05]),
         payload_mass_kg=0.023, gravity_mps2=9.80665,
         payload_size_m=np.array([0.08, 0.06, 0.05]),
         attachment_points_m=attachment_points_ros_z_up([0.08, 0.06, 0.05]),

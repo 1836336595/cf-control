@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from ctbr_control_math import as_vector, clamp_vector
+from ctbr_control_math import as_vector, clamp_vector, so3_log
 from native_position_pid import (position_integral_step, position_pid_feedback,
                                  validate_integral_velocity_weight)
 
@@ -34,6 +34,93 @@ class VehicleForceCommand:
 
 class TransportVehicleController:
     """Pure transport formulas sharing persistent state on their facade."""
+
+    def reset_transport_attitude_integral(self):
+        self.transport_attitude_integral_rate = np.zeros(3)
+        self.transport_attitude_integral_time = None
+        self.transport_attitude_integral_diagnostics = {}
+
+    def _transport_attitude_i(self, base_rate, state, target, error, rotation, desired,
+                              blend, dt, raw_dt, derivatives_ready, command_limited):
+        """Integrate a bounded rate correction, separate from position/normal I."""
+        stamp = target.get("attitude_control_time_s")
+        stamp = None if stamp is None else float(stamp)
+        previous_time = self.transport_attitude_integral_time
+        elapsed = raw_dt if stamp is None or previous_time is None else stamp-previous_time
+        if stamp is not None and math.isfinite(stamp) and (previous_time is None or stamp > previous_time):
+            self.transport_attitude_integral_time = stamp
+        reason = ""
+        if stamp is not None and (not math.isfinite(stamp) or previous_time is None):
+            reason = "initializing"
+        elif not math.isfinite(elapsed) or not 0. < elapsed <= .10:
+            reason = "control_interval"
+        elif blend < 1.-1e-9 or target.get("transport_filter_reset", False):
+            reason = "handoff"
+        elif target.get("transport_full_pid_force_hold", False) or target.get(
+                "transport_hold_integral_freeze_reason") == "payload_cached_hold":
+            reason = "payload_cached_hold"
+        elif target.get("flight_phase") in ("landing", "landing_settle", "emergency_landing", "landed", "aborted"):
+            reason = "landing"
+        elif not target.get("transport_attitude_integral_learning", False):
+            reason = target.get("transport_attitude_integral_freeze_reason") or "external_freeze"
+        elif (not derivatives_ready or not state.get("valid", True)
+              or state.get("ekf_kinematics_held", False) or not state.get("ekf_state_valid", True)):
+            reason = "vehicle_feedback"
+        elif command_limited:
+            reason = "force_limited"
+        elif math.acos(float(np.clip((np.trace(desired.T@rotation)-1.)*.5,-1.,1.))) > math.radians(
+                self.config.transport_attitude_integral_gate_deg):
+            reason = "attitude_gate"
+        old = self.transport_attitude_integral_rate.copy()
+        rate_blocked = np.zeros(3, dtype=bool)
+        if not reason:
+            gain = self.config.transport_attitude_integral_gain
+            rate = np.clip(-gain*error, -self.config.transport_attitude_integral_rate_limit_rps2,
+                           self.config.transport_attitude_integral_rate_limit_rps2)
+            candidate = np.clip(old + rate*min(dt, elapsed),
+                -self.config.transport_attitude_integral_limit_rps, self.config.transport_attitude_integral_limit_rps)
+            delta = candidate-old
+            requested = base_rate + blend*candidate
+            # Stop only increments that deepen axis saturation; allow unwinding.
+            rate_blocked = ((requested >= self.config.max_body_rate) & (delta > 0.)) | (
+                (requested <= -self.config.max_body_rate) & (delta < 0.))
+            self.transport_attitude_integral_rate = np.where(rate_blocked, old, candidate)
+        bias = self.transport_attitude_integral_rate
+        self.transport_attitude_integral_diagnostics = dict(
+            transport_attitude_integral_learning=not bool(reason),
+            transport_attitude_integral_freeze_reason=reason,
+            transport_attitude_integral_rate=bias.copy(),
+            transport_attitude_integral_applied_rate=blend*bias,
+            transport_attitude_integral_limit_active=bool(np.any(
+                (self.config.transport_attitude_integral_limit_rps>0.) &
+                (np.abs(bias)>=self.config.transport_attitude_integral_limit_rps-1e-12))),
+            transport_attitude_integral_antiwindup=bool(np.any(rate_blocked)))
+        return base_rate + blend*bias
+
+    def _transport_log_difference(self, rotation, target, elapsed, valid):
+        """Differentiate consecutive final command frames on the control clock.
+
+        No derivative is inferred across entry, reset, a degenerate force frame,
+        or a gap over 100 ms. A cached *payload* frame never refreshes this clock:
+        the final force frame may still evolve with live aircraft feedback/trim.
+        """
+        stamp = target.get("attitude_control_time_s")
+        stamp = None if stamp is None else float(stamp)
+        previous = self.previous_transport_rotation
+        if stamp is not None and self.previous_transport_rotation_time is not None:
+            elapsed = stamp - self.previous_transport_rotation_time
+            if elapsed == 0.:
+                return np.zeros(3)
+        if not valid or stamp is not None and not math.isfinite(stamp):
+            self.previous_transport_rotation = None
+            self.previous_transport_rotation_time = None
+            return np.zeros(3)
+        self.previous_transport_rotation = rotation.copy()
+        self.previous_transport_rotation_time = stamp
+        if (previous is None or target.get("transport_filter_reset", False)
+                or not math.isfinite(elapsed) or not 0. < elapsed <= .10):
+            return np.zeros(3)
+        return so3_log(previous.T @ rotation) / elapsed
 
     def reset_transport_position_pid(self):
         """Clear the transport-only native I without losing independent trim."""
@@ -384,12 +471,16 @@ class TransportVehicleController:
             target.get("transport_rate_gain", np.zeros(3)),
             dtype=float,
         ).reshape(3)
-        transport_body_rate_command = (
-            -transport_attitude_gain * attitude_error
-            -transport_rate_gain * np.asarray(
-                state.get("body_rate", np.zeros(3)), dtype=float
-            ).reshape(3)
-        )
+        if self.config.transport_attitude_mode in ("feedforward_p", "feedforward_pi"):
+            transport_body_rate_command = (
+                rotation.T @ computed_rotation @ computed_body_rate
+                - transport_attitude_gain * attitude_error)
+        else:
+            transport_body_rate_command = (
+                -transport_attitude_gain * attitude_error
+                -transport_rate_gain * np.asarray(
+                    state.get("body_rate", np.zeros(3)), dtype=float
+                ).reshape(3))
         if transport_blend < 1.0:
             if self.config.use_body_rate_feedforward:
                 computed_body_rate_current_frame = (
@@ -402,7 +493,7 @@ class TransportVehicleController:
                 - self.config.attitude_gain * attitude_error
                 - self.config.attitude_integral_gain * self.attitude_integral
             )
-            if "handoff_force" in target:
+            if "handoff_force" in target or self.config.transport_attitude_mode in ("feedforward_p", "feedforward_pi"):
                 gain = (self.config.independent_attitude_gain
                         if self.config.independent_attitude_gain is not None
                         else self.config.attitude_gain)

@@ -146,7 +146,8 @@ def test_pending_preserves_existing_settle_clock_but_cannot_confirm_handoff(tmp_
 
 def test_new_prelift_diagnostics_are_appended_after_existing_csv_columns():
     from ctbr_csv_logger import FlightCsvLogger
-    assert FlightCsvLogger.FIELDS[-3:] == ["prelift_vertical_integral_learning",
+    start = FlightCsvLogger.FIELDS.index("payload_source_observer_attitude_innovation_z") + 1
+    assert FlightCsvLogger.FIELDS[start:start+3] == ["prelift_vertical_integral_learning",
         "payload_prelift_feedback_reused", "payload_prelift_feedback_age_s"]
 
 

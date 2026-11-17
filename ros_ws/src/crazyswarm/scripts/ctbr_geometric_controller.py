@@ -53,6 +53,30 @@ class ControllerConfig:
     independent_max_body_rate: object = None
     independent_attitude_gain: object = None
     independent_heading: object = None
+    transport_attitude_mode: str = "rate_damping"
+    transport_attitude_integral_gain: object = (.4, .4, .2)
+    transport_attitude_integral_limit_rps: object = (.15, .15, .10)
+    transport_attitude_integral_rate_limit_rps2: object = (.02, .02, .01)
+    transport_attitude_integral_gate_deg: float = 15.
+
+    def __post_init__(self):
+        if self.transport_attitude_mode not in ("rate_damping", "feedforward_p", "feedforward_pi"):
+            raise ValueError("transport_attitude_mode must be rate_damping, feedforward_p or feedforward_pi")
+        if self.transport_attitude_mode in ("feedforward_p", "feedforward_pi") and (
+                self.omega_c_method != "log_difference" or not self.use_body_rate_feedforward):
+            raise ValueError("feedforward_p requires omega_c_method=log_difference and use_body_rate_feedforward=true")
+        for name in ("transport_attitude_integral_gain", "transport_attitude_integral_limit_rps",
+                     "transport_attitude_integral_rate_limit_rps2"):
+            raw = np.asarray(getattr(self, name), dtype=object)
+            if raw.shape != (3,) or any(isinstance(v, (bool, np.bool_)) for v in raw):
+                raise ValueError(name + " must contain three finite nonnegative numbers")
+            values = np.asarray(raw, dtype=float)
+            if not np.all(np.isfinite(values)) or np.any(values < 0.):
+                raise ValueError(name + " must contain three finite nonnegative numbers")
+            setattr(self, name, values.copy())
+        gate = self.transport_attitude_integral_gate_deg
+        if isinstance(gate, bool) or not math.isfinite(float(gate)) or not 0. < float(gate) < 90.:
+            raise ValueError("transport_attitude_integral_gate_deg must be between 0 and 90 degrees")
 
 
 class GeometricCtbrController(IndependentVehicleController, TransportVehicleController):
@@ -75,6 +99,9 @@ class GeometricCtbrController(IndependentVehicleController, TransportVehicleCont
         self.previous_heading = None
         self.previous_transport_body_rate_command = None
         self.previous_transport_force = None
+        self.previous_transport_rotation = None
+        self.previous_transport_rotation_time = None
+        self.reset_transport_attitude_integral()
 
     def compute(self, state, target, dt):
         """计算一个 CTBR 命令。
@@ -83,6 +110,7 @@ class GeometricCtbrController(IndependentVehicleController, TransportVehicleCont
         再用 SO(3) 姿态误差得到机体系角速度。总推力投影到当前机体 z 轴后发送，
         因而姿态尚未完全跟踪时不会错误地把 world 合力模长直接当作电机推力。
         """
+        reference_dt = float(dt)
         dt = float(np.clip(dt, 0.001, 0.05))
         position_error = state["position"] - target["position"]
         source_derivatives_valid = bool(state.get("derivatives_valid", True))
@@ -109,6 +137,8 @@ class GeometricCtbrController(IndependentVehicleController, TransportVehicleCont
 
         independent_mode = bool(target.get("independent_mode", False))
         transport_mode = bool(target.get("transport_mode", False))
+        if independent_mode or not transport_mode or self.config.transport_attitude_mode != "feedforward_pi":
+            self.reset_transport_attitude_integral()
         native_transport_pid = (transport_mode and not independent_mode and
             target.get("transport_feedback_controller", "differential_integral") == "native_position_pid")
         if not native_transport_pid:
@@ -215,6 +245,9 @@ class GeometricCtbrController(IndependentVehicleController, TransportVehicleCont
             desired_yaw = float(target.get("yaw", 0.0))
             b1_reference = np.array([math.cos(desired_yaw), math.sin(desired_yaw), 0.0])
         b1_projection = b1_reference - b3_desired * float(b3_desired @ b1_reference)
+        transport_frame_valid = (
+            force_norm >= self.config.omega_c_force_norm_epsilon
+            and np.linalg.norm(b1_projection) >= self.config.omega_c_heading_projection_epsilon)
         if (np.linalg.norm(b1_projection) <
                 float(self.config.omega_c_heading_projection_epsilon)):
             b1_projection = (
@@ -233,13 +266,18 @@ class GeometricCtbrController(IndependentVehicleController, TransportVehicleCont
         # log_difference 保留用于与旧 MATLAB/Python 日志做离散对比。
         omega_c_method = str(self.config.omega_c_method).strip().lower()
         if independent_mode:
+            self.previous_transport_rotation = None
+            self.previous_transport_rotation_time = None
             computed_body_rate = np.zeros(3)
             omega_c_method = "independent_matlab"
         elif transport_mode:
-            # The MATLAB transport implementation sets Omega_ic=0 and sends
-            # -kR*eR-kOmega*Omega_i to the Crazyflie rate loop.
-            computed_body_rate = np.zeros(3)
-            omega_c_method = "slung_load_matlab"
+            if self.config.transport_attitude_mode in ("feedforward_p", "feedforward_pi"):
+                computed_body_rate = self._transport_log_difference(
+                    computed_rotation, target, reference_dt, transport_frame_valid)
+                omega_c_method = "transport_log_difference"
+            else:
+                computed_body_rate = np.zeros(3)
+                omega_c_method = "slung_load_matlab"
         elif omega_c_method in ("log_difference", "log", "so3_log"):
             if self.previous_computed_rotation is None:
                 computed_body_rate = np.zeros(3)
@@ -263,6 +301,9 @@ class GeometricCtbrController(IndependentVehicleController, TransportVehicleCont
             )
         self.previous_computed_rotation = computed_rotation
         self.previous_heading = computed_rotation[:, 0]
+        if not transport_mode:
+            self.previous_transport_rotation = None
+            self.previous_transport_rotation_time = None
 
         rotation = state["rotation"]
         attitude_error = 0.5 * vee(
@@ -291,6 +332,14 @@ class GeometricCtbrController(IndependentVehicleController, TransportVehicleCont
                 - self.config.attitude_gain * attitude_error
                 - self.config.attitude_integral_gain * self.attitude_integral
             )
+        if transport_mode and not independent_mode and self.config.transport_attitude_mode == "feedforward_pi":
+            projected = float(desired_force @ rotation[:, 2])
+            command_limited = (force_limit_active or force.hold_feedback_limit_active
+                or projected <= max(0., float(target.get("min_collective_thrust", 0.)))
+                or projected >= self.config.max_command_thrust)
+            body_rate_command = self._transport_attitude_i(
+                body_rate_command, state, target, attitude_error, rotation, computed_rotation,
+                force.transport_blend, dt, reference_dt, derivatives_ready, command_limited)
         raw_body_rate_command, body_rate_command, body_rate_limit_active = self._limit_body_rate(
             body_rate_command, target, independent_mode, transport_mode, dt)
 
@@ -306,6 +355,8 @@ class GeometricCtbrController(IndependentVehicleController, TransportVehicleCont
             0.0, self.config.max_command_thrust
         ))
         return {
+            **(self.transport_attitude_integral_diagnostics if transport_mode and not independent_mode
+               and self.config.transport_attitude_mode == "feedforward_pi" else {}),
             "position_error": position_error,
             "velocity_error": velocity_error,
             "desired_force": desired_force,

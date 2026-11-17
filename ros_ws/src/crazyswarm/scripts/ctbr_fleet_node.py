@@ -588,7 +588,8 @@ class MultiCtbrControllerNode(PayloadParametersMixin, PayloadStateMixin, Payload
                 target_override.update({
                     "link_length_nominal_m": self.payload_nominal_link_lengths[vehicle_index],
                     "link_length_effective_m": self.slung_controller.config.link_lengths_m[vehicle_index],
-                    "link_length_measured_m": self.payload_link_measured_distances[vehicle_index],
+                    "link_length_measured_m": target_override.get(
+                        "link_length_measured_m", self.payload_link_measured_distances[vehicle_index]),
                     "link_calibration_enabled": self.payload_link_calibration_enabled,
                     "link_calibration_applied": self.payload_link_calibration_applied,
                     "link_calibration_status": (

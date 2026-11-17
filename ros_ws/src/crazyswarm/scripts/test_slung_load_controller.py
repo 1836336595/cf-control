@@ -91,6 +91,7 @@ def test_vehicle_order_is_explicit_and_does_not_depend_on_yaml_order():
 
 def test_invalid_payload_state_does_not_produce_transport_command():
     config = SlungLoadConfig(
+        payload_inertia_kgm2=np.array([4.066666666666667e-05, 5.933333333333335e-05, 6.666666666666667e-05]),
         payload_mass_kg=0.08,
         gravity_mps2=9.80665,
         payload_size_m=np.array([0.08, 0.06, 0.05]),
@@ -122,6 +123,7 @@ def test_invalid_payload_state_does_not_produce_transport_command():
 
 def test_unilateral_cables_never_receive_compressive_tension_commands():
     config = SlungLoadConfig(
+        payload_inertia_kgm2=np.array([2.7450000000000003e-05, 4.0050000000000004e-05, 4.5e-05]),
         payload_mass_kg=0.054,
         gravity_mps2=9.80665,
         payload_size_m=np.array([0.08, 0.06, 0.05]),
@@ -189,6 +191,7 @@ def test_unilateral_cables_never_receive_compressive_tension_commands():
 
 def test_vehicle_force_dot_uses_previous_force_and_respects_rate_limit():
     config = SlungLoadConfig(
+        payload_inertia_kgm2=np.array([2.7450000000000003e-05, 4.0050000000000004e-05, 4.5e-05]),
         payload_mass_kg=0.054,
         gravity_mps2=9.80665,
         payload_size_m=np.array([0.08, 0.06, 0.05]),
@@ -255,6 +258,7 @@ def test_transport_force_updates_with_ros_node_interpreter():
 
 def test_link_force_correction_is_bounded_in_magnitude_and_rate():
     config = SlungLoadConfig(
+        payload_inertia_kgm2=np.array([2.7450000000000003e-05, 4.0050000000000004e-05, 4.5e-05]),
         payload_mass_kg=0.054, gravity_mps2=9.80665,
         payload_size_m=np.array([0.08, 0.06, 0.05]),
         attachment_points_m=attachment_points_ros_z_up([0.08, 0.06, 0.05]),
@@ -279,6 +283,7 @@ def test_link_force_correction_is_bounded_in_magnitude_and_rate():
 
 def _link_force_compute_case(link_kq=55.0):
     config = SlungLoadConfig(
+        payload_inertia_kgm2=np.array([2.7450000000000003e-05, 4.0050000000000004e-05, 4.5e-05]),
         payload_mass_kg=0.054, gravity_mps2=9.80665,
         payload_size_m=np.array([0.08, 0.06, 0.05]),
         attachment_points_m=attachment_points_ros_z_up([0.08, 0.06, 0.05]),
@@ -536,6 +541,7 @@ def test_real_payload_takeoff_hover_height_is_above_low_slack_stage():
 def test_equilibrium_takeup_targets_follow_matlab_allocation_directions():
     """TAKEUP must use MATLAB's static allocation directions, not one radial offset."""
     config = SlungLoadConfig(
+        payload_inertia_kgm2=np.array([2.6941666666666666e-05, 3.930833333333334e-05, 4.4166666666666665e-05]),
         payload_mass_kg=0.053,
         gravity_mps2=9.80665,
         payload_size_m=np.array([0.08, 0.06, 0.05]),
@@ -573,6 +579,7 @@ def test_equilibrium_takeup_targets_follow_matlab_allocation_directions():
 
 def test_equilibrium_takeup_targets_keep_collision_margin_between_rear_vehicles():
     config = SlungLoadConfig(
+        payload_inertia_kgm2=np.array([2.6941666666666666e-05, 3.930833333333334e-05, 4.4166666666666665e-05]),
         payload_mass_kg=0.053,
         gravity_mps2=9.80665,
         payload_size_m=np.array([0.08, 0.06, 0.05]),

@@ -237,6 +237,8 @@ install(PROGRAMS
   scripts/slung_transport_guard.py
   scripts/slung_landing.py
   scripts/slung_link_calibration.py
+  scripts/slung_link_length_report.py
+  scripts/analyze_slung_link_lengths.py
   scripts/slung_reference.py
   scripts/slung_attitude_trim.py
   scripts/slung_transport_integral.py

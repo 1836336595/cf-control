@@ -36,14 +36,19 @@ ctbr_controller_cf3:
   attitude_integral_limit: [0.8, 0.8, 0.8]
   position_integral_c1: 0.35
   use_body_rate_feedforward: true
-  omega_c_method: analytic
+  omega_c_method: log_difference  # 运输前馈使用相邻期望旋转矩阵的 SO(3) 差分。
   omega_c_force_norm_epsilon: 1.0e-7
   omega_c_heading_projection_epsilon: 1.0e-6
   # Graefe 2026 电机模型：70 Hz + 20 ms 位姿/10 ms 指令延迟验证。
+  transport_attitude_mode: feedforward_pi # 前馈+姿态PI；feedforward_p关闭姿态I，rate_damping为旧阻尼模式。
+  transport_attitude_integral_gain: [0.4, 0.4, 0.2] # 飞机姿态误差积分增益，s^-2；与位置I/负载trim不同。
+  transport_attitude_integral_limit_rps: [0.15, 0.15, 0.10] # I附加角速度逐轴上限，rad/s。
+  transport_attitude_integral_rate_limit_rps2: [0.02, 0.02, 0.01] # I补偿变化率逐轴上限，rad/s²。
+  transport_attitude_integral_gate_deg: 15.0 # 姿态误差小于此角度且反馈健康才学习。
   transport_attitude_gain: [12.0, 12.0, 6.0]
-  transport_rate_gain: [0.25, 0.25, 0.125]
+  transport_rate_gain: [0.25, 0.25, 0.125] # 仅 rate_damping 模式使用，当前不叠加。
   transport_body_rate_filter_tau_s: 0.0
-  transport_force_filter_tau_s: 0.005
+  transport_force_filter_tau_s: 0.00
   preflight_voltage_reference_v: 4.20
   preflight_raw_scale_exponent: 1.0
   preflight_raw_scale_min: 0.90
@@ -81,13 +86,18 @@ ctbr_controller_cf4:
   attitude_integral_limit: [0.6, 0.6, 0.8]
   position_integral_c1: 0.35
   use_body_rate_feedforward: true
-  omega_c_method: analytic
+  omega_c_method: log_difference  # 运输前馈使用相邻期望旋转矩阵的 SO(3) 差分。
   omega_c_force_norm_epsilon: 1.0e-7
   omega_c_heading_projection_epsilon: 1.0e-6
+  transport_attitude_mode: feedforward_pi # 前馈+姿态PI；feedforward_p关闭姿态I，rate_damping为旧阻尼模式。
+  transport_attitude_integral_gain: [0.4, 0.4, 0.2] # 飞机姿态误差积分增益，s^-2；与位置I/负载trim不同。
+  transport_attitude_integral_limit_rps: [0.15, 0.15, 0.10] # I附加角速度逐轴上限，rad/s。
+  transport_attitude_integral_rate_limit_rps2: [0.02, 0.02, 0.01] # I补偿变化率逐轴上限，rad/s²。
+  transport_attitude_integral_gate_deg: 15.0 # 姿态误差小于此角度且反馈健康才学习。
   transport_attitude_gain: [12.0, 12.0, 6.0]
-  transport_rate_gain: [0.25, 0.25, 0.125]
+  transport_rate_gain: [0.25, 0.25, 0.125] # 仅 rate_damping 模式使用，当前不叠加。
   transport_body_rate_filter_tau_s: 0.0
-  transport_force_filter_tau_s: 0.005
+  transport_force_filter_tau_s: 0.00
   preflight_voltage_reference_v: 4.20
   preflight_raw_scale_exponent: 1.0
   preflight_raw_scale_min: 0.90
@@ -125,13 +135,18 @@ ctbr_controller_cf5:
   attitude_integral_limit: [0.8, 0.8, 0.8]
   position_integral_c1: 0.35
   use_body_rate_feedforward: true
-  omega_c_method: analytic
+  omega_c_method: log_difference  # 运输前馈使用相邻期望旋转矩阵的 SO(3) 差分。
   omega_c_force_norm_epsilon: 1.0e-7
   omega_c_heading_projection_epsilon: 1.0e-6
+  transport_attitude_mode: feedforward_pi # 前馈+姿态PI；feedforward_p关闭姿态I，rate_damping为旧阻尼模式。
+  transport_attitude_integral_gain: [0.4, 0.4, 0.2] # 飞机姿态误差积分增益，s^-2；与位置I/负载trim不同。
+  transport_attitude_integral_limit_rps: [0.15, 0.15, 0.10] # I附加角速度逐轴上限，rad/s。
+  transport_attitude_integral_rate_limit_rps2: [0.02, 0.02, 0.01] # I补偿变化率逐轴上限，rad/s²。
+  transport_attitude_integral_gate_deg: 15.0 # 姿态误差小于此角度且反馈健康才学习。
   transport_attitude_gain: [8.0, 8.0, 6.0]
-  transport_rate_gain: [0.25, 0.25, 0.125]
+  transport_rate_gain: [0.25, 0.25, 0.125] # 仅 rate_damping 模式使用，当前不叠加。
   transport_body_rate_filter_tau_s: 0.0
-  transport_force_filter_tau_s: 0.005
+  transport_force_filter_tau_s: 0.00
   preflight_voltage_reference_v: 4.20
   preflight_raw_scale_exponent: 1.0
   preflight_raw_scale_min: 0.90

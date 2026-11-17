@@ -60,10 +60,14 @@ source devel/setup.bash
 |---|---|---|
 | [ctbr_controller.yaml](ros_ws/src/crazyswarm/config/ctbr_controller.yaml) | 主机频率、反馈过滤、预检、全局轨迹与可视化 | 实飞；仿真沿用控制设置 |
 | [ctbr_vehicle.yaml](ros_ws/src/crazyswarm/config/ctbr_vehicle.yaml) | 每机质量、推力映射、独立及运输控制增益 | 实飞；仿真沿用控制设置 |
-| [slung_payload.yaml](ros_ws/src/crazyswarm/config/slung_payload.yaml) | 负载质量、挂点、绳长、负载控制及任务参考 | 实飞；仿真沿用控制设置 |
+| [slung_payload.yaml](ros_ws/src/crazyswarm/config/slung_payload.yaml) | 负载质量、转动惯量、挂点、绳长、负载控制及任务参考 | 实飞；仿真沿用控制设置 |
 | [slung_simulation.yaml](ros_ws/src/crazyswarm/config/slung_simulation.yaml) | 电机物理、惯量、Mellinger 模型、采样、延迟和观察窗口 | 仅离线仿真 |
 
 实飞 launch 不加载 `slung_simulation.yaml`。仿真读取实飞控制配置作为基线，再独立加载物理与传感器设置；仿真不会回写实飞文件。
+
+负载转动惯量在 `slung_payload.inertia_diag_kgm2` 中填写，顺序为 `[Jxx, Jyy, Jzz]`，单位 kg·m²。
+该参数为质心处、负载坐标系轴上的对角惯量；主机姿态增益、力矩补偿和吊运回放的物理负载共用它。
+质量或尺寸变化后需单独核对惯量，程序不再自动按长方体公式计算。省略或填写无效值会在初始化时报错。
 
 飞机条目在 [crazyflies.yaml](ros_ws/src/crazyswarm/launch/crazyflies.yaml) 中设置。每个启用的飞机 ID 都应有对应的 `ctbr_controller_cf<ID>` 参数块；`ctbr_enabled`、`takeoff_vehicle_count`、radio URI 和实际飞机必须匹配。当前吊运任务要求 CF3、CF4、CF5。
 
@@ -73,6 +77,7 @@ source devel/setup.bash
 |---|---|
 | 主机模式 / 飞机运输反馈 | `slung_load` / `native_position_pid` |
 | 吊运力构造 | `reference_cascade` |
+| 运输姿态命令 | `feedforward_pi`：`log_difference` 前馈加姿态 P 和有界 I |
 | 负载总质量 | 0.023 kg |
 | 名义绳长 | 三根均为 0.850 m，可在接管前校准一次运行有效值 |
 | 负载几何中心目标高度 | 0.60 m |
@@ -85,6 +90,15 @@ source devel/setup.bash
 
 这些数值是当前实验配置，不是其他飞机或负载可直接使用的通用标定。
 
+三机 `ctbr_vehicle.yaml` 均启用 `transport_attitude_mode: feedforward_pi`、
+`omega_c_method: log_difference` 和 `use_body_rate_feedforward: true`。
+该模式加入运输专用姿态积分，不叠加 `transport_rate_gain` 阻尼，输出仍为总推力和机体系角速度。
+`transport_attitude_integral_gain` 控制学习增益，`transport_attitude_integral_limit_rps` 限制 I 附加角速度，
+`transport_attitude_integral_rate_limit_rps2` 限制其变化率。积分针对飞机姿态误差，和位置 I、负载姿态 trim 分开。
+启动日志打印当前模式；CSV 的 `transport_attitude_mode` 应为 `feedforward_pi`，
+`omega_c_method` 应为 `transport_log_difference`。独立起飞/预抬仍标记 `independent_matlab`。
+将三机模式改成 `feedforward_p` 可关闭姿态 I，改成 `rate_damping` 可恢复旧姿态 P 加阻尼公式。
+
 ### 坐标与反馈
 
 - 世界坐标采用 ROS 的 Z 轴向上约定；位置为米，角度为弧度，推力为整机牛顿。
@@ -93,6 +107,11 @@ source devel/setup.bash
 - 飞机位置、姿态来自 NOKOV；平移控制速度、加速度来自机载 EKF 日志的主机过滤与差分。
 - 运输使用的飞机角速度来自动捕姿态差分与过滤，不能当作机载陀螺仪遥测。
 - 负载导数由位姿观测器估计；动捕消息中的原始导数另作诊断。
+
+换绳后可启用 `link_length_report_enabled`：实际负载调平并保持稳定后，终端输出
+`[调平后绳长统计]`，包含 CF3/CF4/CF5 的距离中位数、波动区间和配置值。
+它使用负载挂点到飞机动捕原点的实测距离，不自动修改绳长参数。
+在线门槛、CSV 字段及历史数据计算方法见 [有效绳长统计](docs/slung_link_length_measurement.md)。
 
 负载观测器拒绝重复/倒序时间戳、异常位姿和达到物理边界的候选导数。
 小于 5 ms 的间隔先累积时间；正常 100 Hz 保留原观测增益响应。
@@ -137,7 +156,7 @@ slung_payload:
 
 从进入 `TAUT_RAMP` 开始计时，该圆锥配置在第 20–25 秒倾斜到 15°，第 25–55 秒扫描第一圈，第 55–85 秒扫描第二圈，第 85–90 秒恢复水平，第 100 秒开始计划降落。每圈采用相同的平滑起停；圈与圈之间保持 15° 倾斜，角速度和角加速度归零后开始下一圈。参考固定不代表实际质心没有误差。`settle_s` 规定参考等待时间，不表示实际负载姿态已经收敛。
 
-增加圈数时需要同步核对实飞 `flight_validation_transport_s`、普通飞机 `ctbr_trajectory.hover_duration_s` 和离线 `slung_simulation.post_handoff_s`。例如三圈参考在接管后第 120 秒完成，应将两个任务窗口至少设为 120 秒，并按实验需要增加水平保持时间，离线观察窗口同步延长。程序保留原窗口校验，不会自动延长这些参数。
+启用 `flight_validation_enabled` 时，实飞吊运任务时长统一修改 `slung_payload.flight_validation_transport_s`，程序自动为普通飞机悬停时钟留足该时长。三圈圆锥参考在接管后第 120 秒完成，须将负载任务窗口至少设为 120 秒，并留出所需的水平保持时间；完整轨迹的窗口校验仍然有效。离线仿真的总时间上限还需覆盖接管前过程及下降。
 
 圆周模式中的 `center_xy` 表示单圆圆心。省略该项时自动确定圆心；不要填写 `null`，ROS1 参数服务器不支持空值。
 
@@ -254,6 +273,11 @@ python simulate_slung_handoff.py --pose-delay 0.02 --command-delay 0.01 \
 修改输入文件后需重新运行才能生成新结果。输出目录中的 `input_parameters.yaml` 是快照，修改它不会改变下一次默认运行。
 
 `post_handoff_s` 只控制离线观察窗口；实飞计划降落由 `flight_validation_transport_s` 控制。当前两个窗口均为 100 s，分别保存在仿真和实飞文件中。
+
+悬停实飞可直接修改 `slung_payload.yaml` 中的 `flight_validation_transport_s`。
+该时钟从 TAUT_RAMP 接管开始：当前前 5 s 建立张力、接着 12 s 抬升，
+设 100 s 对应抬升参考结束后约 83 s；希望此后悬停 120 s，可设 137 s。
+它不等待实测调平完成才计时。`flight_validation_enabled: false` 时则继续由普通轨迹时长结束任务。
 
 候选覆盖文件使用独立参数根，传给 `--candidate` 后只影响本次回放：
 

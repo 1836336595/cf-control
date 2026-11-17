@@ -256,8 +256,14 @@ class VehicleLoggingMixin:
         row["flight_validation_landing_started"] = int(bool(target.get("flight_validation_landing_started", False)))
         row["flight_validation_landing_stage"] = str(target.get("flight_validation_landing_stage", ""))
         for field in ("link_length_nominal_m", "link_length_effective_m", "link_length_measured_m",
-                      "link_calibration_window_s", "link_calibration_spread_m"):
+                      "link_calibration_window_s", "link_calibration_spread_m",
+                      "link_length_report_sample_time_s", "link_length_report_median_m",
+                      "link_length_report_p10_m", "link_length_report_p90_m", "link_length_report_window_s",
+                      "link_length_measurement_sample_time_s"):
             row[field] = float(target.get(field, math.nan))
+        for field in ("link_length_report_sequence", "link_length_report_samples"):
+            row[field] = int(target.get(field, 0))
+        row["link_length_report_status"] = str(target.get("link_length_report_status", ""))
         for field in ("link_calibration_enabled", "link_calibration_applied"):
             row[field] = int(bool(target.get(field, False)))
         row["link_calibration_samples"] = int(target.get("link_calibration_samples", 0))
@@ -419,6 +425,17 @@ class VehicleLoggingMixin:
         row.update(dict(zip(("desired_roll_rad", "desired_pitch_rad", "desired_yaw_rad"), desired_rpy)))
         row["target_yaw_rad"] = float(target["yaw"])
         row["omega_c_method"] = str(command.get("omega_c_method", "zero"))
+        for field in ("transport_attitude_integral_learning", "transport_attitude_integral_limit_active",
+                      "transport_attitude_integral_antiwindup"):
+            row[field] = int(bool(command.get(field, False)))
+        row["transport_attitude_integral_freeze_reason"] = command.get(
+            "transport_attitude_integral_freeze_reason", "inactive")
+        for field in ("transport_attitude_integral_rate", "transport_attitude_integral_applied_rate"):
+            self._with_xyz(row, field, command.get(field, np.zeros(3)))
+        row["transport_attitude_mode"] = (
+            self.controller.config.transport_attitude_mode
+            if command.get("transport_mode", False) and not target.get("independent_mode", False)
+            else "inactive")
         row["command_thrust_newton"] = float(command["collective_thrust"])
         if command["collective_thrust"] <= 0.0:
             row["command_raw_thrust"] = 0

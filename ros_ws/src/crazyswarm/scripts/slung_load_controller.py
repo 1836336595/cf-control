@@ -779,6 +779,7 @@ class SlungLoadConfig:
     payload_mass_kg: float
     gravity_mps2: float
     payload_size_m: np.ndarray
+    payload_inertia_kgm2: np.ndarray
     attachment_points_m: np.ndarray
     link_length_m: float
     position_gain: np.ndarray
@@ -802,6 +803,15 @@ class SlungLoadConfig:
     transport_force_mode: str = "coupled"
 
     def __post_init__(self):
+        raw_inertia = np.asarray(self.payload_inertia_kgm2, dtype=object)
+        if raw_inertia.shape != (3,) or any(isinstance(v, (bool, np.bool_)) for v in raw_inertia.flat):
+            raise ValueError("payload inertia_diag_kgm2 must be three positive finite moments")
+        inertia = np.asarray(raw_inertia, dtype=float)
+        if not np.all(np.isfinite(inertia)) or np.any(inertia <= 0.):
+            raise ValueError("payload inertia_diag_kgm2 must be three positive finite moments")
+        if np.max(inertia) > np.sum(inertia) - np.max(inertia) + 1.e-12 * np.max(inertia):
+            raise ValueError("payload inertia_diag_kgm2 violates the principal-moment triangle inequality")
+        self.payload_inertia_kgm2 = inertia.copy()
         if (not isinstance(self.transport_force_mode, str) or
                 self.transport_force_mode not in ("coupled", "reference_cascade")):
             raise ValueError("transport_force_mode must be coupled or reference_cascade")
@@ -1078,17 +1088,7 @@ class SlungLoadController:
 
         e_r = 0.5 * _vee(rd.T @ r0 - r0.T @ rd)
         e_omega = omega0 - r0.T @ rd @ omegad
-        inertia = np.diag([
-            self.config.payload_mass_kg * (
-                self.config.payload_size_m[1] ** 2 + self.config.payload_size_m[2] ** 2
-            ) / 12.0,
-            self.config.payload_mass_kg * (
-                self.config.payload_size_m[0] ** 2 + self.config.payload_size_m[2] ** 2
-            ) / 12.0,
-            self.config.payload_mass_kg * (
-                self.config.payload_size_m[0] ** 2 + self.config.payload_size_m[1] ** 2
-            ) / 12.0,
-        ])
+        inertia = np.diag(self.config.payload_inertia_kgm2)
         feedforward = r0.T @ rd @ omegad
         # Desired rates live in Rd's body frame.  Their derivative after
         # transport into the measured body includes -omega x feedforward;
@@ -1099,7 +1099,7 @@ class SlungLoadController:
             + inertia @ r0.T @ rd @ omegadd
         )
         # Payload attitude gains are supplied by the caller in target.  This
-        # avoids duplicating MATLAB's size-derived gains in the vehicle file.
+        # keeps the same configured inertia in the gain and dynamics paths.
         desired_moment += (
             -_as_vector(target["payload_attitude_gain"], "payload_attitude_gain") * e_r
             -_as_vector(target["payload_rate_gain"], "payload_rate_gain") * e_omega

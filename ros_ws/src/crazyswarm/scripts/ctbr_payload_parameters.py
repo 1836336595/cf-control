@@ -4,6 +4,7 @@ from collections import deque
 from ctbr_parameters import GLOBAL_CTBR_PARAMETER_ROOT
 from ctbr_parameters import PAYLOAD_PARAMETER_ROOT
 from ctbr_parameters import TRAJECTORY_PARAMETER_ROOT
+from ctbr_parameters import payload_task_hover_duration
 from nav_msgs.msg import Path
 from slung_attitude_trim import SlungAttitudeReferenceTrim, SlungDynamicAttitudeReferenceTrim
 from slung_circle_reference import CircleTrajectoryConfig
@@ -12,6 +13,7 @@ from slung_circle_reference import PayloadFigureEightReference
 from slung_attitude_cone_reference import PayloadConeReference
 from slung_landing import PayloadTouchdownDetector
 from slung_link_calibration import SlungLinkCalibrator
+from slung_link_length_report import SlungLinkLengthReporter
 from slung_load_controller import PayloadStateObserver
 from slung_load_controller import SecondOrderVelocityFilter as PayloadVelocityFilter
 from slung_load_controller import SlungLoadConfig
@@ -39,6 +41,8 @@ class PayloadParametersMixin:
         self.payload_prelift_accepted_state = None
         self.payload_prelift_confirmation_waiting = False
         self.last_valid_payload_geometry = None
+        self.payload_link_length_reporter = None
+        self.payload_link_length_report_history = None
         self.payload_topic = str(rospy.get_param(
             GLOBAL_CTBR_PARAMETER_ROOT + "/payload_mocap_topic",
             "/load/mocap_state",
@@ -206,14 +210,17 @@ class PayloadParametersMixin:
                 attachment_points = attachment_points_from_yaml(
                     payload["attachment_points_m"]
                 )
+                report_enabled = payload.get("link_length_report_enabled", True)
+                if not isinstance(report_enabled, bool):
+                    raise ValueError("link_length_report_enabled 必须为布尔值")
+                if report_enabled:
+                    self.payload_link_length_reporter = SlungLinkLengthReporter(
+                        attachment_points.T,
+                        window_s=payload.get("link_length_report_window_s", 3.),
+                        level_tolerance_deg=payload.get("link_length_report_level_tolerance_deg", 3.))
                 attitude_bandwidth = np.asarray(
                     payload["attitude_bandwidth_hz"], dtype=float
                 ).reshape(3)
-                inertia_diag = np.array([
-                    float(payload["mass_kg"]) * (size[1] ** 2 + size[2] ** 2) / 12.0,
-                    float(payload["mass_kg"]) * (size[0] ** 2 + size[2] ** 2) / 12.0,
-                    float(payload["mass_kg"]) * (size[0] ** 2 + size[1] ** 2) / 12.0,
-                ])
                 link_lengths = link_lengths_vector(
                     payload.get("link_lengths_m", payload.get("link_length_m")),
                     "link_lengths_m",
@@ -246,6 +253,7 @@ class PayloadParametersMixin:
                         GLOBAL_CTBR_PARAMETER_ROOT + "/gravity_mps2", 9.80665
                     )),
                     payload_size_m=size,
+                    payload_inertia_kgm2=payload["inertia_diag_kgm2"],
                     attachment_points_m=attachment_points,
                     link_length_m=float(np.mean(link_lengths)),
                     link_lengths_m=link_lengths,
@@ -541,7 +549,8 @@ class PayloadParametersMixin:
                     if (self.payload_flight_validation_enabled
                             and self.payload_flight_validation_transport_s < required):
                         raise ValueError("payload %s 轨迹尚未完成就会触发验证降落；需要至少 %.3f s" % (mode,required))
-                    if float(rospy.get_param(TRAJECTORY_PARAMETER_ROOT + "/hover_duration_s", 30.)) < required:
+                    if payload_task_hover_duration(rospy.get_param(
+                            TRAJECTORY_PARAMETER_ROOT + "/hover_duration_s", 30.), payload) < required:
                         raise ValueError("payload %s 轨迹需要 ctbr_trajectory.hover_duration_s 至少 %.3f s" % (mode,required))
                 self.payload_attitude_trim_enabled = payload.get("transport_attitude_trim_enabled", False)
                 if not isinstance(self.payload_attitude_trim_enabled, bool):
@@ -672,6 +681,7 @@ class PayloadParametersMixin:
                 self.payload_takeup_target_distance_m = takeup_target_distance(
                     load_cfg.link_lengths_m, self.payload_takeup_pre_tension_slack_m
                 )
+                inertia_diag = load_cfg.payload_inertia_kgm2
                 self.payload_attitude_gain = inertia_diag * (
                     2.0 * math.pi * attitude_bandwidth
                 ) ** 2

@@ -219,6 +219,15 @@ class FlightCsvLogger:
                               "attitude_innovation_z")]
     FIELDS += ["prelift_vertical_integral_learning", "payload_prelift_feedback_reused",
                "payload_prelift_feedback_age_s"]
+    FIELDS += ["link_length_report_sequence", "link_length_report_sample_time_s",
+               "link_length_report_median_m", "link_length_report_p10_m", "link_length_report_p90_m",
+               "link_length_report_samples", "link_length_report_window_s", "link_length_report_status",
+               "link_length_measurement_sample_time_s"]
+    FIELDS += ["transport_attitude_mode"]
+    FIELDS += ["transport_attitude_integral_learning", "transport_attitude_integral_freeze_reason",
+               "transport_attitude_integral_limit_active", "transport_attitude_integral_antiwindup"]
+    FIELDS += [prefix+axis for prefix in ("transport_attitude_integral_rate_",
+                                        "transport_attitude_integral_applied_rate_") for axis in "xyz"]
 
     def __init__(self, directory, prefix):
         directory = os.path.expanduser(directory)

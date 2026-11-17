@@ -249,6 +249,7 @@ def test_cable_directions_match_the_existing_payload_controller_equilibrium_allo
     from slung_load_controller import SlungLoadConfig, SlungLoadController
     attachments, _, _, _, gravity = _allocation()
     controller = SlungLoadController(SlungLoadConfig(
+        payload_inertia_kgm2=np.array([1.1691666666666667e-05, 1.7058333333333336e-05, 1.9166666666666667e-05]),
         payload_mass_kg=.023, gravity_mps2=9.80665, payload_size_m=np.array([.08, .06, .05]),
         attachment_points_m=attachments, link_length_m=.85,
         position_gain=np.array([3., 3., 3.75]), velocity_gain=np.array([3.12, 3.12, 3.12]),

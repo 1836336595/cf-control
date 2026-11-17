@@ -7,12 +7,16 @@ slung_payload:
   mocap_topic: "/load/mocap_state"
   size_m: [0.08, 0.06, 0.05]        # [长, 宽, 高]。
   mass_kg: 0.023        # 负载质量，kg。 0.054 / 0.023
+  # 负载质心处、负载坐标系 XYZ 轴的转动惯量 [Jxx, Jyy, Jzz]，单位 kg·m²。
+  # 当前显式初值沿用原 23 g 负载的数值；不再由 mass_kg / size_m 自动计算。
+  # 改变负载或质量分布后需单独更新；当前模型假设惯量积为零。
+  inertia_diag_kgm2: [3.4132e-5, 3.0394e-5, 4.0119e-5]
   # 负载几何中心的绝对目标高度，m。预抬阶段先满足 prelift_clearance_m，
   # 接管后的 reference_lift 使用此目标，不再沿用普通轨迹的 1.0 m。
   target_payload_height_m: 0.60
   # 吊运轨迹由负载参考统一驱动；ctbr_controller.yaml 的普通飞机轨迹保持 hover。
   trajectory:
-    mode: attitude_cone           # hover / circle / figure_eight / attitude_cone
+    mode: hover           # hover / circle / figure_eight / attitude_cone
     radius_m: 0.50
     center_xy: [0.0, 0.0]        # 圆锥模式为固定质心 XY；八字模式为交点。
     # circle 模式时本项表示单圆圆心；注释掉本项则恢复单圆的自动圆心。
@@ -27,13 +31,15 @@ slung_payload:
     cone_transition_s: 5.0       # 扫描前倾斜、扫描后回水平的时间，各自 5 s。
   # circle：负载自身 +X 指向圆心；figure_eight：+X 沿运行切线。roll/pitch 参考保持 0。
   # 圆锥模式：h20–25 倾斜，h25–55 第一圈，h55–85 第二圈，h85–90 回水平，h100 降落。
-  # 若增加到 3 圈或更多，须同时延长 flight_validation_transport_s、普通 hover_duration_s
-  # 和独立仿真文件的 post_handoff_s；窗口不够时启动检查会拒绝，避免扫描中途计划降落。
-  # 实飞验证：进入 TAUT_RAMP 后计时，当前任务总窗口 100 s。
-  # 到时从当前实测位置受控降落；不是起飞后第 100 s，也不是到达 0.60 m 后再等 100 s。
+  # 实飞吊运时长统一由下方 flight_validation_transport_s 控制；普通飞机悬停时钟会自动留足时间。
+  # 增加圈数时需延长本项以覆盖完整轨迹；仿真的 time_limit_s 总时限仍需覆盖起飞、任务和下降。
+  # 【悬停时长入口】从进入 TAUT_RAMP 开始计时，当前总窗口为 100 s。
+  # hover 模式下前 5 s 建立张力、随后 12 s 抬升，因此当前目标高度参考悬停约为 100-17=83 s。
+  # 若希望抬升参考结束后悬停 120 s，本项设为 137.0；不会等待“实测已调平”才启动计时。
+  # 到时从当前实测位置受控降落；不是从起飞时或到达实测 0.60 m 的时刻开始。
   # 先协同放下负载，确认负载落地稳定后，再保持三机 XY 分别下降并停推。
   flight_validation_enabled: true
-  flight_validation_transport_s: 100.0
+  flight_validation_transport_s: 60.0
   # 独立的负载下降限幅；时间按实际下降距离自适应，不再取 4 s × 0.55。
   landing_payload_max_speed_mps: 0.12
   landing_payload_max_acceleration_mps2: 0.15
@@ -54,7 +60,11 @@ slung_payload:
   density_kg_m3: 0.0                # 0 表示使用 mass_kg，不按密度派生质量。
   # 依据 2026-10-01 CSV 的早期稳定运输段拟合，顺序为 [CF3, CF4, CF5]，m。
   # CSV 未记录负载姿态，因此这是几何拟合值；重新测量绳长时应优先采用实测值。
-  link_lengths_m: [0.857, 0.860, 0.854] # [0.699, 0.699, 0.674] / [0.830, 0.830, 0.830]
+  link_lengths_m: [0.865, 0.863, 0.860] # [0.699, 0.699, 0.674] / [0.830, 0.830, 0.830]
+  # 调平后仅统计/打印有效端点距离，供换绳后核对；不自动改控制参数。
+  link_length_report_enabled: true
+  link_length_report_window_s: 3.0
+  link_length_report_level_tolerance_deg: 3.0 # 稳定窗倾角中位数；瞬时容差再加 2°。
   # 名义长度保留；TAKEUP 完成后的稳定几何窗口可校准一次运行有效值。
   # 只增加、不缩短，避免把松绳距离当成真实绳长；不回写本文件。
   link_calibration_enabled: true
@@ -151,7 +161,7 @@ slung_payload:
   transport_attitude_trim_gain_per_s: [0.05, 0.10, 0.01] # 三轴慢补偿；动态开关为 false 时保留原冻结策略。
   transport_attitude_trim_limit_m: 0.010 # 最大任一飞机参考偏置的三维范数，m。
   transport_attitude_trim_rate_limit_mps: 0.0015
-  transport_attitude_trim_acceleration_limit_mps2: 0.002
+  transport_attitude_trim_acceleration_limit_mps2: 0.0046
   transport_attitude_trim_interval_s: 1.0 # 每段五次平滑修正的时间，s。
   # 飞机运输反馈选择： differential_integral 保持当前实飞方案；
   # native_position_pid 复用 GeometricCtbrController 的位置 PID（仅 reference_cascade）。

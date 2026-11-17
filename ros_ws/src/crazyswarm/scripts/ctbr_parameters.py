@@ -1,12 +1,26 @@
 """Global, trajectory, and per-aircraft ROS parameter routing."""
 
-
+import math
 
 
 GLOBAL_CTBR_PARAMETER_ROOT = "/ctbr_controller"
 TRAJECTORY_PARAMETER_ROOT = "/ctbr_trajectory"
 PAYLOAD_PARAMETER_ROOT = "/slung_payload"
 _PARAMETER_MISSING = object()
+
+
+def payload_task_hover_duration(ordinary_duration, payload):
+    """Reserve enough aircraft hover time for the payload-owned deadline."""
+    ordinary_duration = float(ordinary_duration)
+    if payload.get("flight_validation_enabled", False) is not True:
+        return ordinary_duration
+    duration = payload.get("flight_validation_transport_s", 10.)
+    if isinstance(duration, bool):
+        raise ValueError("flight_validation_transport_s 必须为正的有限数")
+    duration = float(duration)
+    if not math.isfinite(duration) or duration <= 0.:
+        raise ValueError("flight_validation_transport_s 必须为正的有限数")
+    return max(ordinary_duration, duration)
 
 def vehicle_parameter_namespace(vehicle_id):
     """Return the dedicated absolute controller-parameter root for one CF."""

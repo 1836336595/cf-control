@@ -12,6 +12,7 @@ from slung_load_controller import (
 
 def _case(force_mode="reference_cascade", angle=.1, axis="roll"):
     config = SlungLoadConfig(
+        payload_inertia_kgm2=np.array([1.1691666666666667e-05, 1.7058333333333336e-05, 1.9166666666666667e-05]),
         payload_mass_kg=.023, gravity_mps2=9.80665,
         payload_size_m=np.array([.08, .06, .05]),
         attachment_points_m=attachment_points_ros_z_up([.08, .06, .05]),
