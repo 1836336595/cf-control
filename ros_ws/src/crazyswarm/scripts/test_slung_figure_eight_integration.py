@@ -76,8 +76,12 @@ def test_figure_eight_full_formation_and_attitude_reference_derivatives(tmp_path
 
 
 def test_figure_eight_does_not_cut_off_at_old_sixty_second_deadline(tmp_path):
-    with pytest.raises(RuntimeError,match="figure_eight|八字|轨迹"):
-        figure_case(tmp_path,flight_validation_transport_s=60.)
+    manager = figure_case(tmp_path, flight_validation_transport_s=60.)
+    try:
+        assert manager.payload_circle_reference.end_time > 60.
+        assert not manager._check_payload_flight_validation(60.)
+    finally:
+        manager.logger.close()
 
 
 def test_figure_eight_crossing_finishes_with_continuous_heading_and_zero_rates(tmp_path):

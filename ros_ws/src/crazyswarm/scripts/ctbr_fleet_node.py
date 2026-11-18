@@ -165,7 +165,10 @@ class MultiCtbrControllerNode(PayloadParametersMixin, PayloadStateMixin, Payload
                 self.payload_transport_pid_force_limit_n,
                 self.payload_transport_pid_force_rate_limit_nps,
             )
-            if self.payload_flight_validation_enabled:
+            if self.payload_circle_config.mode != "hover":
+                rospy.loginfo("吊运 %s 在轨迹参考完成后放载，预计接管后 %.3f s。",
+                              self.payload_circle_config.mode, self.payload_flight_validation_transport_s)
+            elif self.payload_flight_validation_enabled:
                 rospy.loginfo(
                     "[实飞验证] 已启用：从进入 TAUT_RAMP 开始计时 %.2f s 后受控降落"
                     "（包含张力渐增和参考抬升，不等待完整轨迹结束）。",
@@ -585,6 +588,9 @@ class MultiCtbrControllerNode(PayloadParametersMixin, PayloadStateMixin, Payload
                 target_override["landing_vertical_integral_active"] = True
             if self.transport_mode == "slung_load":
                 target_override = dict(target_override or {})
+                # Apply after cached overrides are selected, so a lowering
+                # feedback gap keeps the same configured feedforward budget.
+                target_override.update(self.payload_landing_feedforward_parameters)
                 target_override.update({
                     "link_length_nominal_m": self.payload_nominal_link_lengths[vehicle_index],
                     "link_length_effective_m": self.slung_controller.config.link_lengths_m[vehicle_index],
@@ -652,6 +658,12 @@ class MultiCtbrControllerNode(PayloadParametersMixin, PayloadStateMixin, Payload
                 transport_override=target_override,
             )
             self.fleet_tick_completed_vehicles.add(id(vehicle))
+        # Give every aircraft the endpoint override for one tick before
+        # starting descent. A cached or missing override cannot finish a task.
+        if self.transport_mode == "slung_load" and self.payload_transport_active and not self.payload_controlled_exit_reason:
+            self.payload_endpoint_sent = all(
+                item.get("payload_trajectory_phase") == "complete" and item.get("_payload_control_time") == now
+                for item in (transport_overrides.get(id(v), {}) for v in self.vehicles))
         self._log_terminal_mission_stage()
         self.logger.flush()
 

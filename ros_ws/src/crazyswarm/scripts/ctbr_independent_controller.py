@@ -73,7 +73,7 @@ class IndependentVehicleController:
             saturated_integral_rate[upper_active | lower_active] = 0.0
         return position_integral_rate, saturated_integral_rate
 
-    def _independent_gains(self, target):
+    def _independent_gains(self, target, landing_vertical_integral=False):
         independent_position_gain = np.asarray(
             getattr(self.config, "independent_position_gain", None)
             if getattr(self.config, "independent_position_gain", None) is not None
@@ -97,7 +97,18 @@ class IndependentVehicleController:
             if getattr(self.config, "independent_integral_gain", None) is not None
             else self.config.integral_gain / max(self.config.mass, 1.0e-12),
             dtype=float,
-        ).reshape(3)
+        ).reshape(3).copy()
+        if landing_vertical_integral:
+            # This opt-in is asserted only after the payload has been released.
+            # Resolve Z after independent/prelift scaling; retain the existing
+            # XY loop while tuning descent without changing takeoff/transport.
+            for gain, name in (
+                    (independent_position_gain, "landing_position_gain_z"),
+                    (independent_velocity_gain, "landing_velocity_gain_z"),
+                    (independent_integral_gain, "landing_integral_gain_z")):
+                value = getattr(self.config, name, None)
+                if value is not None:
+                    gain[2] = value
         return independent_position_gain, independent_velocity_gain, independent_integral_gain
 
     def _independent_force(self, state, target, dt, derivatives_ready,

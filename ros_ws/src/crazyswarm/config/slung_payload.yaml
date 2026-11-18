@@ -16,28 +16,23 @@ slung_payload:
   target_payload_height_m: 0.60
   # 吊运轨迹由负载参考统一驱动；ctbr_controller.yaml 的普通飞机轨迹保持 hover。
   trajectory:
-    mode: hover           # hover / circle / figure_eight / attitude_cone
+    mode: figure_eight           # hover / circle / figure_eight / attitude_cone
     radius_m: 0.50
     center_xy: [0.0, 0.0]        # 圆锥模式为固定质心 XY；八字模式为交点。
     # circle 模式时本项表示单圆圆心；注释掉本项则恢复单圆的自动圆心。
     # 不填写 null；省略 center_xy 时，八字交点为原悬停目标 XY。
     speed_mps: 0.10              # 仅单圆/八字使用，最高线速度，m/s。
     direction: ccw               # 圆锥倾斜方向从上向下看逆时针；八字右圆 ccw、左圆 cw。
-    revolutions: 2.0             # 圆锥圈数，正整数；每增加一圈，扫描增加 cone_period_s（当前 30 s）。
+    revolutions: 2.0             # 圆周圈数、完整八字次数或圆锥扫描圈数；八字和圆锥取正整数。
     ramp_s: 5.0                  # 平面轨迹起停与中途姿态制动时间；圆锥进出用 cone_transition_s。
     settle_s: 3.0                # 抬升/姿态参考完成后额外保持时间，不代表实测姿态已收敛。
     cone_half_angle_deg: 15.0    # 自身 +Z 与世界 +Z 的固定夹角；仅 attitude_cone 使用。
     cone_period_s: 30.0          # 每圈各自平滑起停，当前两圈共 60 s；保持质心不动。
     cone_transition_s: 5.0       # 扫描前倾斜、扫描后回水平的时间，各自 5 s。
   # circle：负载自身 +X 指向圆心；figure_eight：+X 沿运行切线。roll/pitch 参考保持 0。
-  # 圆锥模式：h20–25 倾斜，h25–55 第一圈，h55–85 第二圈，h85–90 回水平，h100 降落。
-  # 实飞吊运时长统一由下方 flight_validation_transport_s 控制；普通飞机悬停时钟会自动留足时间。
-  # 增加圈数时需延长本项以覆盖完整轨迹；仿真的 time_limit_s 总时限仍需覆盖起飞、任务和下降。
-  # 【悬停时长入口】从进入 TAUT_RAMP 开始计时，当前总窗口为 60 s。
-  # hover 模式下前 5 s 建立张力、随后 12 s 抬升，因此当前目标高度参考悬停约为 60-17=43 s。
-  # 若希望抬升参考结束后悬停 120 s，本项设为 137.0；不会等待“实测已调平”才启动计时。
-  # 到时从当前实测位置受控降落；不是从起飞时或到达实测 0.60 m 的时刻开始。
-  # 先协同放下负载，确认负载落地稳定后，再保持三机 XY 分别下降并停推。
+  # circle / figure_eight / attitude_cone：最后一帧轨迹参考发出后自动协同放载。
+  # 改速度或圈数时无需调整下面两项；离线 time_limit_s 仍须容纳整次仿真。
+  # 以下两项仅控制 hover 的计划放载。从 TAUT_RAMP 起计时，60 s 包含 5 s 张力建立和 12 s 抬升。
   flight_validation_enabled: true
   flight_validation_transport_s: 60.0
   # 独立的负载下降限幅；时间按实际下降距离自适应，不再取 4 s × 0.55。
@@ -45,6 +40,15 @@ slung_payload:
   landing_payload_max_acceleration_mps2: 0.15
   landing_gain_transition_s: 2.0
   landing_unload_s: 2.0 # 实测稳定接地后才开始卸载，再转入三机下降。
+  # 仅协同放载/卸载：限制最终目标姿态差分的前馈，再在世界系低通。
+  # 姿态 P/I 不经过此低通；独立下降、悬停及其他轨迹不使用该处理。
+  landing_attitude_feedforward_enabled: true
+  landing_attitude_feedforward_filter_tau_s: 0.10
+  landing_attitude_feedforward_limit_rps: [0.6, 0.6, 0.5]
+  # 经 landing_gain_transition_s 五次过渡：下降时退出力方向差分前馈，
+  # 并降低负载旋转反馈，避免后两机差分张力放大；保留平移/支撑和飞机姿态P。
+  landing_attitude_feedforward_gain: 0.0
+  landing_payload_attitude_feedback_scale: 0.30
   # 仅负载触地/卸载后的三机独立下降：Z 积分独立于 XY 误差门控，
   # 补偿推力模型静差，避免普通 ±0.20 积分上限导致离地低空悬停。
   landing_vertical_integral_limit: 2.0
@@ -199,7 +203,7 @@ slung_payload:
   # 接管和运输的实测构型保护；达到实际间距边界立即受控降落。
   minimum_vehicle_distance_m: 0.30
   separation_prediction_s: 0.35
-  transport_height_error_limit_m: 0.08
+  transport_height_error_limit_m: 0.10
   transport_fault_confirm_s: 2.20  # 预测靠近/掉高/持续横向速率饱和的确认时间。
   # 保留预抬输出相对协同模型的竖直差额，用有界 I 项慢调，不重复叠加负载重量。
   transport_support_trim_limit_n: 0.25 # 普通 I 上限；接管时在总推力余量内继承完整实测残差。

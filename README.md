@@ -12,7 +12,7 @@ velocity_free_beta → 六维负载合力/力矩 → 张力分配
                   → feedforward_pi 姿态命令 → CTBR → 机载 Mellinger
 ```
 
-六维外环已接入代码；当前仍有合力限幅坐标、辅助增益、异步采样和下游执行差异。新外环尚无完整整机回放及实飞通过记录，详见 [与 MATLAB / 笔记的差异](docs/slung_velocity_free.md#4-与-matlab--笔记的差异)。
+六维外环已接入代码；当前仍有合力限幅坐标、辅助增益、异步采样和下游执行差异。新外环已补充名义及噪声/延迟条件下的整机回放，实飞下降问题仍需新数据验证，详见 [与 MATLAB / 笔记的差异](docs/slung_velocity_free.md#4-与-matlab--笔记的差异)。
 
 ## 项目能力与控制分工
 
@@ -59,12 +59,12 @@ flowchart LR
 | 负载质量 / 尺寸 | 0.023 kg / `[0.08, 0.06, 0.05]` m |
 | 负载对角惯量 | `[3.4132e-5, 3.0394e-5, 4.0119e-5]` kg·m² |
 | 名义绳长，CF3 / CF4 / CF5 | `[0.865, 0.863, 0.860]` m；可在接管前校准一次运行有效值 |
-| 负载轨迹 / 几何中心目标高度 | `hover` / 0.60 m |
+| 负载轨迹 / 几何中心目标高度 | `circle` 两圈 / 0.60 m |
 | 预抬门槛 | 负载最低点离地间隙 0.20 m |
 | 辅助系统 κ / 六维反馈增益 | 平移 12、旋转 20 s⁻¹；`kX=1`、`kXtilde=16` |
 | 动态构型补偿 | 已启用，允许张力渐增完成后在抬升期间更新 |
 | 主机 / EKF 遥测 / 电池遥测 | 70 Hz / 50 Hz / 2 Hz |
-| 实飞计划降落 | 进入 `TAUT_RAMP` 后 60 s |
+| 实飞计划降落 | 圆周、八字、圆锥在参考完成后放载；悬停按接管后的时长放载 |
 | 仿真采样与窗口 | 位姿 100 Hz、Mellinger 500 Hz；`post_handoff_s: 100.0` |
 
 ### 参数入口
@@ -94,6 +94,8 @@ flowchart LR
 β 分支使用 `Upsilon-kX*PsiE-kXtilde*PsiT` 加重力补偿生成负载广义力，关闭旧负载位置积分和可选负载姿态积分。飞机运输积分、动态构型 trim 和支撑 trim 仍按各自门控工作。`W/d` 从实飞负载刚度派生，旧的 `velocity_free_attitude_weights` YAML 键不再生效。
 
 三机 `feedforward_pi` 需同时使用 `omega_c_method: log_difference` 和 `use_body_rate_feedforward: true`。姿态 I 的限值单位是附加角速度，与位置积分和负载构型 trim 分开。切换参数需要重启控制节点。
+
+协同放载/卸载在 2 s 内把负载旋转反馈倍率平滑降至 0.30，并把飞机姿态差分前馈权重降至 0；前馈过渡期间保留 0.10 s 世界系低通及 `[0.6,0.6,0.5]` rad/s 限幅。释放负载后的独立下降使用每机 `landing_position_gain_z / landing_velocity_gain_z / landing_integral_gain_z`；CF4 为 `5/4/1.6`，CF3/5 为 `4/3.6/0.8`。CF4 共用 independent Z 恢复 `4/3.6/0.8`，避免降落调参同时增大运输积分。参数作用阶段及新增日志见 [放载与降落控制](docs/slung_descent_control.md)。
 
 ## 环境与编译
 
@@ -144,7 +146,7 @@ python -m pip install pyyaml pytest
 ```bash
 cd ros_ws/src/crazyswarm/scripts
 
-# 按当前 YAML 运行：β + 六维外环、hover、接管 60 s 后计划放载。
+# 按当前 YAML 运行两圈圆周，到终点后放载。
 python simulate_slung_handoff.py --output ctbr_logs/se3_hover
 
 # 查看接管、负载运动与控制输出。
@@ -219,7 +221,7 @@ roslaunch crazyswarm ctbr_controller.launch \
 |---|---|
 | `prelift_clearance_m: 0.20` | 旋转负载最低点的离地门槛 |
 | `target_payload_height_m: 0.60` | 运输阶段负载几何中心的最终目标高度 |
-| `flight_validation_transport_s: 60.0` | 从进入 `TAUT_RAMP` 开始计时，到时启动计划放载 |
+| `flight_validation_transport_s: 60.0` | 仅用于负载 hover，从进入 `TAUT_RAMP` 开始计时，到时启动计划放载 |
 | `tension_ramp_s: 5.0` / `reference_lift_s: 12.0` | 先建立张力，再抬升负载参考；60 s 窗口中参考抬升完成后的时间约为 43 s |
 | `slung_simulation.post_handoff_s: 100.0` | 离线观察窗口；不会把已启用的 60 s 实飞任务期限改成 100 s |
 
@@ -231,12 +233,12 @@ roslaunch crazyswarm ctbr_controller.launch \
 
 | 负载模式 | 路径与朝向 |
 |---|---|
-| `hover`，当前默认 | 固定位置，目标水平、零航向 |
-| `circle` | 单圆，负载朝向圆心 |
+| `hover` | 固定位置，目标水平、零航向 |
+| `circle`，当前配置 | 单圆，负载朝向圆心 |
 | `figure_eight` | 两个精确相切圆，负载沿运行切线朝向 |
 | `attitude_cone` | 质心固定，自身 +Z 绕世界 +Z 扫描，姿态参考起止闭合 |
 
-实飞文件已预设圆锥半角 15°、两圈、每圈 30 s，但当前没有启用。若切到 `attitude_cone`，还需延长任务窗口，例如设 `flight_validation_transport_s: 100.0`，覆盖参考建立、两圈扫描和恢复水平。轨迹的 `settle_s` 是参考等待时间，不代表实测误差已经收敛。圆周/圆锥的 `center_xy` 含义不同，省略与填 `null` 也不同，ROS1 参数不能包含 `null`。
+圆周、八字和圆锥在轨迹生成器报告 `complete` 并输出终点参考后协同放载。圆锥包括扫完指定圈数后恢复水平的过渡。调整圈数、速度和周期时无需修改飞机悬停时长，也无需手算降落时限。`settle_s` 是运动开始前的参考等待时间。
 
 当前动态构型 trim 和抬升期间更新均已启用：张力渐增完成且协同混合达到 100% 后，按负载姿态误差缓慢修正三机参考构型，仍受反馈健康、阶段和限幅门控。它不改变负载目标姿态，也不替代六维负载外环。换绳后的自动有效值校准与 `link_length_report_enabled` 统计分别管理；后者只报告实测距离，不自动写回配置。
 
@@ -295,7 +297,7 @@ rostopic echo -n 5 /cf3/ctbr_timing
 
 [历史 β 验证记录](docs/slung_velocity_free_verification.md) 中的五组悬停、圆锥、噪声/延迟回放，使用的是此前“β 替换原 PID/PD 速度反馈”的实现。此前八字、圆锥和动态 trim 文档中的整机结果也对应各自参数快照，不能作为当前六维外环的验证结果。
 
-当前还需完成六维外环的整机回放与实飞验证；合力限幅坐标顺序、辅助带宽、异步时序和日志缺项见 [剩余差异](docs/slung_velocity_free.md#4-与-matlab--笔记的差异)。历史 MuJoCo 故障注入测试的已知失败及基线复现情况见上述验证记录。
+2026-11-18 的下降处理完成当前脚本目录回归（1455 项通过、4 项跳过），并用修改前后独立源码快照完成名义、噪声/较大延迟四组整机回放，均放载并全部停推；噪声组 CF4/5 的姿态波动减小。但该模型没有复现实飞大振荡与 CF4 近地悬停，不能承诺实飞问题已消除。具体范围见 [放载与降落控制](docs/slung_descent_control.md)。合力限幅坐标、辅助带宽、异步时序和日志缺项仍见 [剩余差异](docs/slung_velocity_free.md#4-与-matlab--笔记的差异)。
 
 在 scripts 目录运行相关回归：
 
@@ -328,6 +330,8 @@ python -m pytest -q \
 
 | 文档 | 用途 |
 |---|---|
+| [协同搬运控制实现：当前代码版](docs/协同搬运控制实现_当前代码.md) | 按工程地图、公式、参考、补偿与保护展开的完整实现说明，附函数与行号索引 |
+| [放载与降落控制](docs/slung_descent_control.md) | 协同下降前馈限幅/滤波、独立下降专用 Z PID 与回放证据 |
 | [Velocity-free 说明](docs/slung_velocity_free.md) | 当前负载 β 反馈、六维外环使用范围和剩余实现差异 |
 | [负载观测与诊断](docs/slung_payload_observer.md) | 旧 `pose_observer`、状态质量与控制快照 |
 | [控制器模块与参数入口](docs/ctbr_controller_modules.md) | 主机模块划分及参数根 |

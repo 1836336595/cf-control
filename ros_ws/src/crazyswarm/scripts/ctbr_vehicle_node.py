@@ -250,8 +250,10 @@ class CtbrControllerNode(VehicleLoggingMixin, VehicleStateMixin, VehiclePrefligh
             independent_takeoff_duration_s = None
             takeup_duration_s = None
             hover_duration_s = float(trajectory_param("hover_duration_s", 30.0))
+            wait_for_payload_trajectory = False
             if transport_mode == "slung_load":
                 payload_param = rospy.get_param(PAYLOAD_PARAMETER_ROOT, {})
+                wait_for_payload_trajectory = payload_param.get("trajectory", {}).get("mode", "hover") != "hover"
                 hover_duration_s = payload_task_hover_duration(hover_duration_s, payload_param)
                 # The trajectory position belongs to the aircraft.  For the
                 # MATLAB cable geometry, the aircraft must be one link length
@@ -299,6 +301,7 @@ class CtbrControllerNode(VehicleLoggingMixin, VehicleStateMixin, VehiclePrefligh
                     trajectory_param("circle_ramp_duration_s")
                 ),
                 hover_duration_s=hover_duration_s,
+                wait_for_payload_trajectory=wait_for_payload_trajectory,
                 independent_takeoff_height_m=independent_takeoff_height_m,
                 independent_takeoff_duration_s=independent_takeoff_duration_s,
                 takeup_duration_s=takeup_duration_s,
@@ -477,6 +480,9 @@ class CtbrControllerNode(VehicleLoggingMixin, VehicleStateMixin, VehiclePrefligh
             independent_heading=self._vector_param(
                 self.params.vehicle_param, "independent_heading"
             ),
+            landing_position_gain_z=self.params.vehicle_param("landing_position_gain_z", None),
+            landing_velocity_gain_z=self.params.vehicle_param("landing_velocity_gain_z", None),
+            landing_integral_gain_z=self.params.vehicle_param("landing_integral_gain_z", None),
             attitude_gain=self._vector_param(self.params.vehicle_param, "attitude_gain"),
             attitude_integral_gain=self._vector_param(
                 self.params.vehicle_param, "attitude_integral_gain"

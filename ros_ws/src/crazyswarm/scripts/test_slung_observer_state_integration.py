@@ -215,6 +215,9 @@ def _initialize_parameters(payload_updates=None):
     manager = module.MultiCtbrControllerNode.__new__(module.MultiCtbrControllerNode)
     manager.transport_mode = "slung_load"
     manager.logger = _node_logger()
+    # The real fleet constructor validates identities before payload loading;
+    # SE(3) force-budget derivation also needs those per-aircraft roots.
+    manager.vehicle_configs = [{"id": cf} for cf in (3, 4, 5)]
     manager._initialize_payload_parameters()
     return manager
 

@@ -4,7 +4,6 @@ from collections import deque
 from ctbr_parameters import GLOBAL_CTBR_PARAMETER_ROOT
 from ctbr_parameters import PAYLOAD_PARAMETER_ROOT
 from ctbr_parameters import TRAJECTORY_PARAMETER_ROOT
-from ctbr_parameters import payload_task_hover_duration
 from nav_msgs.msg import Path
 from slung_attitude_trim import SlungAttitudeReferenceTrim, SlungDynamicAttitudeReferenceTrim
 from slung_circle_reference import CircleTrajectoryConfig
@@ -26,6 +25,7 @@ from slung_prelift_trajectory import SlungPreliftTrajectory
 from slung_transport_guard import SlungSupportTrim
 from slung_transport_guard import SlungTransportGuard
 from slung_transport_integral import SlungDifferentialHoldIntegral
+from ctbr_transport_vehicle_controller import validate_landing_feedforward_settings
 import math
 import numpy as np
 import rospy
@@ -58,6 +58,7 @@ class PayloadParametersMixin:
         self.payload_target_height_m = math.nan
         self.payload_circle_config = CircleTrajectoryConfig()
         self.payload_circle_reference = None
+        self.payload_endpoint_sent = False
         self.payload_circle_state = None
         self.payload_circle_landing_yaw = None
         self.payload_circle_previous_correction = None
@@ -136,6 +137,9 @@ class PayloadParametersMixin:
         self.payload_velocity_limit_mps = np.ones(3)
         self.payload_velocity_jump_limit_mps = np.ones(3)
         self.payload_landing_approach_fraction = 0.55
+        self.payload_landing_feedforward_parameters = {}
+        self.payload_landing_attitude_feedback_scale = 1.
+        self.payload_landing_feedforward_gain = 1.
         self.payload_velocity_filter = None
         self.payload_velocity_filter_lock = threading.Lock()
         self.payload_state_observer = None
@@ -467,12 +471,15 @@ class PayloadParametersMixin:
                 enabled = payload.get("flight_validation_enabled", False)
                 if not isinstance(enabled, bool):
                     raise ValueError("flight_validation_enabled 必须为布尔值")
-                self.payload_flight_validation_enabled = enabled
-                self.payload_flight_validation_transport_s = float(
-                    payload.get("flight_validation_transport_s", 10.0))
-                if (not math.isfinite(self.payload_flight_validation_transport_s)
-                        or self.payload_flight_validation_transport_s <= 0):
-                    raise ValueError("flight_validation_transport_s 必须为正的有限数")
+                # Moving missions always use the coordinated release sequence.
+                # Only hover reads the configurable transport deadline.
+                self.payload_flight_validation_enabled = enabled or self.payload_circle_config.mode != "hover"
+                if self.payload_circle_config.mode == "hover":
+                    self.payload_flight_validation_transport_s = float(
+                        payload.get("flight_validation_transport_s", 10.0))
+                    if (not math.isfinite(self.payload_flight_validation_transport_s)
+                            or self.payload_flight_validation_transport_s <= 0):
+                        raise ValueError("flight_validation_transport_s 必须为正的有限数")
                 self.payload_takeup_outward_offset_m = float(
                     payload.get("takeup_outward_offset_m", 0.12)
                 )
@@ -542,6 +549,25 @@ class PayloadParametersMixin:
                 if any(not math.isfinite(v) or v <= 0.0
                        for v in self.payload_landing_integral_parameters.values()):
                     raise ValueError("landing_vertical 积分/加速度限幅必须为正的有限数")
+                ff_enabled, ff_tau, ff_limits = validate_landing_feedforward_settings(
+                    payload.get("landing_attitude_feedforward_enabled", False),
+                    payload.get("landing_attitude_feedforward_filter_tau_s", .10),
+                    payload.get("landing_attitude_feedforward_limit_rps", [.6, .6, .5]))
+                self.payload_landing_feedforward_parameters = {
+                    "payload_landing_attitude_feedforward_enabled": ff_enabled,
+                    "payload_landing_attitude_feedforward_filter_tau_s": ff_tau,
+                    "payload_landing_attitude_feedforward_limit_rps": ff_limits,
+                }
+                for key, attr in (
+                        ("landing_payload_attitude_feedback_scale", "payload_landing_attitude_feedback_scale"),
+                        ("landing_attitude_feedforward_gain", "payload_landing_feedforward_gain")):
+                    value = payload.get(key, 1.)
+                    if isinstance(value, (bool, np.bool_, str, bytes)):
+                        raise ValueError(key + " 必须是 0 到 1 的有限数")
+                    value = float(value)
+                    if not math.isfinite(value) or not 0. <= value <= 1.:
+                        raise ValueError(key + " 必须是 0 到 1 的有限数")
+                    setattr(self, attr, value)
                 self.payload_prelift_confirm_s = float(
                     payload.get("prelift_confirm_s", 0.50)
                 )
@@ -623,13 +649,9 @@ class PayloadParametersMixin:
                     motion = reference_type(np.zeros(3), 0., self.payload_circle_config)
                     reference_end = max(self.payload_attitude_reference_s,
                                         self.payload_tension_ramp_s + self.payload_reference_lift_s)
-                    required = reference_end + self.payload_circle_config.settle_s + motion.duration
-                    if (self.payload_flight_validation_enabled
-                            and self.payload_flight_validation_transport_s < required):
-                        raise ValueError("payload %s 轨迹尚未完成就会触发验证降落；需要至少 %.3f s" % (mode,required))
-                    if payload_task_hover_duration(rospy.get_param(
-                            TRAJECTORY_PARAMETER_ROOT + "/hover_duration_s", 30.), payload) < required:
-                        raise ValueError("payload %s 轨迹需要 ctbr_trajectory.hover_duration_s 至少 %.3f s" % (mode,required))
+                    # Planned duration for logs and replay checks, not the trigger.
+                    self.payload_flight_validation_transport_s = (
+                        reference_end + self.payload_circle_config.settle_s + motion.duration)
                 self.payload_attitude_trim_enabled = payload.get("transport_attitude_trim_enabled", False)
                 if not isinstance(self.payload_attitude_trim_enabled, bool):
                     raise ValueError("transport_attitude_trim_enabled 必须为布尔值")

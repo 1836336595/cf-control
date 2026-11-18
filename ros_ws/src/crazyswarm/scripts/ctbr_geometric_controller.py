@@ -53,6 +53,11 @@ class ControllerConfig:
     independent_max_body_rate: object = None
     independent_attitude_gain: object = None
     independent_heading: object = None
+    # Optional acceleration gains for payload-release independent descent.
+    # None retains the ordinary independent gain on that axis.
+    landing_position_gain_z: object = None
+    landing_velocity_gain_z: object = None
+    landing_integral_gain_z: object = None
     transport_attitude_mode: str = "rate_damping"
     transport_attitude_integral_gain: object = (.4, .4, .2)
     transport_attitude_integral_limit_rps: object = (.15, .15, .10)
@@ -60,6 +65,16 @@ class ControllerConfig:
     transport_attitude_integral_gate_deg: float = 15.
 
     def __post_init__(self):
+        for name in ("landing_position_gain_z", "landing_velocity_gain_z",
+                     "landing_integral_gain_z"):
+            value = getattr(self, name)
+            if value is None:
+                continue
+            if (isinstance(value, (bool, np.bool_)) or
+                    not isinstance(value, (int, float, np.integer, np.floating)) or
+                    not math.isfinite(float(value)) or float(value) < 0.):
+                raise ValueError(name + " must be a finite nonnegative scalar")
+            setattr(self, name, float(value))
         if self.transport_attitude_mode not in ("rate_damping", "feedforward_p", "feedforward_pi"):
             raise ValueError("transport_attitude_mode must be rate_damping, feedforward_p or feedforward_pi")
         if self.transport_attitude_mode in ("feedforward_p", "feedforward_pi") and (
@@ -102,6 +117,7 @@ class GeometricCtbrController(IndependentVehicleController, TransportVehicleCont
         self.previous_transport_rotation = None
         self.previous_transport_rotation_time = None
         self.reset_transport_attitude_integral()
+        self._reset_transport_landing_feedforward()
 
     def compute(self, state, target, dt):
         """计算一个 CTBR 命令。
@@ -137,6 +153,8 @@ class GeometricCtbrController(IndependentVehicleController, TransportVehicleCont
 
         independent_mode = bool(target.get("independent_mode", False))
         transport_mode = bool(target.get("transport_mode", False))
+        if independent_mode or not transport_mode:
+            self._reset_transport_landing_feedforward()
         if independent_mode or not transport_mode or self.config.transport_attitude_mode != "feedforward_pi":
             self.reset_transport_attitude_integral()
         native_transport_pid = (transport_mode and not independent_mode and
@@ -182,7 +200,7 @@ class GeometricCtbrController(IndependentVehicleController, TransportVehicleCont
         )
 
         independent_position_gain, independent_velocity_gain, independent_integral_gain = (
-            self._independent_gains(target))
+            self._independent_gains(target, landing_vertical_integral=landing_vertical_integral))
         raw_desired_force = None
         if independent_mode:
             raw_desired_force = self._independent_force(
@@ -355,6 +373,11 @@ class GeometricCtbrController(IndependentVehicleController, TransportVehicleCont
             0.0, self.config.max_command_thrust
         ))
         return {
+            **self.transport_landing_feedforward_diagnostics,
+            "landing_pid_active": landing_vertical_integral,
+            "landing_pid_gains_z": (np.array([
+                independent_position_gain[2], independent_velocity_gain[2],
+                independent_integral_gain[2]]) if landing_vertical_integral else np.zeros(3)),
             **(self.transport_attitude_integral_diagnostics if transport_mode and not independent_mode
                and self.config.transport_attitude_mode == "feedforward_pi" else {}),
             "position_error": position_error,

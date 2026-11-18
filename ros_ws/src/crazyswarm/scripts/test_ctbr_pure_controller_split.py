@@ -49,6 +49,23 @@ def test_multiphase_commands_and_persistent_state_match_captured_baseline(case_i
         if inputs["reset"]:
             controller.reset()
         actual = controller.compute(inputs["state"], inputs["target"], inputs["dt"])
+        # New diagnostics are outside the captured command schema. Keep the
+        # historical numeric expectations intact and verify their inactive
+        # defaults explicitly rather than regenerating the baseline.
+        assert not actual.pop("transport_landing_feedforward_active")
+        assert not actual.pop("transport_landing_feedforward_limit_active")
+        assert actual.pop("transport_landing_feedforward_filter_tau_s") == 0.
+        assert actual.pop("transport_landing_feedforward_gain") == 1.
+        for field in ("transport_landing_feedforward_raw", "transport_landing_feedforward_applied"):
+            expected_rate = (actual["computed_body_rate"] if
+                             actual["omega_c_method"] == "transport_log_difference" else np.zeros(3))
+            np.testing.assert_allclose(actual.pop(field), expected_rate, atol=1.e-14)
+        landing_active = (inputs["target"].get("independent_mode", False)
+                          and inputs["target"].get("landing_vertical_integral_active", False))
+        assert actual.pop("landing_pid_active") == landing_active
+        expected_gains = (np.array([g[2] for g in controller._independent_gains(inputs["target"])])
+                          if landing_active else np.zeros(3))
+        np.testing.assert_array_equal(actual.pop("landing_pid_gains_z"), expected_gains)
         _equal(actual, step["expected"], "tick%d.command" % tick)
         for name, expected in step["state"].items():
             _equal(getattr(controller, name), expected, "tick%d.%s" % (tick, name))

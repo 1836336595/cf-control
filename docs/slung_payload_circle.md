@@ -1,7 +1,7 @@
 # 负载圆周跟踪与朝向圆心
 
 当前 `trajectory.mode` 为 `circle`；[圆锥姿态轨迹](slung_payload_attitude_cone.md) 保留为切换选项，
-其角度参数已设为 15°。本文下面的单圈、60 s 是原始测试配置示例，当前任务总窗口为 100 s，
+其角度参数已设为 15°。下面以单圈为例，任务在指定圈数完成后自动放载，
 圈数与圆心以实际 YAML 或运行快照为准；省略 `center_xy` 可使用自动圆心。
 
 实飞任务参数入口为 `ros_ws/src/crazyswarm/config/slung_payload.yaml`，仿真物理/延迟/观察窗口
@@ -14,7 +14,6 @@
 ```yaml
 slung_payload:
   target_payload_height_m: 0.60
-  flight_validation_transport_s: 60.0
   trajectory:
     mode: circle
     radius_m: 0.50
@@ -37,17 +36,15 @@ slung_simulation:             # 实际放入独立 config/slung_simulation.yaml�
 时间零点为进入 TAUT_RAMP。当前 5 s 张力建立、12 s 抬升，姿态参考在 12 s 内完成；
 两者均完成后额外保持 3 s，所以 h20 开始圆周。起步和停车各用 5 s 平滑角速度，
 最高角速度 0.2 rad/s、最高线速度 0.1 m/s，一圈总时长约 36.416 s。
-h56.416 完成后保持终点，h60 由原验证流程开始协同降落。
+h56.416 输出单圈终点参考后开始协同放载。当前两圈配置在 h87.832 左右完成。
 
 `settle_s` 是参考运动后的等待时间，并不检查实测姿态已经收敛。
 2026-10-22 17:24:38 实飞日志在早段仍存在明显负载 roll/pitch 偏差，不能据此宣布
 h20 的实际状态已经稳定，或把悬停结果当成圆周实飞验证。
 
-更改速度、圈数、等待时间后，若验证截止时间不足以完成圆周，节点会在启动时拒绝该配置，
-并输出所需最短时间。启用计划降落时，普通飞机的悬停时钟自动留足 `flight_validation_transport_s`；关闭计划降落时仍须单独保证 `ctbr_trajectory.hover_duration_s` 足够。
+速度、圈数和等待时间共同决定终点时刻，三机在终点参考发出后协同放载。
 关闭 `yaw_channel_enabled` 与朝向圆心目标不兼容，启动时会报错。
-`slung_simulation.post_handoff_s` 是独立文件中的离线观察窗口，`flight_validation_transport_s`
-是实飞验证的计划降落时间；生成目录中的 `input_parameters.yaml` 是输出快照。
+离线回放的 `slung_simulation.time_limit_s` 须覆盖起飞、运输和下降全过程。
 `mode: hover` 可恢复原定点参考。顺时针用 `direction: cw`。
 
 ## 位置、姿态和导数

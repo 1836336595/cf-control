@@ -23,7 +23,6 @@ slung_payload:
     revolutions: 1.0
     ramp_s: 5.0
     settle_s: 3.0
-  flight_validation_transport_s: 100.0
 slung_simulation:             # 实际放入独立 config/slung_simulation.yaml。
   post_handoff_s: 100.0
 ```
@@ -38,7 +37,7 @@ slung_simulation:             # 实际放入独立 config/slung_simulation.yaml�
 `revolutions` 表示完整八字次数，须为正整数；单圆模式仍允许非整数圈数。
 
 普通飞机参数 `ctbr_trajectory.trajectory_mode` 保持 `hover`，
-`ctbr_trajectory.hover_duration_s` 当前为 100 s，覆盖整个负载轨迹。
+飞机在负载完成所有八字后收到机群放载指令。
 只修改普通飞机轨迹为八字不会启用这里的负载参考。
 
 ## 切线朝向与交点连续性
@@ -95,12 +94,9 @@ native 位置 PID 和差分积分仍沿用原策略。额外的角速度、源�
 | h17–20 | 额外参考保持 |
 | h20–56.416 | 右圆 |
 | h56.416–92.832 | 左圆 |
-| h92.832–100 | 交点终点保持 |
-| h100 起 | 原协同降落、接地确认、卸载、三机下降停推 |
+| h92.832 完成后 | 协同放载、接地确认、卸载、三机下降停推 |
 
-100 s 是用户为完整八字确认的总窗口。独立文件的 `slung_simulation.post_handoff_s` 是离线观察窗口，
-`flight_validation_transport_s` 是实飞计划降落时刻，两者都相对接管计时。
-若修改速度、圈数或等待时间，使计划时长超过验证/普通 hover 预算，启动时会拒绝配置。
+修改速度、圈数或等待时间后，放载时刻随最后一瓣的结束时间自动调整。
 `settle_s` 仅规定等待，不证明实测姿态已收敛。
 
 ## 仿真与可视化

@@ -1,0 +1,18 @@
+# 2026-11-18：根据 2026-11-17 四次实飞 CSV 给出的首轮 PID 候选。
+# 尚未经过新参数闭环回放/实飞验证。--candidate 只覆盖该次离线回放。
+# independent_* 是加速度增益；当前同时用于独立起飞、预抬、放载后下降，
+# 并作为 native_position_pid 的基础增益，不能理解为仅修改降落。
+# CF3、CF5 保留当前值；CF4 只改变 Z：P 4->5，D 3.6->4，I 0.8->1.2。
+# 积分限幅、推力映射、限幅门槛、姿态控制保持使用基线配置。
+ctbr_controller_cf3:
+  independent_position_gain: [3.0, 3.0, 4.0]
+  independent_velocity_gain: [3.12, 3.12, 3.60]
+  independent_integral_gain: [0.80, 0.80, 0.80]
+ctbr_controller_cf4:
+  independent_position_gain: [4.0, 4.0, 5.0]
+  independent_velocity_gain: [3.6, 3.6, 4.0]
+  independent_integral_gain: [0.80, 0.80, 1.20]
+ctbr_controller_cf5:
+  independent_position_gain: [4.0, 4.0, 4.0]
+  independent_velocity_gain: [3.6, 3.6, 3.6]
+  independent_integral_gain: [0.80, 0.80, 0.80]

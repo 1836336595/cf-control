@@ -14,6 +14,24 @@ from native_position_pid import (position_integral_step, position_pid_feedback,
                                  validate_integral_velocity_weight)
 
 
+def validate_landing_feedforward_settings(enabled, tau_s, limits_rps):
+    """Validate the cooperative-lowering feedforward settings before flight."""
+    if not isinstance(enabled, (bool, np.bool_)):
+        raise ValueError("landing_attitude_feedforward_enabled must be boolean")
+    if isinstance(tau_s, (bool, np.bool_, str, bytes)):
+        raise ValueError("landing_attitude_feedforward_filter_tau_s must be finite and nonnegative")
+    tau = float(tau_s)
+    raw = np.asarray(limits_rps, dtype=object)
+    if (raw.shape != (3,) or any(isinstance(v, (bool, np.bool_, str, bytes)) for v in raw)):
+        raise ValueError("landing_attitude_feedforward_limit_rps must contain three positive numbers")
+    limits = np.asarray(raw, dtype=float)
+    if not math.isfinite(tau) or tau < 0.:
+        raise ValueError("landing_attitude_feedforward_filter_tau_s must be finite and nonnegative")
+    if not np.all(np.isfinite(limits)) or np.any(limits <= 0.):
+        raise ValueError("landing_attitude_feedforward_limit_rps must contain three positive numbers")
+    return bool(enabled), tau, limits.copy()
+
+
 @dataclass
 class VehicleForceCommand:
     """Force composition and diagnostics consumed by the geometric facade."""
@@ -34,6 +52,60 @@ class VehicleForceCommand:
 
 class TransportVehicleController:
     """Pure transport formulas sharing persistent state on their facade."""
+
+    def _reset_transport_landing_feedforward(self):
+        self._landing_feedforward_world = None
+        self.transport_landing_feedforward_diagnostics = {
+            "transport_landing_feedforward_active": False,
+            "transport_landing_feedforward_limit_active": False,
+            "transport_landing_feedforward_filter_tau_s": 0.,
+            "transport_landing_feedforward_gain": 1.,
+            "transport_landing_feedforward_raw": np.zeros(3),
+            "transport_landing_feedforward_applied": np.zeros(3),
+        }
+
+    def _shape_transport_landing_feedforward(self, raw_rate, rotation, target, elapsed):
+        """Bound the derivative input and filter in fixed world axes.
+
+        Only the feedforward is shaped. Attitude P/I and the final command
+        limits keep their own paths. The returned rate uses the desired body
+        frame, matching the log-difference convention.
+        """
+        active = (target.get("flight_validation_landing_stage") == "payload_lowering"
+                  and target.get("payload_landing_attitude_feedforward_enabled", False))
+        if not active:
+            self._reset_transport_landing_feedforward()
+            self.transport_landing_feedforward_diagnostics.update(
+                transport_landing_feedforward_raw=raw_rate.copy(),
+                transport_landing_feedforward_applied=raw_rate.copy())
+            return raw_rate
+        _, tau, limits = validate_landing_feedforward_settings(
+            target["payload_landing_attitude_feedforward_enabled"],
+            target["payload_landing_attitude_feedforward_filter_tau_s"],
+            target["payload_landing_attitude_feedforward_limit_rps"])
+        bounded = np.clip(raw_rate, -limits, limits)
+        previous = self._landing_feedforward_world
+        if previous is None:
+            previous = np.zeros(3)
+        alpha = 1. if tau == 0. else -math.expm1(-elapsed / tau)
+        filtered_world = previous + alpha * (rotation @ bounded - previous)
+        # A changing target frame must not defeat the per-axis rate budget.
+        filtered_body = rotation.T @ filtered_world
+        bounded_filtered = np.clip(filtered_body, -limits, limits)
+        gain = float(target.get("payload_landing_attitude_feedforward_gain", 1.))
+        if not math.isfinite(gain) or not 0. <= gain <= 1.:
+            raise ValueError("payload_landing_attitude_feedforward_gain must be between zero and one")
+        applied = gain * bounded_filtered
+        self._landing_feedforward_world = rotation @ bounded_filtered
+        self.transport_landing_feedforward_diagnostics.update(
+            transport_landing_feedforward_active=True,
+            transport_landing_feedforward_limit_active=bool(
+                np.any(np.abs(raw_rate) > limits) or np.any(np.abs(filtered_body) > limits)),
+            transport_landing_feedforward_filter_tau_s=tau,
+            transport_landing_feedforward_gain=gain,
+            transport_landing_feedforward_raw=raw_rate.copy(),
+            transport_landing_feedforward_applied=applied.copy())
+        return applied
 
     def reset_transport_attitude_integral(self):
         self.transport_attitude_integral_rate = np.zeros(3)
@@ -106,21 +178,33 @@ class TransportVehicleController:
         """
         stamp = target.get("attitude_control_time_s")
         stamp = None if stamp is None else float(stamp)
+        if not valid or stamp is not None and not math.isfinite(stamp):
+            self.previous_transport_rotation = None
+            self.previous_transport_rotation_time = None
+            self._reset_transport_landing_feedforward()
+            return np.zeros(3)
+        if not (target.get("flight_validation_landing_stage") == "payload_lowering"
+                and target.get("payload_landing_attitude_feedforward_enabled", False)):
+            self._reset_transport_landing_feedforward()
         previous = self.previous_transport_rotation
         if stamp is not None and self.previous_transport_rotation_time is not None:
             elapsed = stamp - self.previous_transport_rotation_time
             if elapsed == 0.:
+                # No derivative evidence: retain filter state without replaying
+                # its old output as a newly measured angular velocity.
+                self.transport_landing_feedforward_diagnostics.update(
+                    transport_landing_feedforward_raw=np.zeros(3),
+                    transport_landing_feedforward_applied=np.zeros(3),
+                    transport_landing_feedforward_limit_active=False)
                 return np.zeros(3)
-        if not valid or stamp is not None and not math.isfinite(stamp):
-            self.previous_transport_rotation = None
-            self.previous_transport_rotation_time = None
-            return np.zeros(3)
         self.previous_transport_rotation = rotation.copy()
         self.previous_transport_rotation_time = stamp
         if (previous is None or target.get("transport_filter_reset", False)
                 or not math.isfinite(elapsed) or not 0. < elapsed <= .10):
+            self._reset_transport_landing_feedforward()
             return np.zeros(3)
-        return so3_log(previous.T @ rotation) / elapsed
+        return self._shape_transport_landing_feedforward(
+            so3_log(previous.T @ rotation) / elapsed, rotation, target, elapsed)
 
     def reset_transport_position_pid(self):
         """Clear the transport-only native I without losing independent trim."""

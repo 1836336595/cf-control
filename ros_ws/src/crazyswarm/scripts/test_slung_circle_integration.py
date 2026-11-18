@@ -104,8 +104,12 @@ def test_hover_mode_keeps_static_pose_and_no_circle_acceleration(tmp_path):
 
 
 def test_circle_cannot_be_silently_cut_off_by_validation_deadline(tmp_path):
-    with pytest.raises(RuntimeError, match="circle|圆周"):
-        circle_case(tmp_path, flight_validation_enabled=True, flight_validation_transport_s=30.)
+    manager = circle_case(tmp_path, flight_validation_enabled=True, flight_validation_transport_s=30.)
+    try:
+        assert not manager._check_payload_flight_validation(30.)
+        assert manager.payload_circle_reference.end_time > 30.
+    finally:
+        manager.logger.close()
 
 
 def test_circle_requires_payload_yaw_control_for_inward_heading(tmp_path):
@@ -113,9 +117,16 @@ def test_circle_requires_payload_yaw_control_for_inward_heading(tmp_path):
         circle_case(tmp_path, yaw_channel_enabled=False)
 
 
-def test_circle_also_requires_enough_ordinary_hover_time_when_validation_is_off(tmp_path):
-    with pytest.raises(RuntimeError, match="circle|圆周"):
-        circle_case(tmp_path, trajectory={"mode":"circle", "speed_mps":.001})
+def test_long_circle_owns_completion_even_with_hover_deadline_disabled(tmp_path):
+    manager = circle_case(tmp_path, trajectory={"mode":"circle", "speed_mps":.001})
+    try:
+        vehicle = manager.vehicles[0]
+        vehicle.trajectory.phase = "hover"
+        vehicle.trajectory.phase_start_time = 0.
+        assert vehicle.trajectory.evaluate(vehicle.latest_state, 200.)["flight_phase"] == "hover"
+        assert manager.payload_flight_validation_enabled
+    finally:
+        manager.logger.close()
 
 
 def test_circle_feedforward_accounts_for_rotating_cables_without_double_centripetal(tmp_path):

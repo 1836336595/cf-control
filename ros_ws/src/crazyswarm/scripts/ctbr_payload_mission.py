@@ -240,6 +240,7 @@ class PayloadMissionMixin:
         if (not self.payload_flight_validation_enabled
                 or self.payload_validation_landing_started_time is not None
                 or not self.payload_transport_active
+                or self.payload_controlled_exit_reason
                 or self.payload_transport_start_time is None
                 or self.global_abort_reason):
             return False
@@ -248,14 +249,17 @@ class PayloadMissionMixin:
                for v in self.vehicles):
             return False
         elapsed = max(0.0, float(now) - self.payload_transport_start_time)
-        if elapsed < self.payload_flight_validation_transport_s:
+        mode = self.payload_circle_config.mode
+        if mode == "hover":
+            if elapsed < self.payload_flight_validation_transport_s:
+                return False
+        elif not self.payload_endpoint_sent or self.payload_fault_since is not None:
             return False
         self.payload_validation_handoff_time = self.payload_transport_start_time
         self.payload_validation_landing_started_time = float(now)
         rospy.loginfo(
-            "[实飞验证] flight_validation_complete：接管已运行 %.3f s（上限 %.3f s）；"
-            "三机从当前实测位置开始受控降落。",
-            elapsed, self.payload_flight_validation_transport_s,
+            "[吊运任务] %s：接管后 %.3f s，三机开始协同放载。",
+            "悬停计时结束" if mode == "hover" else mode + " 轨迹参考完成", elapsed,
         )
         self.payload_validation_landing_stage = "payload_lowering"
         self.payload_controlled_exit_reason = "payload_load: flight_validation_complete: %.3f s" % elapsed
@@ -424,6 +428,7 @@ class PayloadMissionMixin:
         self.payload_transport_goal_rotation = None
         self.payload_circle_reference = None
         self.payload_circle_state = None
+        self.payload_endpoint_sent = False
         self.payload_circle_landing_yaw = None
         self.payload_circle_previous_correction = None
         self.payload_transport_initial_link_units = None

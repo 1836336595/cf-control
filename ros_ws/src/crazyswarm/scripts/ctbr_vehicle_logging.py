@@ -233,6 +233,20 @@ class VehicleLoggingMixin:
         self._with_xyz(row, "position_error", command["position_error"])
         self._with_xyz(row, "velocity_error", command["velocity_error"])
         self._with_xyz(row, "desired_force", command["desired_force"])
+        for field in ("transport_landing_feedforward_active",
+                      "transport_landing_feedforward_limit_active", "landing_pid_active"):
+            row[field] = int(bool(command.get(field, False)))
+        row["transport_landing_feedforward_filter_tau_s"] = float(
+            command.get("transport_landing_feedforward_filter_tau_s", 0.))
+        row["transport_landing_feedforward_gain"] = float(
+            command.get("transport_landing_feedforward_gain", 1.))
+        row["payload_attitude_feedback_scale"] = float(
+            target.get("payload_attitude_feedback_scale", 1.))
+        for field in ("transport_landing_feedforward_raw", "transport_landing_feedforward_applied"):
+            self._with_xyz(row, field, command.get(field, np.zeros(3)))
+        gains = command.get("landing_pid_gains_z", np.full(3, math.nan))
+        for label, value in zip(("p", "d", "i"), gains):
+            row["landing_pid_gain_" + label + "_z"] = float(value)
         self._with_xyz(
             row, "desired_force_dot", command.get("desired_force_dot", np.zeros(3))
         )

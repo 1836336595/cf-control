@@ -989,8 +989,14 @@ class SlungLoadController:
         gravity = np.array([0., 0., self.config.gravity_mps2])
         gravity_wrench = np.concatenate((np.zeros(3),
             self.config.payload_mass_kg * rotation.T @ gravity))
-        control_wrench = (upsilon - self.config.se3_kx * psi_error
-                          - self.config.se3_kxtilde * psi_tilde + gravity_wrench)
+        attitude_scale = float(target.get("payload_attitude_feedback_scale", 1.))
+        if not math.isfinite(attitude_scale) or not 0. <= attitude_scale <= 1.:
+            return None
+        feedback_wrench = -self.config.se3_kx * psi_error - self.config.se3_kxtilde * psi_tilde
+        # Lowering changes only rotational feedback authority. Preserve the
+        # reference inertial feedforward, translational feedback and support.
+        feedback_wrench[:3] *= attitude_scale
+        control_wrench = upsilon + feedback_wrench + gravity_wrench
         desired_moment = self.config.se3_moment_limit_nm * np.tanh(
             control_wrench[:3] / self.config.se3_moment_limit_nm)
         desired_force = rotation @ (
@@ -1006,6 +1012,7 @@ class SlungLoadController:
             "payload_se3_psi_error": psi_error,
             "payload_se3_psi_tilde": psi_tilde,
             "payload_se3_control_wrench": control_wrench,
+            "payload_attitude_feedback_scale": attitude_scale,
         }
 
     def _internal_bias(self, matrix, payload_mass, gravity):

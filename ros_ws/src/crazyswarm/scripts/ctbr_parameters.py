@@ -12,6 +12,8 @@ _PARAMETER_MISSING = object()
 def payload_task_hover_duration(ordinary_duration, payload):
     """Reserve enough aircraft hover time for the payload-owned deadline."""
     ordinary_duration = float(ordinary_duration)
+    if payload.get("trajectory", {}).get("mode", "hover") != "hover":
+        return ordinary_duration  # The fleet releases these aircraft at the trajectory endpoint.
     if payload.get("flight_validation_enabled", False) is not True:
         return ordinary_duration
     duration = payload.get("flight_validation_transport_s", 10.)

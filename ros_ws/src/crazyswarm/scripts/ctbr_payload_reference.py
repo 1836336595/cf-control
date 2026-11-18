@@ -611,6 +611,14 @@ class PayloadReferenceMixin:
             ),
             "transport_blend_dot": transport_blend_dot,
         }
+        lowering_progress = (float(np.clip(smoothstep5_profile(
+            now - self.payload_landing_start_time, self.payload_landing_gain_transition_s)[0], 0., 1.))
+            if landing else 0.)
+        attitude_feedback_scale = 1. + lowering_progress * (
+            self.payload_landing_attitude_feedback_scale - 1.)
+        lowering_feedforward_gain = 1. + lowering_progress * (
+            self.payload_landing_feedforward_gain - 1.)
+        target["payload_attitude_feedback_scale"] = attitude_feedback_scale
         payload_control_dt = getattr(self, "payload_control_dt", now - self.last_tick)
         observer = getattr(self, "payload_state_observer", None)
         if hasattr(observer, "set_reference"):
@@ -724,6 +732,8 @@ class PayloadReferenceMixin:
                 "payload_yaw_enabled": self.payload_yaw_enabled,
                 "payload_desired_force": result["desired_force"],
                 "payload_desired_moment": result["desired_moment"],
+                "payload_attitude_feedback_scale": attitude_feedback_scale,
+                "payload_landing_attitude_feedforward_gain": lowering_feedforward_gain,
                 "transport_link_gain_scale": self.payload_transport_link_gain_scale,
                 "effective_transport_link_gain_scale": link_gain_scale,
                 "payload_target_velocity": payload_target_velocity.copy(),

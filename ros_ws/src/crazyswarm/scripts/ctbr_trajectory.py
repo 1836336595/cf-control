@@ -139,6 +139,7 @@ class CircularTrajectoryConfig:
     figure_eight_radius_m: float = 0.8
     # Peak angular speed of each smoothstep lobe, rad/s.
     figure_eight_angular_speed_radps: float = 0.55
+    wait_for_payload_trajectory: bool = False
 
 
 class CircularFlightTrajectory:
@@ -986,7 +987,7 @@ class CircularFlightTrajectory:
                 max_tilt_rad=cfg.takeoff_max_tilt_rad,
                 min_thrust=cfg.airborne_min_collective_thrust,
             )
-            if elapsed >= cfg.hover_duration_s:
+            if not cfg.wait_for_payload_trajectory and elapsed >= cfg.hover_duration_s:
                 self.landing_start_position = self._state_value(state, "position").copy()
                 self._transition(
                     "landing", now,

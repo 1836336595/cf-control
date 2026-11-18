@@ -21,6 +21,10 @@ ctbr_controller_cf3:
   independent_position_gain: [3.0, 3.0, 4.0]
   independent_velocity_gain: [3.12, 3.12, 3.60]
   independent_integral_gain: [0.80, 0.80, 0.80]
+  # 仅负载确认接地并释放后的独立下降生效；不改变运输/预抬的基础增益。
+  landing_position_gain_z: 4.0
+  landing_velocity_gain_z: 3.60
+  landing_integral_gain_z: 0.80
   independent_integral_limit: [0.20, 0.20, 0.20]
   independent_integral_gate: 0.20
   independent_max_feedback_acceleration: [6.0, 6.0, 8.0]
@@ -71,6 +75,11 @@ ctbr_controller_cf4:
   independent_position_gain: [4.0, 4.0, 4.0]
   independent_velocity_gain: [3.6, 3.6, 3.6]
   independent_integral_gain: [0.80, 0.80, 0.80]
+  # CF4 仅放载后下降加强 Z 偏差消除：I 从原 0.80 增为 1.60。
+  # 起飞/预抬与运输 native PID 继续使用上面的基础增益。
+  landing_position_gain_z: 5.0
+  landing_velocity_gain_z: 4.0
+  landing_integral_gain_z: 1.60
   independent_integral_limit: [0.20, 0.20, 0.20]
   independent_integral_gate: 0.20
   independent_max_feedback_acceleration: [6.0, 6.0, 8.0]
@@ -120,6 +129,9 @@ ctbr_controller_cf5:
   independent_position_gain: [4.0, 4.0, 4.0]
   independent_velocity_gain: [3.6, 3.6, 3.6]
   independent_integral_gain: [0.80, 0.80, 0.80]
+  landing_position_gain_z: 4.0
+  landing_velocity_gain_z: 3.60
+  landing_integral_gain_z: 0.80
   independent_integral_limit: [0.20, 0.20, 0.20]
   independent_integral_gate: 0.20
   independent_max_feedback_acceleration: [6.0, 6.0, 8.0]
